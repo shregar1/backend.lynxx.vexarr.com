@@ -1,3 +1,5 @@
+use crate::cluster::postgres::PostgresBus;
+use crate::cluster::ClusterBus;
 use crate::config::GatewayConfig;
 use crate::db::sqlite::seed_from_config_generic;
 use crate::db::Repository;
@@ -7,6 +9,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Row;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Postgres-backed repository. Used in production / multi-node deployments.
@@ -378,6 +381,10 @@ impl Repository for PostgresRepository {
 
     async fn seed_from_config(&self, config: &GatewayConfig) -> Result<(), GatewayError> {
         seed_from_config_generic(self, config).await
+    }
+
+    fn cluster_bus(&self) -> Arc<dyn ClusterBus> {
+        Arc::new(PostgresBus::new(self.pool.clone()))
     }
 }
 

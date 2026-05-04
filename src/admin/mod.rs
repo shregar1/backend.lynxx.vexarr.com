@@ -1,5 +1,6 @@
 pub mod routes;
 
+use crate::cluster::ClusterBus;
 use crate::db::Repository;
 use crate::health::HealthRegistry;
 use crate::plugins::PluginExecutor;
@@ -12,6 +13,7 @@ use chrono::Utc;
 use metrics_exporter_prometheus::PrometheusHandle;
 use routes::AdminState;
 use std::sync::Arc;
+use uuid::Uuid;
 
 pub fn admin_router(
     route_table: SharedRouteTable,
@@ -21,6 +23,8 @@ pub fn admin_router(
     metrics_handle: PrometheusHandle,
     reload: ReloadHandle,
     plugin_exec: Arc<PluginExecutor>,
+    bus: Arc<dyn ClusterBus>,
+    node_id: Uuid,
 ) -> Router {
     let state = AdminState {
         route_table,
@@ -31,6 +35,8 @@ pub fn admin_router(
         metrics_handle,
         reload,
         plugin_exec,
+        bus,
+        node_id,
     };
 
     Router::new()

@@ -14,6 +14,7 @@
 //! configuration. Consumers and targets are managed exclusively via the admin
 //! API.
 
+use crate::cluster::{ChangeEvent, ClusterBus};
 use crate::config::{load_config, GatewayConfig};
 use crate::db::Repository;
 use crate::error::GatewayError;
@@ -70,6 +71,8 @@ pub fn spawn_reloader(
     health: Arc<HealthRegistry>,
     lb: Arc<LoadBalancerRegistry>,
     plugin_exec: Arc<PluginExecutor>,
+    bus: Arc<dyn ClusterBus>,
+    node_id: Uuid,
 ) -> ReloadHandle {
     let (tx, mut rx) = mpsc::channel::<Trigger>(8);
 
@@ -79,6 +82,14 @@ pub fn spawn_reloader(
             let result =
                 run_reload(&config_path, &repo, &route_table, &health, &lb, &plugin_exec).await;
             tracing::info!(?result, "config reload complete");
+            if result.errors.is_empty() {
+                if let Err(e) = bus
+                    .publish(ChangeEvent::FullSync { origin: node_id })
+                    .await
+                {
+                    tracing::warn!(error = %e, "failed to publish FullSync after reload");
+                }
+            }
             let _ = resp.send(result);
         }
     });

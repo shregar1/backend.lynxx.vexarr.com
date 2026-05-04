@@ -1,3 +1,4 @@
+use crate::cluster::{ChangeEvent, ClusterBus};
 use crate::db::Repository;
 use crate::error::GatewayError;
 use crate::health::{HealthRegistry, ServiceHealth};
@@ -26,12 +27,30 @@ pub struct AdminState {
     pub metrics_handle: PrometheusHandle,
     pub reload: ReloadHandle,
     pub plugin_exec: Arc<PluginExecutor>,
+    pub bus: Arc<dyn ClusterBus>,
+    pub node_id: Uuid,
+}
+
+/// Publish a ChangeEvent on the cluster bus, logging but never failing the
+/// admin call if the bus is unhappy. We've already committed to the DB; the
+/// remote nodes will eventually reconcile via the next event or restart.
+async fn publish_event(state: &AdminState, event: ChangeEvent) {
+    if let Err(e) = state.bus.publish(event).await {
+        tracing::warn!(error = %e, "failed to publish cluster event");
+    }
 }
 
 pub async fn reload_handler(
     State(state): State<AdminState>,
 ) -> Result<Json<ReloadResult>, GatewayError> {
     let result = state.reload.trigger().await?;
+    publish_event(
+        &state,
+        ChangeEvent::FullSync {
+            origin: state.node_id,
+        },
+    )
+    .await;
     Ok(Json(result))
 }
 
@@ -140,6 +159,14 @@ pub async fn create_service(
         Vec::new(),
     );
     tracing::info!(id = %service.id, "service created");
+    publish_event(
+        &state,
+        ChangeEvent::ServiceCreated {
+            id: service.id,
+            origin: state.node_id,
+        },
+    )
+    .await;
     Ok(Json(service))
 }
 
@@ -194,6 +221,14 @@ pub async fn update_service(
         );
     }
 
+    publish_event(
+        &state,
+        ChangeEvent::ServiceUpdated {
+            id,
+            origin: state.node_id,
+        },
+    )
+    .await;
     Ok(Json(updated))
 }
 
@@ -206,6 +241,14 @@ pub async fn delete_service(
         state.route_table.remove_service(&id);
         state.health.unregister(&id);
         state.lb.remove_service(&id);
+        publish_event(
+            &state,
+            ChangeEvent::ServiceDeleted {
+                id,
+                origin: state.node_id,
+            },
+        )
+        .await;
         Ok(Json(serde_json::json!({"deleted": true})))
     } else {
         Err(GatewayError::NotFound(format!("service {id}")))
@@ -246,6 +289,14 @@ pub async fn create_route(
     state.repo.create_route(&route).await?;
     state.route_table.add_route(route.clone());
     tracing::info!(id = %route.id, "route created");
+    publish_event(
+        &state,
+        ChangeEvent::RouteCreated {
+            id: route.id,
+            origin: state.node_id,
+        },
+    )
+    .await;
     Ok(Json(route))
 }
 
@@ -283,6 +334,14 @@ pub async fn update_route(
 
     state.repo.update_route(&id, &updated).await?;
     state.route_table.update_route(&id, updated.clone());
+    publish_event(
+        &state,
+        ChangeEvent::RouteUpdated {
+            id,
+            origin: state.node_id,
+        },
+    )
+    .await;
     Ok(Json(updated))
 }
 
@@ -293,6 +352,14 @@ pub async fn delete_route(
     let deleted = state.repo.delete_route(&id).await?;
     if deleted {
         state.route_table.remove_route(&id);
+        publish_event(
+            &state,
+            ChangeEvent::RouteDeleted {
+                id,
+                origin: state.node_id,
+            },
+        )
+        .await;
         Ok(Json(serde_json::json!({"deleted": true})))
     } else {
         Err(GatewayError::NotFound(format!("route {id}")))
@@ -325,6 +392,13 @@ pub async fn create_plugin(
     };
     state.repo.create_plugin(&plugin).await?;
     state.plugin_exec.rebuild(&state.repo).await?;
+    publish_event(
+        &state,
+        ChangeEvent::PluginChanged {
+            origin: state.node_id,
+        },
+    )
+    .await;
     Ok(Json(plugin))
 }
 
@@ -366,6 +440,13 @@ pub async fn update_plugin(
     };
     state.repo.update_plugin(&id, &updated).await?;
     state.plugin_exec.rebuild(&state.repo).await?;
+    publish_event(
+        &state,
+        ChangeEvent::PluginChanged {
+            origin: state.node_id,
+        },
+    )
+    .await;
     Ok(Json(updated))
 }
 
@@ -376,6 +457,13 @@ pub async fn delete_plugin(
     let deleted = state.repo.delete_plugin(&id).await?;
     if deleted {
         state.plugin_exec.rebuild(&state.repo).await?;
+        publish_event(
+            &state,
+            ChangeEvent::PluginChanged {
+                origin: state.node_id,
+            },
+        )
+        .await;
         Ok(Json(serde_json::json!({"deleted": true})))
     } else {
         Err(GatewayError::NotFound(format!("plugin {id}")))
@@ -412,6 +500,13 @@ pub async fn create_consumer(
 ) -> Result<Json<Consumer>, GatewayError> {
     let consumer = Consumer::new(input.username, input.custom_id);
     state.repo.create_consumer(&consumer).await?;
+    publish_event(
+        &state,
+        ChangeEvent::ConsumerChanged {
+            origin: state.node_id,
+        },
+    )
+    .await;
     Ok(Json(consumer))
 }
 
@@ -475,6 +570,14 @@ pub async fn create_service_target(
     state.repo.create_target(&target).await?;
     rebuild_lb(&state, service_id).await?;
     tracing::info!(target_id = %target.id, service_id = %service_id, "target created");
+    publish_event(
+        &state,
+        ChangeEvent::TargetChanged {
+            service_id,
+            origin: state.node_id,
+        },
+    )
+    .await;
     Ok(Json(target))
 }
 
@@ -501,6 +604,14 @@ pub async fn update_target_handler(
 
     state.repo.update_target(&id, &updated).await?;
     rebuild_lb(&state, updated.service_id).await?;
+    publish_event(
+        &state,
+        ChangeEvent::TargetChanged {
+            service_id: updated.service_id,
+            origin: state.node_id,
+        },
+    )
+    .await;
     Ok(Json(updated))
 }
 
@@ -516,6 +627,14 @@ pub async fn delete_target_handler(
     let deleted = state.repo.delete_target(&id).await?;
     if deleted {
         rebuild_lb(&state, existing.service_id).await?;
+        publish_event(
+            &state,
+            ChangeEvent::TargetChanged {
+                service_id: existing.service_id,
+                origin: state.node_id,
+            },
+        )
+        .await;
         Ok(Json(serde_json::json!({"deleted": true})))
     } else {
         Err(GatewayError::NotFound(format!("target {id}")))

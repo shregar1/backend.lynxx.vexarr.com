@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 mod admin;
+mod cluster;
 mod config;
 mod db;
 mod error;
@@ -11,16 +12,18 @@ mod plugins;
 mod proxy;
 mod reload;
 
+use crate::cluster::ChangeEvent;
 use crate::config::load_config;
 use crate::db::Repository;
 use crate::health::{HealthConfig, HealthRegistry};
 use crate::plugins::PluginExecutor;
 use crate::proxy::handler::{proxy_handler, ProxyState};
 use crate::proxy::loadbalancer::{LbStrategy, LoadBalancerRegistry};
-use crate::proxy::router::RouteTable;
+use crate::proxy::router::{RouteTable, SharedRouteTable};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -110,6 +113,21 @@ async fn main() -> anyhow::Result<()> {
         5_000,
     );
 
+    // ---------- cluster bus ----------
+    let node_id = Uuid::new_v4();
+    tracing::info!(node_id = %node_id, "cluster node id assigned");
+    let bus = repo.cluster_bus();
+
+    let _subscriber_handle = spawn_cluster_subscriber(
+        node_id,
+        bus.clone(),
+        repo.clone(),
+        route_table.clone(),
+        health.clone(),
+        lb.clone(),
+        plugin_exec.clone(),
+    );
+
     let reload_handle = reload::spawn_reloader(
         "config.toml".to_string(),
         repo.clone(),
@@ -117,6 +135,8 @@ async fn main() -> anyhow::Result<()> {
         health.clone(),
         lb.clone(),
         plugin_exec.clone(),
+        bus.clone(),
+        node_id,
     );
     reload::install_sighup_handler(reload_handle.clone());
 
@@ -128,6 +148,8 @@ async fn main() -> anyhow::Result<()> {
         metrics_handle,
         reload_handle,
         plugin_exec,
+        bus,
+        node_id,
     );
 
     let proxy_addr = format!("0.0.0.0:{}", config.gateway.proxy_port);
@@ -152,5 +174,131 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Spawn a task that subscribes to the cluster bus and refreshes local
+/// in-memory state when a remote node mutates the DB. Self-published
+/// events are filtered by `node_id` inside the bus implementation.
+fn spawn_cluster_subscriber(
+    node_id: Uuid,
+    bus: Arc<dyn cluster::ClusterBus>,
+    repo: Arc<dyn Repository>,
+    route_table: SharedRouteTable,
+    health: Arc<HealthRegistry>,
+    lb: Arc<LoadBalancerRegistry>,
+    plugin_exec: Arc<PluginExecutor>,
+) -> tokio::task::JoinHandle<()> {
+    let handler: cluster::ChangeHandler = Arc::new(move |event: ChangeEvent| {
+        let repo = repo.clone();
+        let route_table = route_table.clone();
+        let health = health.clone();
+        let lb = lb.clone();
+        let plugin_exec = plugin_exec.clone();
+        Box::pin(async move {
+            if let Err(e) = apply_remote_event(
+                event,
+                &repo,
+                &route_table,
+                &health,
+                &lb,
+                &plugin_exec,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "failed to apply remote cluster event");
+            }
+        })
+    });
+    bus.subscribe(node_id, handler)
+}
+
+/// Apply a remote `ChangeEvent` by re-fetching the affected entity from the
+/// repository and updating local in-memory state. The DB is the source of
+/// truth — events only carry IDs.
+async fn apply_remote_event(
+    event: ChangeEvent,
+    repo: &Arc<dyn Repository>,
+    route_table: &SharedRouteTable,
+    health: &Arc<HealthRegistry>,
+    lb: &Arc<LoadBalancerRegistry>,
+    plugin_exec: &Arc<PluginExecutor>,
+) -> Result<(), error::GatewayError> {
+    match event {
+        ChangeEvent::ServiceCreated { id, .. } | ChangeEvent::ServiceUpdated { id, .. } => {
+            match repo.get_service(&id).await? {
+                Some(svc) => {
+                    let is_new = route_table.get_service(&id).is_none();
+                    route_table.add_service(svc.clone());
+                    if is_new {
+                        health.register(svc.id);
+                    }
+                    let targets = repo.list_targets_for_service(&id).await?;
+                    lb.rebuild_for_service(svc.id, LbStrategy::from_str(&svc.lb_strategy), targets);
+                }
+                None => {
+                    tracing::warn!(
+                        service_id = %id,
+                        "remote ServiceCreated/Updated but row missing in DB"
+                    );
+                }
+            }
+        }
+        ChangeEvent::ServiceDeleted { id, .. } => {
+            route_table.remove_service(&id);
+            health.unregister(&id);
+            lb.remove_service(&id);
+        }
+        ChangeEvent::RouteCreated { id, .. } | ChangeEvent::RouteUpdated { id, .. } => {
+            match repo.get_route(&id).await? {
+                Some(route) => {
+                    route_table.add_route(route);
+                }
+                None => {
+                    tracing::warn!(
+                        route_id = %id,
+                        "remote RouteCreated/Updated but row missing in DB"
+                    );
+                }
+            }
+        }
+        ChangeEvent::RouteDeleted { id, .. } => {
+            route_table.remove_route(&id);
+        }
+        ChangeEvent::TargetChanged { service_id, .. } => {
+            match route_table.get_service(&service_id) {
+                Some(svc) => {
+                    let targets = repo.list_targets_for_service(&service_id).await?;
+                    lb.rebuild_for_service(
+                        service_id,
+                        LbStrategy::from_str(&svc.lb_strategy),
+                        targets,
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        service_id = %service_id,
+                        "remote TargetChanged for unknown service; ignoring"
+                    );
+                }
+            }
+        }
+        ChangeEvent::PluginChanged { .. } => {
+            plugin_exec.rebuild(repo).await?;
+        }
+        ChangeEvent::ConsumerChanged { .. } => {
+            // Consumers are read on-demand by basic-auth/key-auth/hmac-auth
+            // plugins; nothing in-memory to refresh.
+        }
+        ChangeEvent::FullSync { .. } => {
+            route_table.load_from_repo(repo.as_ref()).await?;
+            for svc in route_table.list_services() {
+                health.register(svc.id);
+                let targets = repo.list_targets_for_service(&svc.id).await?;
+                lb.rebuild_for_service(svc.id, LbStrategy::from_str(&svc.lb_strategy), targets);
+            }
+            plugin_exec.rebuild(repo).await?;
+        }
+    }
     Ok(())
 }

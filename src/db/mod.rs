@@ -1,6 +1,7 @@
 pub mod postgres;
 pub mod sqlite;
 
+use crate::cluster::ClusterBus;
 use crate::config::GatewayConfig;
 use crate::error::GatewayError;
 use crate::models::{Consumer, PluginInstance, Route, Service, Target};
@@ -51,6 +52,10 @@ pub trait Repository: Send + Sync {
 
     async fn is_empty(&self) -> Result<bool, GatewayError>;
     async fn seed_from_config(&self, config: &GatewayConfig) -> Result<(), GatewayError>;
+
+    /// Return a cluster bus for fan-out of admin mutations across nodes.
+    /// Postgres uses LISTEN/NOTIFY; SQLite polls a `_sync_log` table.
+    fn cluster_bus(&self) -> Arc<dyn ClusterBus>;
 }
 
 /// Build the appropriate repository implementation from the configured URL.

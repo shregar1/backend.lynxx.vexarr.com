@@ -1,3 +1,5 @@
+use crate::cluster::sqlite::SqliteBus;
+use crate::cluster::ClusterBus;
 use crate::config::GatewayConfig;
 use crate::db::Repository;
 use crate::error::GatewayError;
@@ -7,6 +9,7 @@ use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
 use std::str::FromStr;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// SQLite-backed repository. Source of truth for services, routes, plugins,
@@ -382,6 +385,10 @@ impl Repository for SqliteRepository {
 
     async fn seed_from_config(&self, config: &GatewayConfig) -> Result<(), GatewayError> {
         seed_from_config_generic(self, config).await
+    }
+
+    fn cluster_bus(&self) -> Arc<dyn ClusterBus> {
+        Arc::new(SqliteBus::new(self.pool.clone()))
     }
 }
 
