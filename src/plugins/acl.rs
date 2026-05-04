@@ -22,7 +22,7 @@ pub struct AclPlugin {
 impl AclPlugin {
     pub fn from_config(
         cfg: &serde_json::Value,
-        _repo: Option<Arc<Repository>>,
+        _repo: Option<Arc<dyn Repository>>,
     ) -> Result<Self, GatewayError> {
         let allow = parse_list(cfg.get("allow"));
         let deny = parse_list(cfg.get("deny"));

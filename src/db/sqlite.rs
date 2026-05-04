@@ -1,6 +1,8 @@
 use crate::config::GatewayConfig;
+use crate::db::Repository;
 use crate::error::GatewayError;
 use crate::models::{Consumer, PluginInstance, Route, Service, Target};
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
@@ -8,19 +10,19 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 /// SQLite-backed repository. Source of truth for services, routes, plugins,
-/// and consumers. The hot-path `RouteTable` is rebuilt from this on startup.
-pub struct Repository {
+/// and consumers when the gateway runs in single-node / dev mode.
+pub struct SqliteRepository {
     pool: SqlitePool,
 }
 
-impl Repository {
+impl SqliteRepository {
     pub async fn new(database_url: &str) -> Result<Self, GatewayError> {
         let pool = SqlitePoolOptions::new()
             .max_connections(8)
             .connect(database_url)
             .await?;
 
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        sqlx::migrate!("./migrations/sqlite").run(&pool).await?;
 
         Ok(Self { pool })
     }
@@ -28,10 +30,13 @@ impl Repository {
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+}
 
+#[async_trait]
+impl Repository for SqliteRepository {
     // ---------- services ----------
 
-    pub async fn list_services(&self) -> Result<Vec<Service>, GatewayError> {
+    async fn list_services(&self) -> Result<Vec<Service>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, created_at, updated_at \
              FROM services",
@@ -42,7 +47,7 @@ impl Repository {
         rows.into_iter().map(row_to_service).collect()
     }
 
-    pub async fn get_service(&self, id: &Uuid) -> Result<Option<Service>, GatewayError> {
+    async fn get_service(&self, id: &Uuid) -> Result<Option<Service>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, created_at, updated_at \
              FROM services WHERE id = ?",
@@ -54,7 +59,7 @@ impl Repository {
         row.map(row_to_service).transpose()
     }
 
-    pub async fn create_service(&self, svc: &Service) -> Result<(), GatewayError> {
+    async fn create_service(&self, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
             "INSERT INTO services (id, name, url, retries, connect_timeout_ms, lb_strategy, enabled, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
@@ -72,7 +77,7 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn update_service(&self, id: &Uuid, svc: &Service) -> Result<(), GatewayError> {
+    async fn update_service(&self, id: &Uuid, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
             "UPDATE services SET name = ?, url = ?, retries = ?, connect_timeout_ms = ?, lb_strategy = ?, updated_at = ? \
              WHERE id = ?",
@@ -89,7 +94,7 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn delete_service(&self, id: &Uuid) -> Result<bool, GatewayError> {
+    async fn delete_service(&self, id: &Uuid) -> Result<bool, GatewayError> {
         let result = sqlx::query("DELETE FROM services WHERE id = ?")
             .bind(id.to_string())
             .execute(&self.pool)
@@ -99,7 +104,7 @@ impl Repository {
 
     // ---------- targets ----------
 
-    pub async fn list_targets(&self) -> Result<Vec<Target>, GatewayError> {
+    async fn list_targets(&self) -> Result<Vec<Target>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, service_id, url, weight, enabled, created_at, updated_at FROM targets",
         )
@@ -108,7 +113,7 @@ impl Repository {
         rows.into_iter().map(row_to_target).collect()
     }
 
-    pub async fn list_targets_for_service(
+    async fn list_targets_for_service(
         &self,
         service_id: &Uuid,
     ) -> Result<Vec<Target>, GatewayError> {
@@ -122,7 +127,7 @@ impl Repository {
         rows.into_iter().map(row_to_target).collect()
     }
 
-    pub async fn get_target(&self, id: &Uuid) -> Result<Option<Target>, GatewayError> {
+    async fn get_target(&self, id: &Uuid) -> Result<Option<Target>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, service_id, url, weight, enabled, created_at, updated_at \
              FROM targets WHERE id = ?",
@@ -133,7 +138,7 @@ impl Repository {
         row.map(row_to_target).transpose()
     }
 
-    pub async fn create_target(&self, target: &Target) -> Result<(), GatewayError> {
+    async fn create_target(&self, target: &Target) -> Result<(), GatewayError> {
         sqlx::query(
             "INSERT INTO targets (id, service_id, url, weight, enabled, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -150,7 +155,7 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn update_target(&self, id: &Uuid, target: &Target) -> Result<(), GatewayError> {
+    async fn update_target(&self, id: &Uuid, target: &Target) -> Result<(), GatewayError> {
         sqlx::query(
             "UPDATE targets SET url = ?, weight = ?, enabled = ?, updated_at = ? WHERE id = ?",
         )
@@ -164,7 +169,7 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn delete_target(&self, id: &Uuid) -> Result<bool, GatewayError> {
+    async fn delete_target(&self, id: &Uuid) -> Result<bool, GatewayError> {
         let result = sqlx::query("DELETE FROM targets WHERE id = ?")
             .bind(id.to_string())
             .execute(&self.pool)
@@ -174,7 +179,7 @@ impl Repository {
 
     // ---------- routes ----------
 
-    pub async fn list_routes(&self) -> Result<Vec<Route>, GatewayError> {
+    async fn list_routes(&self) -> Result<Vec<Route>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, service_id, paths, methods, strip_path, created_at, updated_at \
              FROM routes",
@@ -185,7 +190,7 @@ impl Repository {
         rows.into_iter().map(row_to_route).collect()
     }
 
-    pub async fn get_route(&self, id: &Uuid) -> Result<Option<Route>, GatewayError> {
+    async fn get_route(&self, id: &Uuid) -> Result<Option<Route>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, service_id, paths, methods, strip_path, created_at, updated_at \
              FROM routes WHERE id = ?",
@@ -197,7 +202,7 @@ impl Repository {
         row.map(row_to_route).transpose()
     }
 
-    pub async fn create_route(&self, route: &Route) -> Result<(), GatewayError> {
+    async fn create_route(&self, route: &Route) -> Result<(), GatewayError> {
         let paths = serde_json::to_string(&route.paths)
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
         let methods = serde_json::to_string(&route.methods)
@@ -221,7 +226,7 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn update_route(&self, id: &Uuid, route: &Route) -> Result<(), GatewayError> {
+    async fn update_route(&self, id: &Uuid, route: &Route) -> Result<(), GatewayError> {
         let paths = serde_json::to_string(&route.paths)
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
         let methods = serde_json::to_string(&route.methods)
@@ -242,7 +247,7 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn delete_route(&self, id: &Uuid) -> Result<bool, GatewayError> {
+    async fn delete_route(&self, id: &Uuid) -> Result<bool, GatewayError> {
         let result = sqlx::query("DELETE FROM routes WHERE id = ?")
             .bind(id.to_string())
             .execute(&self.pool)
@@ -252,7 +257,7 @@ impl Repository {
 
     // ---------- plugins ----------
 
-    pub async fn list_plugins(&self) -> Result<Vec<PluginInstance>, GatewayError> {
+    async fn list_plugins(&self) -> Result<Vec<PluginInstance>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, name, service_id, route_id, enabled, config, created_at, updated_at FROM plugins",
         )
@@ -262,7 +267,7 @@ impl Repository {
         rows.into_iter().map(row_to_plugin).collect()
     }
 
-    pub async fn get_plugin(&self, id: &Uuid) -> Result<Option<PluginInstance>, GatewayError> {
+    async fn get_plugin(&self, id: &Uuid) -> Result<Option<PluginInstance>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, name, service_id, route_id, enabled, config, created_at, updated_at \
              FROM plugins WHERE id = ?",
@@ -273,7 +278,7 @@ impl Repository {
         row.map(row_to_plugin).transpose()
     }
 
-    pub async fn create_plugin(&self, plugin: &PluginInstance) -> Result<(), GatewayError> {
+    async fn create_plugin(&self, plugin: &PluginInstance) -> Result<(), GatewayError> {
         let config = serde_json::to_string(&plugin.config)
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
 
@@ -294,7 +299,7 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn update_plugin(
+    async fn update_plugin(
         &self,
         id: &Uuid,
         plugin: &PluginInstance,
@@ -317,7 +322,7 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn delete_plugin(&self, id: &Uuid) -> Result<bool, GatewayError> {
+    async fn delete_plugin(&self, id: &Uuid) -> Result<bool, GatewayError> {
         let result = sqlx::query("DELETE FROM plugins WHERE id = ?")
             .bind(id.to_string())
             .execute(&self.pool)
@@ -327,7 +332,7 @@ impl Repository {
 
     // ---------- consumers ----------
 
-    pub async fn list_consumers(&self) -> Result<Vec<Consumer>, GatewayError> {
+    async fn list_consumers(&self) -> Result<Vec<Consumer>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, username, custom_id, api_key, created_at, updated_at FROM consumers",
         )
@@ -337,7 +342,7 @@ impl Repository {
         rows.into_iter().map(row_to_consumer).collect()
     }
 
-    pub async fn create_consumer(&self, consumer: &Consumer) -> Result<(), GatewayError> {
+    async fn create_consumer(&self, consumer: &Consumer) -> Result<(), GatewayError> {
         sqlx::query(
             "INSERT INTO consumers (id, username, custom_id, api_key, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?)",
@@ -353,7 +358,7 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn delete_consumer(&self, id: &Uuid) -> Result<bool, GatewayError> {
+    async fn delete_consumer(&self, id: &Uuid) -> Result<bool, GatewayError> {
         let result = sqlx::query("DELETE FROM consumers WHERE id = ?")
             .bind(id.to_string())
             .execute(&self.pool)
@@ -363,9 +368,7 @@ impl Repository {
 
     // ---------- bootstrap helpers ----------
 
-    /// Returns true if every persisted table is empty. Used to gate first-boot
-    /// seeding from the TOML config.
-    pub async fn is_empty(&self) -> Result<bool, GatewayError> {
+    async fn is_empty(&self) -> Result<bool, GatewayError> {
         let total: i64 = sqlx::query_scalar(
             "SELECT (SELECT COUNT(*) FROM services) \
                   + (SELECT COUNT(*) FROM routes) \
@@ -377,59 +380,65 @@ impl Repository {
         Ok(total == 0)
     }
 
-    /// Idempotent seed from the parsed TOML config. Caller should guard with
-    /// `is_empty()` so this only runs on a fresh DB.
-    pub async fn seed_from_config(&self, config: &GatewayConfig) -> Result<(), GatewayError> {
-        // services first so route FKs resolve
-        let mut services_by_name = std::collections::HashMap::new();
-        for svc_cfg in &config.services {
-            let service = Service::new(
-                svc_cfg.name.clone(),
-                svc_cfg.url.clone(),
-                svc_cfg.retries,
-                svc_cfg.connect_timeout_ms,
-            );
-            self.create_service(&service).await?;
-            services_by_name.insert(service.name.clone(), service.id);
-        }
-
-        for rt_cfg in &config.routes {
-            let Some(service_id) = services_by_name.get(&rt_cfg.service).copied() else {
-                tracing::warn!(
-                    service = %rt_cfg.service,
-                    "skipping seed route; referenced service not in config"
-                );
-                continue;
-            };
-            let route = Route::new(
-                rt_cfg.paths.clone(),
-                rt_cfg.methods.clone(),
-                service_id,
-                rt_cfg.strip_path,
-            );
-            self.create_route(&route).await?;
-        }
-
-        for plugin_cfg in &config.plugins {
-            let now = Utc::now();
-            // Convert toml::Table to serde_json::Value for storage.
-            let config_value =
-                serde_json::to_value(&plugin_cfg.config).unwrap_or(serde_json::Value::Null);
-            let plugin = PluginInstance {
-                id: Uuid::new_v4(),
-                name: plugin_cfg.name.clone(),
-                service_id: None,
-                route_id: None,
-                enabled: plugin_cfg.enabled,
-                config: config_value,
-                created_at: now,
-                updated_at: now,
-            };
-            self.create_plugin(&plugin).await?;
-        }
-
-        Ok(())
+    async fn seed_from_config(&self, config: &GatewayConfig) -> Result<(), GatewayError> {
+        seed_from_config_generic(self, config).await
     }
+}
+
+/// Shared seed logic — both repos express the same flow against the trait
+/// surface, so we factor it out.
+pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
+    repo: &R,
+    config: &GatewayConfig,
+) -> Result<(), GatewayError> {
+    // services first so route FKs resolve
+    let mut services_by_name = std::collections::HashMap::new();
+    for svc_cfg in &config.services {
+        let service = Service::new(
+            svc_cfg.name.clone(),
+            svc_cfg.url.clone(),
+            svc_cfg.retries,
+            svc_cfg.connect_timeout_ms,
+        );
+        repo.create_service(&service).await?;
+        services_by_name.insert(service.name.clone(), service.id);
+    }
+
+    for rt_cfg in &config.routes {
+        let Some(service_id) = services_by_name.get(&rt_cfg.service).copied() else {
+            tracing::warn!(
+                service = %rt_cfg.service,
+                "skipping seed route; referenced service not in config"
+            );
+            continue;
+        };
+        let route = Route::new(
+            rt_cfg.paths.clone(),
+            rt_cfg.methods.clone(),
+            service_id,
+            rt_cfg.strip_path,
+        );
+        repo.create_route(&route).await?;
+    }
+
+    for plugin_cfg in &config.plugins {
+        let now = Utc::now();
+        let config_value =
+            serde_json::to_value(&plugin_cfg.config).unwrap_or(serde_json::Value::Null);
+        let plugin = PluginInstance {
+            id: Uuid::new_v4(),
+            name: plugin_cfg.name.clone(),
+            service_id: None,
+            route_id: None,
+            enabled: plugin_cfg.enabled,
+            config: config_value,
+            created_at: now,
+            updated_at: now,
+        };
+        repo.create_plugin(&plugin).await?;
+    }
+
+    Ok(())
 }
 
 // ---------- row mappers ----------

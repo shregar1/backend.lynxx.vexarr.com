@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 pub fn admin_router(
     route_table: SharedRouteTable,
-    repo: Arc<Repository>,
+    repo: Arc<dyn Repository>,
     health: Arc<HealthRegistry>,
     lb: Arc<LoadBalancerRegistry>,
     metrics_handle: PrometheusHandle,

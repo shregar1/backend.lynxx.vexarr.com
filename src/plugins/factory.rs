@@ -29,7 +29,7 @@ use std::sync::Arc;
 pub fn build(
     name: &str,
     config: &serde_json::Value,
-    repo: Option<Arc<Repository>>,
+    repo: Option<Arc<dyn Repository>>,
 ) -> Result<Arc<dyn Plugin>, GatewayError> {
     let plugin: Arc<dyn Plugin> = match name {
         "rate-limit" => Arc::new(RateLimitPlugin::from_config(config)?),

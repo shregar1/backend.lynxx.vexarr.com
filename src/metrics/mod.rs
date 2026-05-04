@@ -106,7 +106,7 @@ pub fn health_status_value(status: HealthStatus) -> f64 {
 /// inside the registry.
 pub fn spawn_metrics_collector(
     route_table: SharedRouteTable,
-    repo: Arc<Repository>,
+    repo: Arc<dyn Repository>,
     registry: Arc<HealthRegistry>,
     interval_ms: u64,
 ) {

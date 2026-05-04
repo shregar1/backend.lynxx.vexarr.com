@@ -38,7 +38,7 @@ struct CacheEntry {
 impl Oauth2IntrospectPlugin {
     pub fn from_config(
         cfg: &serde_json::Value,
-        _repo: Option<Arc<Repository>>,
+        _repo: Option<Arc<dyn Repository>>,
     ) -> Result<Self, GatewayError> {
         let introspection_url = cfg
             .get("introspection_url")

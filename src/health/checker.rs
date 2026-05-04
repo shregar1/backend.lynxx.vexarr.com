@@ -9,7 +9,7 @@ use std::time::Duration;
 pub fn spawn_health_checker(
     route_table: SharedRouteTable,
     registry: Arc<HealthRegistry>,
-    repo: Arc<Repository>,
+    repo: Arc<dyn Repository>,
     lb: Arc<LoadBalancerRegistry>,
     client: reqwest::Client,
     interval_ms: u64,
@@ -29,7 +29,7 @@ pub fn spawn_health_checker(
 async fn run_once(
     route_table: &SharedRouteTable,
     registry: &Arc<HealthRegistry>,
-    repo: &Arc<Repository>,
+    repo: &Arc<dyn Repository>,
     lb: &Arc<LoadBalancerRegistry>,
     client: &reqwest::Client,
 ) {

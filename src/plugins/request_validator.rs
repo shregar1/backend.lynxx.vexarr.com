@@ -22,7 +22,7 @@ pub struct RequestValidatorPlugin {
 impl RequestValidatorPlugin {
     pub fn from_config(
         cfg: &serde_json::Value,
-        _repo: Option<Arc<Repository>>,
+        _repo: Option<Arc<dyn Repository>>,
     ) -> Result<Self, GatewayError> {
         let body_schema = cfg.get("body_schema").ok_or_else(|| {
             GatewayError::BadRequest("request-validator: `body_schema` is required".into())

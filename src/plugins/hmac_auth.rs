@@ -23,7 +23,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// secret (same convention as basic-auth and key-auth). A real
 /// deployment should add a separate `hmac_secret` column.
 pub struct HmacAuthPlugin {
-    repo: Option<Arc<Repository>>,
+    repo: Option<Arc<dyn Repository>>,
     algorithms: Vec<String>,
     clock_skew: i64,
     validate_body: bool,
@@ -32,7 +32,7 @@ pub struct HmacAuthPlugin {
 impl HmacAuthPlugin {
     pub fn from_config(
         cfg: &serde_json::Value,
-        repo: Option<Arc<Repository>>,
+        repo: Option<Arc<dyn Repository>>,
     ) -> Result<Self, GatewayError> {
         let algorithms = cfg
             .get("algorithms")

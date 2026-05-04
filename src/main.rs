@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
         "starting lynx gateway"
     );
 
-    let repo = Arc::new(Repository::new(&config.gateway.database_url).await?);
+    let repo: Arc<dyn Repository> = crate::db::connect(&config.gateway.database_url).await?;
     tracing::info!(database_url = %config.gateway.database_url, "database ready");
 
     if config.gateway.seed_from_config && repo.is_empty().await? {
@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let route_table = Arc::new(RouteTable::new());
-    let (svc_count, route_count) = route_table.load_from_repo(&repo).await?;
+    let (svc_count, route_count) = route_table.load_from_repo(repo.as_ref()).await?;
     let plugin_count = repo.list_plugins().await?.len();
     let consumer_count = repo.list_consumers().await?.len();
     tracing::info!(

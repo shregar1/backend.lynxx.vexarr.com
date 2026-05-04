@@ -34,7 +34,7 @@ pub struct SessionPlugin {
 impl SessionPlugin {
     pub fn from_config(
         cfg: &serde_json::Value,
-        _repo: Option<Arc<Repository>>,
+        _repo: Option<Arc<dyn Repository>>,
     ) -> Result<Self, GatewayError> {
         let secret = cfg
             .get("secret")

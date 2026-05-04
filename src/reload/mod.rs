@@ -65,7 +65,7 @@ impl ReloadHandle {
 
 pub fn spawn_reloader(
     config_path: String,
-    repo: Arc<Repository>,
+    repo: Arc<dyn Repository>,
     route_table: SharedRouteTable,
     health: Arc<HealthRegistry>,
     lb: Arc<LoadBalancerRegistry>,
@@ -113,7 +113,7 @@ pub fn install_sighup_handler(_handle: ReloadHandle) {
 
 async fn run_reload(
     config_path: &str,
-    repo: &Arc<Repository>,
+    repo: &Arc<dyn Repository>,
     route_table: &SharedRouteTable,
     health: &Arc<HealthRegistry>,
     lb: &Arc<LoadBalancerRegistry>,
@@ -152,7 +152,7 @@ async fn run_reload(
 
 async fn diff_services(
     cfg: &GatewayConfig,
-    repo: &Arc<Repository>,
+    repo: &Arc<dyn Repository>,
     route_table: &SharedRouteTable,
     health: &Arc<HealthRegistry>,
     lb: &Arc<LoadBalancerRegistry>,
@@ -243,7 +243,7 @@ fn route_key(service_name: &str, paths: &[String]) -> String {
 
 async fn diff_routes(
     cfg: &GatewayConfig,
-    repo: &Arc<Repository>,
+    repo: &Arc<dyn Repository>,
     route_table: &SharedRouteTable,
     result: &mut ReloadResult,
 ) -> Result<(), GatewayError> {
@@ -337,7 +337,7 @@ async fn diff_routes(
 
 async fn diff_plugins(
     cfg: &GatewayConfig,
-    repo: &Arc<Repository>,
+    repo: &Arc<dyn Repository>,
     result: &mut ReloadResult,
 ) -> Result<(), GatewayError> {
     // Reload only manages global (unscoped) plugins; service- and route-scoped

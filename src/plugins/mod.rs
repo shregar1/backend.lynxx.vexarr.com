@@ -71,7 +71,7 @@ impl PluginExecutor {
     /// Re-fetch all plugin rows from the DB and (re)build every enabled plugin.
     /// Disabled plugins are skipped. Build failures are logged but do not abort
     /// the rebuild — other plugins still load.
-    pub async fn rebuild(&self, repo: &Arc<Repository>) -> Result<(), GatewayError> {
+    pub async fn rebuild(&self, repo: &Arc<dyn Repository>) -> Result<(), GatewayError> {
         let rows = repo.list_plugins().await?;
         let mut built: HashMap<Uuid, Arc<dyn Plugin>> = HashMap::with_capacity(rows.len());
         let mut index = PluginIndex::default();

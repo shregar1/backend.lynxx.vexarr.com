@@ -15,14 +15,14 @@ use std::sync::Arc;
 /// creation time) as the basic-auth password. This keeps us off a schema
 /// migration. Replace with a real password-hash column if/when needed.
 pub struct BasicAuthPlugin {
-    repo: Option<Arc<Repository>>,
+    repo: Option<Arc<dyn Repository>>,
     hide_credentials: bool,
 }
 
 impl BasicAuthPlugin {
     pub fn from_config(
         cfg: &serde_json::Value,
-        repo: Option<Arc<Repository>>,
+        repo: Option<Arc<dyn Repository>>,
     ) -> Result<Self, GatewayError> {
         let hide_credentials = cfg
             .get("hide_credentials")

@@ -10,7 +10,7 @@ use std::sync::Arc;
 /// consumer in the DB. On match the consumer identity is forwarded as
 /// `X-Consumer-Username` / `X-Consumer-Id`.
 pub struct KeyAuthPlugin {
-    repo: Option<Arc<Repository>>,
+    repo: Option<Arc<dyn Repository>>,
     key_names: Vec<String>,
     key_in_header: bool,
     key_in_query: bool,
@@ -20,7 +20,7 @@ pub struct KeyAuthPlugin {
 impl KeyAuthPlugin {
     pub fn from_config(
         cfg: &serde_json::Value,
-        repo: Option<Arc<Repository>>,
+        repo: Option<Arc<dyn Repository>>,
     ) -> Result<Self, GatewayError> {
         let key_names = cfg
             .get("key_names")

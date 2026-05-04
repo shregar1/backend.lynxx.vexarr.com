@@ -19,7 +19,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct AdminState {
     pub route_table: SharedRouteTable,
-    pub repo: Arc<Repository>,
+    pub repo: Arc<dyn Repository>,
     pub health: Arc<HealthRegistry>,
     pub lb: Arc<LoadBalancerRegistry>,
     pub start_time: chrono::DateTime<Utc>,

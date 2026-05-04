@@ -20,7 +20,7 @@ impl RouteTable {
 
     /// Bulk-load services and routes from the persistent repository,
     /// replacing whatever is currently in memory.
-    pub async fn load_from_repo(&self, repo: &Repository) -> Result<(usize, usize), GatewayError> {
+    pub async fn load_from_repo(&self, repo: &dyn Repository) -> Result<(usize, usize), GatewayError> {
         let services = repo.list_services().await?;
         let routes = repo.list_routes().await?;
 
