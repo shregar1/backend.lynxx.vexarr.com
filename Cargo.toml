@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "bench"]
+
 [package]
 name = "lynx-gateway"
 version = "0.1.0"
@@ -46,3 +49,6 @@ path = "src/main.rs"
 [[bin]]
 name = "lynxx-ingress"
 path = "src/ingress/main.rs"
+
+[dev-dependencies]
+tempfile = "3"

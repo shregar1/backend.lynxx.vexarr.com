@@ -30,22 +30,49 @@ use uuid::Uuid;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum ChangeEvent {
-    ServiceCreated { id: Uuid, origin: Uuid },
-    ServiceUpdated { id: Uuid, origin: Uuid },
-    ServiceDeleted { id: Uuid, origin: Uuid },
-    RouteCreated { id: Uuid, origin: Uuid },
-    RouteUpdated { id: Uuid, origin: Uuid },
-    RouteDeleted { id: Uuid, origin: Uuid },
+    ServiceCreated {
+        id: Uuid,
+        origin: Uuid,
+    },
+    ServiceUpdated {
+        id: Uuid,
+        origin: Uuid,
+    },
+    ServiceDeleted {
+        id: Uuid,
+        origin: Uuid,
+    },
+    RouteCreated {
+        id: Uuid,
+        origin: Uuid,
+    },
+    RouteUpdated {
+        id: Uuid,
+        origin: Uuid,
+    },
+    RouteDeleted {
+        id: Uuid,
+        origin: Uuid,
+    },
     /// Any add/update/delete of a target. Listeners refetch all targets for
     /// the service and rebuild its load balancer.
-    TargetChanged { service_id: Uuid, origin: Uuid },
+    TargetChanged {
+        service_id: Uuid,
+        origin: Uuid,
+    },
     /// Any plugin CRUD — listeners rebuild the entire plugin executor.
-    PluginChanged { origin: Uuid },
+    PluginChanged {
+        origin: Uuid,
+    },
     /// Any consumer CRUD — currently a no-op on subscribers (consumers are
     /// read on-demand from the repo by the auth plugins).
-    ConsumerChanged { origin: Uuid },
+    ConsumerChanged {
+        origin: Uuid,
+    },
     /// Emitted after `/reload` — listeners refetch all entities.
-    FullSync { origin: Uuid },
+    FullSync {
+        origin: Uuid,
+    },
 }
 
 impl ChangeEvent {
@@ -84,9 +111,8 @@ impl ChangeEvent {
 }
 
 /// Boxed async handler invoked once per remote event.
-pub type ChangeHandler = Arc<
-    dyn Fn(ChangeEvent) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync,
->;
+pub type ChangeHandler =
+    Arc<dyn Fn(ChangeEvent) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Pub/sub bus implemented by each storage backend.
 #[async_trait]

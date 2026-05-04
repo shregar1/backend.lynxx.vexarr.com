@@ -300,11 +300,7 @@ impl Repository for PostgresRepository {
         Ok(())
     }
 
-    async fn update_plugin(
-        &self,
-        id: &Uuid,
-        plugin: &PluginInstance,
-    ) -> Result<(), GatewayError> {
+    async fn update_plugin(&self, id: &Uuid, plugin: &PluginInstance) -> Result<(), GatewayError> {
         sqlx::query(
             "UPDATE plugins SET name = $1, service_id = $2, route_id = $3, enabled = $4, config = $5, updated_at = $6 \
              WHERE id = $7",

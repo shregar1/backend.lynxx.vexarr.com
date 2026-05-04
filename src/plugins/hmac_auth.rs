@@ -72,7 +72,9 @@ fn unauthorized(msg: impl Into<String>) -> PluginError {
 /// Parse `key="value"` pairs out of `Hmac key="v", key2="v2"`. Bare
 /// (unquoted) values are tolerated for resilience.
 fn parse_auth_params(raw: &str) -> Option<HashMap<String, String>> {
-    let body = raw.strip_prefix("Hmac ").or_else(|| raw.strip_prefix("hmac "))?;
+    let body = raw
+        .strip_prefix("Hmac ")
+        .or_else(|| raw.strip_prefix("hmac "))?;
     let mut out = HashMap::new();
     for part in body.split(',') {
         let part = part.trim();
@@ -117,10 +119,7 @@ impl Plugin for HmacAuthPlugin {
         "hmac-auth"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         let raw = req
             .headers()
             .get("authorization")
@@ -129,7 +128,9 @@ impl Plugin for HmacAuthPlugin {
             .to_string();
         let params = parse_auth_params(&raw)
             .ok_or_else(|| unauthorized("malformed Hmac authorization header"))?;
-        let username = params.get("username").ok_or_else(|| unauthorized("missing username"))?;
+        let username = params
+            .get("username")
+            .ok_or_else(|| unauthorized("missing username"))?;
         let algorithm = params
             .get("algorithm")
             .map(|s| s.to_ascii_lowercase())
@@ -141,13 +142,18 @@ impl Plugin for HmacAuthPlugin {
             .get("headers")
             .map(|s| s.split_whitespace().map(String::from).collect())
             .unwrap_or_else(|| vec!["date".into()]);
-        let provided_sig = params.get("signature").ok_or_else(|| unauthorized("missing signature"))?;
+        let provided_sig = params
+            .get("signature")
+            .ok_or_else(|| unauthorized("missing signature"))?;
         let provided_sig = B64
             .decode(provided_sig)
             .map_err(|_| unauthorized("signature not valid base64"))?;
 
         // Clock-skew check on Date if present in the signed list.
-        if signed_headers.iter().any(|h| h.eq_ignore_ascii_case("date")) {
+        if signed_headers
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case("date"))
+        {
             let date_raw = req
                 .headers()
                 .get("date")
@@ -155,7 +161,9 @@ impl Plugin for HmacAuthPlugin {
                 .ok_or_else(|| unauthorized("missing Date header"))?;
             let parsed = DateTime::parse_from_rfc2822(date_raw)
                 .map_err(|_| unauthorized("invalid Date header"))?;
-            let delta = (Utc::now() - parsed.with_timezone(&Utc)).num_seconds().abs();
+            let delta = (Utc::now() - parsed.with_timezone(&Utc))
+                .num_seconds()
+                .abs();
             if delta > self.clock_skew {
                 return Err(unauthorized(format!("clock skew {delta}s exceeds limit")));
             }

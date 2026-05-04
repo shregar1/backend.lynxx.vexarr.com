@@ -54,9 +54,9 @@ fn parse_cidr_list(val: Option<&serde_json::Value>) -> Result<Vec<IpNet>, Gatewa
     };
     let mut out = Vec::with_capacity(arr.len());
     for v in arr {
-        let s = v
-            .as_str()
-            .ok_or_else(|| GatewayError::BadRequest("ip_restriction: cidr must be string".into()))?;
+        let s = v.as_str().ok_or_else(|| {
+            GatewayError::BadRequest("ip_restriction: cidr must be string".into())
+        })?;
         // Allow bare IP without prefix.
         let net = if s.contains('/') {
             IpNet::from_str(s)
@@ -77,10 +77,7 @@ impl Plugin for IpRestrictionPlugin {
         "ip-restriction"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         let ip = Self::extract_client_ip(req);
 
         if self.deny.iter().any(|net| net.contains(&ip)) {

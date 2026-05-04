@@ -30,10 +30,7 @@ impl Plugin for BotDetectionPlugin {
         "bot-detection"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         let ua = req
             .headers()
             .get(axum::http::header::USER_AGENT)

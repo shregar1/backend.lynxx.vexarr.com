@@ -34,14 +34,8 @@ pub type BoxBody = http_body_util::Full<Bytes>;
 #[async_trait]
 pub trait Plugin: Send + Sync {
     fn name(&self) -> &str;
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError>;
-    async fn on_response(
-        &self,
-        resp: &mut Response<BoxBody>,
-    ) -> Result<(), PluginError>;
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError>;
+    async fn on_response(&self, resp: &mut Response<BoxBody>) -> Result<(), PluginError>;
 }
 
 /// Index of which plugin instance ids apply at each scope.
@@ -98,11 +92,7 @@ impl PluginExecutor {
                     index.by_route.entry(route_id).or_default().push(row.id);
                 }
                 (Some(service_id), None) => {
-                    index
-                        .by_service
-                        .entry(service_id)
-                        .or_default()
-                        .push(row.id);
+                    index.by_service.entry(service_id).or_default().push(row.id);
                 }
                 (None, None) => {
                     index.global.push(row.id);

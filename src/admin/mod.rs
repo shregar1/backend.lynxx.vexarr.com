@@ -40,7 +40,10 @@ pub fn admin_router(
     };
 
     Router::new()
-        .route("/services", get(routes::list_services).post(routes::create_service))
+        .route(
+            "/services",
+            get(routes::list_services).post(routes::create_service),
+        )
         .route(
             "/services/:id",
             get(routes::get_service)
@@ -54,17 +57,22 @@ pub fn admin_router(
         .route("/targets", get(routes::list_all_targets))
         .route(
             "/targets/:id",
-            axum::routing::put(routes::update_target_handler)
-                .delete(routes::delete_target_handler),
+            axum::routing::put(routes::update_target_handler).delete(routes::delete_target_handler),
         )
-        .route("/routes", get(routes::list_routes).post(routes::create_route))
+        .route(
+            "/routes",
+            get(routes::list_routes).post(routes::create_route),
+        )
         .route(
             "/routes/:id",
             get(routes::get_route)
                 .put(routes::update_route)
                 .delete(routes::delete_route),
         )
-        .route("/plugins", get(routes::list_plugins).post(routes::create_plugin))
+        .route(
+            "/plugins",
+            get(routes::list_plugins).post(routes::create_plugin),
+        )
         .route(
             "/plugins/:id",
             get(routes::get_plugin)

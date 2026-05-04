@@ -164,8 +164,7 @@ impl LoadBalancerRegistry {
         targets: Vec<Target>,
     ) {
         let lb = ServiceLoadBalancer::new(strategy, targets);
-        self.inner
-            .insert(service_id, Arc::new(RwLock::new(lb)));
+        self.inner.insert(service_id, Arc::new(RwLock::new(lb)));
     }
 
     pub fn pick(&self, service_id: &Uuid) -> Option<Arc<TargetState>> {

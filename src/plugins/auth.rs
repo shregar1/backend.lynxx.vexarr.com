@@ -40,10 +40,7 @@ impl AuthPlugin {
         if let Some(arr) = cfg.get("api_keys").and_then(|v| v.as_array()) {
             for entry in arr {
                 let key = entry.get("key").and_then(|v| v.as_str());
-                let consumer = entry
-                    .get("consumer")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let consumer = entry.get("consumer").and_then(|v| v.as_str()).unwrap_or("");
                 if let Some(k) = key {
                     plugin.add_api_key(k.to_string(), consumer.to_string());
                 }
@@ -76,10 +73,7 @@ impl Plugin for AuthPlugin {
         "auth"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         if let Some(key) = req.headers().get("x-api-key") {
             let key = key
                 .to_str()
@@ -97,15 +91,10 @@ impl Plugin for AuthPlugin {
             }
         }
 
-        Err(PluginError::Unauthorized(
-            "no credentials provided".into(),
-        ))
+        Err(PluginError::Unauthorized("no credentials provided".into()))
     }
 
-    async fn on_response(
-        &self,
-        _resp: &mut Response<BoxBody>,
-    ) -> Result<(), PluginError> {
+    async fn on_response(&self, _resp: &mut Response<BoxBody>) -> Result<(), PluginError> {
         Ok(())
     }
 }

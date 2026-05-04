@@ -48,10 +48,7 @@ impl Plugin for BasicAuthPlugin {
         "basic-auth"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         let raw = req
             .headers()
             .get("authorization")
@@ -74,9 +71,9 @@ impl Plugin for BasicAuthPlugin {
             .await
             .map_err(|e| PluginError::Internal(format!("consumer lookup: {e}")))?;
 
-        let matched = consumers.into_iter().find(|c| {
-            c.username == username && c.api_key.as_deref() == Some(password)
-        });
+        let matched = consumers
+            .into_iter()
+            .find(|c| c.username == username && c.api_key.as_deref() == Some(password));
         let consumer = matched.ok_or_else(Self::unauthorized)?;
 
         if let Ok(v) = HeaderValue::from_str(&consumer.username) {

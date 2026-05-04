@@ -82,10 +82,7 @@ impl Plugin for RequestTransformerPlugin {
         "request-transformer"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         apply_transforms(req.headers_mut(), &self.add, &self.remove, &self.replace);
         Ok(())
     }

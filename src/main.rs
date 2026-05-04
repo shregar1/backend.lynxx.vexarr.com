@@ -28,9 +28,10 @@ use uuid::Uuid;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("lynx_gateway=info,tower_http=info")
-        }))
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("lynx_gateway=info,tower_http=info")),
+        )
         .init();
 
     let metrics_handle = metrics::install();
@@ -108,12 +109,7 @@ async fn main() -> anyhow::Result<()> {
         .fallback(proxy_handler)
         .with_state(proxy_state);
 
-    metrics::spawn_metrics_collector(
-        route_table.clone(),
-        repo.clone(),
-        health.clone(),
-        5_000,
-    );
+    metrics::spawn_metrics_collector(route_table.clone(), repo.clone(), health.clone(), 5_000);
 
     // ---------- cluster bus ----------
     let node_id = Uuid::new_v4();
@@ -198,15 +194,8 @@ fn spawn_cluster_subscriber(
         let lb = lb.clone();
         let plugin_exec = plugin_exec.clone();
         Box::pin(async move {
-            if let Err(e) = apply_remote_event(
-                event,
-                &repo,
-                &route_table,
-                &health,
-                &lb,
-                &plugin_exec,
-            )
-            .await
+            if let Err(e) =
+                apply_remote_event(event, &repo, &route_table, &health, &lb, &plugin_exec).await
             {
                 tracing::warn!(error = %e, "failed to apply remote cluster event");
             }

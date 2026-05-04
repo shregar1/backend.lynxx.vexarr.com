@@ -145,8 +145,12 @@ pub async fn create_service(
     State(state): State<AdminState>,
     Json(input): Json<CreateService>,
 ) -> Result<Json<Service>, GatewayError> {
-    let mut service =
-        Service::new(input.name, input.url, input.retries, input.connect_timeout_ms);
+    let mut service = Service::new(
+        input.name,
+        input.url,
+        input.retries,
+        input.connect_timeout_ms,
+    );
     if let Some(s) = input.lb_strategy {
         service.lb_strategy = s;
     }
@@ -214,11 +218,9 @@ pub async fn update_service(
 
     if strategy_changed {
         let targets = state.repo.list_targets_for_service(&id).await?;
-        state.lb.rebuild_for_service(
-            id,
-            LbStrategy::from_str(&updated.lb_strategy),
-            targets,
-        );
+        state
+            .lb
+            .rebuild_for_service(id, LbStrategy::from_str(&updated.lb_strategy), targets);
     }
 
     publish_event(
@@ -285,7 +287,12 @@ pub async fn create_route(
         )));
     }
 
-    let route = Route::new(input.paths, input.methods, input.service_id, input.strip_path);
+    let route = Route::new(
+        input.paths,
+        input.methods,
+        input.service_id,
+        input.strip_path,
+    );
     state.repo.create_route(&route).await?;
     state.route_table.add_route(route.clone());
     tracing::info!(id = %route.id, "route created");
@@ -531,11 +538,9 @@ async fn rebuild_lb(state: &AdminState, service_id: Uuid) -> Result<(), GatewayE
         .get_service(&service_id)
         .ok_or_else(|| GatewayError::NotFound(format!("service {service_id}")))?;
     let targets = state.repo.list_targets_for_service(&service_id).await?;
-    state.lb.rebuild_for_service(
-        service_id,
-        LbStrategy::from_str(&svc.lb_strategy),
-        targets,
-    );
+    state
+        .lb
+        .rebuild_for_service(service_id, LbStrategy::from_str(&svc.lb_strategy), targets);
     Ok(())
 }
 

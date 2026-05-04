@@ -106,12 +106,8 @@ impl IntoResponse for GatewayError {
                 }
                 PluginError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
                 PluginError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
-                PluginError::PayloadTooLarge(msg) => {
-                    (StatusCode::PAYLOAD_TOO_LARGE, msg.clone())
-                }
-                PluginError::Internal(msg) => {
-                    (StatusCode::INTERNAL_SERVER_ERROR, msg.clone())
-                }
+                PluginError::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
+                PluginError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
                 PluginError::ShortCircuit { .. } => unreachable!("handled above"),
             },
             GatewayError::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
@@ -119,9 +115,7 @@ impl IntoResponse for GatewayError {
             GatewayError::ConfigError(_)
             | GatewayError::Internal(_)
             | GatewayError::Sqlx(_)
-            | GatewayError::Migrate(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
-            }
+            | GatewayError::Migrate(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
         };
 
         let body = json!({ "error": message });

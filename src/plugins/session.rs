@@ -87,10 +87,7 @@ impl SessionPlugin {
 
         let (username, expires) = payload.split_once('|')?;
         let expires_at: u64 = expires.parse().ok()?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()?
-            .as_secs();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
         if expires_at < now {
             return None;
         }
@@ -111,10 +108,7 @@ impl Plugin for SessionPlugin {
         "session"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         let cookie_header = match req.headers().get("cookie").and_then(|v| v.to_str().ok()) {
             Some(s) => s.to_string(),
             None => return Ok(()),

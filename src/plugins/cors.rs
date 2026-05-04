@@ -38,21 +38,18 @@ impl Plugin for CorsPlugin {
         "cors"
     }
 
-    async fn on_request(
-        &self,
-        _req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, _req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         Ok(())
     }
 
-    async fn on_response(
-        &self,
-        resp: &mut Response<BoxBody>,
-    ) -> Result<(), PluginError> {
+    async fn on_response(&self, resp: &mut Response<BoxBody>) -> Result<(), PluginError> {
         let origin = if self.allow_origins.contains(&"*".to_string()) {
             "*"
         } else {
-            self.allow_origins.first().map(|s| s.as_str()).unwrap_or("*")
+            self.allow_origins
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or("*")
         };
 
         let headers = resp.headers_mut();
@@ -62,8 +59,7 @@ impl Plugin for CorsPlugin {
         );
         headers.insert(
             header::ACCESS_CONTROL_ALLOW_METHODS,
-            HeaderValue::from_str(&self.allow_methods)
-                .unwrap_or(HeaderValue::from_static("GET")),
+            HeaderValue::from_str(&self.allow_methods).unwrap_or(HeaderValue::from_static("GET")),
         );
         headers.insert(
             header::ACCESS_CONTROL_ALLOW_HEADERS,

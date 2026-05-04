@@ -50,10 +50,7 @@ impl Plugin for RequestTerminationPlugin {
         "request-termination"
     }
 
-    async fn on_request(
-        &self,
-        _req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, _req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         Err(PluginError::ShortCircuit {
             status: self.status,
             headers: vec![("content-type".into(), self.content_type.clone())],

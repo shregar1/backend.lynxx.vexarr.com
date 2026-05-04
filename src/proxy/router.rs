@@ -20,7 +20,10 @@ impl RouteTable {
 
     /// Bulk-load services and routes from the persistent repository,
     /// replacing whatever is currently in memory.
-    pub async fn load_from_repo(&self, repo: &dyn Repository) -> Result<(usize, usize), GatewayError> {
+    pub async fn load_from_repo(
+        &self,
+        repo: &dyn Repository,
+    ) -> Result<(usize, usize), GatewayError> {
         let services = repo.list_services().await?;
         let routes = repo.list_routes().await?;
 
@@ -130,11 +133,7 @@ impl RouteTable {
         None
     }
 
-    pub fn resolve_upstream_path(
-        &self,
-        route: &Route,
-        original_path: &str,
-    ) -> String {
+    pub fn resolve_upstream_path(&self, route: &Route, original_path: &str) -> String {
         if route.strip_path {
             for prefix in &route.paths {
                 let prefix = prefix.trim_end_matches('*');

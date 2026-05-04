@@ -44,7 +44,9 @@ impl Oauth2IntrospectPlugin {
             .get("introspection_url")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                GatewayError::BadRequest("oauth2-introspect: `introspection_url` is required".into())
+                GatewayError::BadRequest(
+                    "oauth2-introspect: `introspection_url` is required".into(),
+                )
             })?
             .to_string();
         let client_id = cfg
@@ -92,7 +94,9 @@ impl Oauth2IntrospectPlugin {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
-            .map_err(|e| GatewayError::BadRequest(format!("oauth2-introspect: build client: {e}")))?;
+            .map_err(|e| {
+                GatewayError::BadRequest(format!("oauth2-introspect: build client: {e}"))
+            })?;
 
         Ok(Self {
             introspection_url,
@@ -142,15 +146,12 @@ impl Oauth2IntrospectPlugin {
             .json()
             .await
             .map_err(|e| PluginError::Internal(format!("introspect parse: {e}")))?;
-        let active = body.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
-        let sub = body
-            .get("sub")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let scope = body
-            .get("scope")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let active = body
+            .get("active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let sub = body.get("sub").and_then(|v| v.as_str()).map(String::from);
+        let scope = body.get("scope").and_then(|v| v.as_str()).map(String::from);
         Ok(CacheEntry {
             sub,
             scope,
@@ -163,8 +164,9 @@ impl Oauth2IntrospectPlugin {
         if self.required_scopes.is_empty() {
             return true;
         }
-        let granted: std::collections::HashSet<&str> =
-            scope.map(|s| s.split_whitespace().collect()).unwrap_or_default();
+        let granted: std::collections::HashSet<&str> = scope
+            .map(|s| s.split_whitespace().collect())
+            .unwrap_or_default();
         self.required_scopes
             .iter()
             .all(|req| granted.contains(req.as_str()))
@@ -177,10 +179,7 @@ impl Plugin for Oauth2IntrospectPlugin {
         "oauth2-introspect"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         let raw = req
             .headers()
             .get(&self.header_name)

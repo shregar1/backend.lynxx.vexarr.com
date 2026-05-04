@@ -52,9 +52,7 @@ pub fn build(
         "request-validator" => Arc::new(RequestValidatorPlugin::from_config(config, repo)?),
         "session" => Arc::new(SessionPlugin::from_config(config, repo)?),
         other => {
-            return Err(GatewayError::BadRequest(format!(
-                "unknown plugin: {other}"
-            )));
+            return Err(GatewayError::BadRequest(format!("unknown plugin: {other}")));
         }
     };
     Ok(plugin)

@@ -61,16 +61,10 @@ pub fn describe() {
         "lynxx_target_health",
         "Per-target health: 0=Healthy, 1=Unhealthy."
     );
-    metrics::describe_gauge!(
-        "lynxx_services_total",
-        "Number of configured services."
-    );
+    metrics::describe_gauge!("lynxx_services_total", "Number of configured services.");
     metrics::describe_gauge!("lynxx_routes_total", "Number of configured routes.");
     metrics::describe_gauge!("lynxx_plugins_total", "Number of configured plugins.");
-    metrics::describe_gauge!(
-        "lynxx_consumers_total",
-        "Number of configured consumers."
-    );
+    metrics::describe_gauge!("lynxx_consumers_total", "Number of configured consumers.");
 }
 
 /// Bucket an HTTP status code into a Prometheus label value.
@@ -117,8 +111,7 @@ pub fn spawn_metrics_collector(
 
             let services = route_table.list_services();
             metrics::gauge!("lynxx_services_total").set(services.len() as f64);
-            metrics::gauge!("lynxx_routes_total")
-                .set(route_table.list_routes().len() as f64);
+            metrics::gauge!("lynxx_routes_total").set(route_table.list_routes().len() as f64);
 
             match repo.list_plugins().await {
                 Ok(plugins) => {
@@ -129,8 +122,7 @@ pub fn spawn_metrics_collector(
 
             match repo.list_consumers().await {
                 Ok(consumers) => {
-                    metrics::gauge!("lynxx_consumers_total")
-                        .set(consumers.len() as f64);
+                    metrics::gauge!("lynxx_consumers_total").set(consumers.len() as f64);
                 }
                 Err(e) => tracing::warn!("metrics: failed to list consumers: {e}"),
             }

@@ -71,11 +71,7 @@ async fn run_once(
                 .increment(1);
             }
             Err(e) => {
-                registry.record_failure(
-                    &svc.id,
-                    &svc.name,
-                    format!("health check error: {e}"),
-                );
+                registry.record_failure(&svc.id, &svc.name, format!("health check error: {e}"));
                 metrics::counter!(
                     "lynxx_health_checks_total",
                     "service" => svc.name.clone(),

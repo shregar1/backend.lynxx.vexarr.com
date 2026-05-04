@@ -116,7 +116,11 @@ pub async fn proxy_handler(
         .map_err(GatewayError::PluginError)?;
 
     let upstream_path = state.route_table.resolve_upstream_path(&route, &path);
-    let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+    let query = req
+        .uri()
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
     let upstream_url = format!(
         "{}{upstream_path}{query}",
         upstream_base.trim_end_matches('/')
@@ -245,9 +249,11 @@ pub async fn proxy_handler(
                 "target" => target_label.clone(),
             )
             .record(start.elapsed().as_secs_f64());
-            state
-                .health
-                .record_failure(&service.id, &svc_name, format!("upstream send error: {e}"));
+            state.health.record_failure(
+                &service.id,
+                &svc_name,
+                format!("upstream send error: {e}"),
+            );
             return Err(GatewayError::UpstreamError(e.to_string()));
         }
     };
@@ -280,9 +286,11 @@ pub async fn proxy_handler(
                 "target" => target_label.clone(),
             )
             .record(start.elapsed().as_secs_f64());
-            state
-                .health
-                .record_failure(&service.id, &svc_name, format!("upstream body error: {e}"));
+            state.health.record_failure(
+                &service.id,
+                &svc_name,
+                format!("upstream body error: {e}"),
+            );
             return Err(GatewayError::UpstreamError(e.to_string()));
         }
     };

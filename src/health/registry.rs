@@ -202,9 +202,7 @@ impl HealthRegistry {
                 let elapsed_ok = entry
                     .opened_at
                     .map(|t| {
-                        Utc::now()
-                            .signed_duration_since(t)
-                            .num_milliseconds() as u64
+                        Utc::now().signed_duration_since(t).num_milliseconds() as u64
                             > open_duration_ms
                     })
                     .unwrap_or(true);

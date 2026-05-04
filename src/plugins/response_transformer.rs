@@ -27,10 +27,7 @@ impl Plugin for ResponseTransformerPlugin {
         "response-transformer"
     }
 
-    async fn on_request(
-        &self,
-        _req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, _req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         Ok(())
     }
 

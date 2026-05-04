@@ -50,9 +50,11 @@ impl ClusterBus for SqliteBus {
         tokio::spawn(async move {
             // Skip whatever is already in the log on startup — those are
             // historical events we don't want to replay.
-            let mut last_seen: i64 = match sqlx::query("SELECT COALESCE(MAX(seq), 0) AS m FROM _sync_log")
-                .fetch_one(&pool)
-                .await
+            let mut last_seen: i64 = match sqlx::query(
+                "SELECT COALESCE(MAX(seq), 0) AS m FROM _sync_log",
+            )
+            .fetch_one(&pool)
+            .await
             {
                 Ok(row) => row.try_get::<i64, _>("m").unwrap_or(0),
                 Err(e) => {

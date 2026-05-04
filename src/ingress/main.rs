@@ -54,8 +54,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    let admin_url = std::env::var("LYNXX_ADMIN_URL")
-        .unwrap_or_else(|_| "http://localhost:9001".to_string());
+    let admin_url =
+        std::env::var("LYNXX_ADMIN_URL").unwrap_or_else(|_| "http://localhost:9001".to_string());
     let namespace = std::env::var("KUBE_NAMESPACE").ok();
 
     tracing::info!(%admin_url, ?namespace, "starting lynxx-ingress controller");
@@ -113,4 +113,3 @@ async fn main() -> Result<()> {
     tokio::join!(svc_ctrl, route_ctrl, plugin_ctrl);
     Ok(())
 }
-

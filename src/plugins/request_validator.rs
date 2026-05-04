@@ -51,7 +51,12 @@ impl RequestValidatorPlugin {
 
     fn content_type_matches(&self, ct: Option<&str>) -> bool {
         let Some(ct) = ct else { return false };
-        let head = ct.split(';').next().unwrap_or(ct).trim().to_ascii_lowercase();
+        let head = ct
+            .split(';')
+            .next()
+            .unwrap_or(ct)
+            .trim()
+            .to_ascii_lowercase();
         self.content_types.iter().any(|c| c == &head)
     }
 }
@@ -70,10 +75,7 @@ impl Plugin for RequestValidatorPlugin {
         "request-validator"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         let ct = req
             .headers()
             .get("content-type")

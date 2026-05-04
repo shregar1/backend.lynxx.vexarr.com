@@ -85,10 +85,7 @@ impl Plugin for KeyAuthPlugin {
         "key-auth"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         let (key, source) = self
             .extract_key(req)
             .ok_or_else(|| PluginError::Unauthorized("missing api key".into()))?;

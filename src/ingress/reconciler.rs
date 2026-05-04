@@ -36,7 +36,10 @@ pub async fn reconcile_service(
 
     if obj.metadata.deletion_timestamp.is_some() {
         if let Some((_, id)) = ctx.state.svc_map.remove(&k) {
-            ctx.client.delete_service(id).await.map_err(anyhow::Error::from)?;
+            ctx.client
+                .delete_service(id)
+                .await
+                .map_err(anyhow::Error::from)?;
             tracing::info!(?k, %id, "deleted service");
         }
         return Ok(Action::await_change());
@@ -79,7 +82,10 @@ pub async fn reconcile_route(
 
     if obj.metadata.deletion_timestamp.is_some() {
         if let Some((_, id)) = ctx.state.route_map.remove(&k) {
-            ctx.client.delete_route(id).await.map_err(anyhow::Error::from)?;
+            ctx.client
+                .delete_route(id)
+                .await
+                .map_err(anyhow::Error::from)?;
             tracing::info!(?k, %id, "deleted route");
         }
         return Ok(Action::await_change());
@@ -108,11 +114,7 @@ pub async fn reconcile_route(
     Ok(Action::requeue(Duration::from_secs(60)))
 }
 
-pub fn error_policy_route(
-    _obj: Arc<LynxxRoute>,
-    err: &ReconcileError,
-    _ctx: Arc<Ctx>,
-) -> Action {
+pub fn error_policy_route(_obj: Arc<LynxxRoute>, err: &ReconcileError, _ctx: Arc<Ctx>) -> Action {
     tracing::warn!(error = %err, "route reconcile error");
     Action::requeue(Duration::from_secs(10))
 }
@@ -129,7 +131,10 @@ pub async fn reconcile_plugin(
 
     if obj.metadata.deletion_timestamp.is_some() {
         if let Some((_, id)) = ctx.state.plugin_map.remove(&k) {
-            ctx.client.delete_plugin(id).await.map_err(anyhow::Error::from)?;
+            ctx.client
+                .delete_plugin(id)
+                .await
+                .map_err(anyhow::Error::from)?;
             tracing::info!(?k, %id, "deleted plugin");
         }
         return Ok(Action::await_change());
@@ -140,9 +145,11 @@ pub async fn reconcile_plugin(
     let (svc_id, route_id) = match scope {
         "global" => (None, None),
         "service" => {
-            let r = obj.spec.scope_ref.clone().ok_or_else(|| {
-                anyhow!("plugin scope=service requires scopeRef")
-            })?;
+            let r = obj
+                .spec
+                .scope_ref
+                .clone()
+                .ok_or_else(|| anyhow!("plugin scope=service requires scopeRef"))?;
             let sk = (ns_str.clone(), r);
             let id = match ctx.state.svc_map.get(&sk) {
                 Some(v) => *v.value(),
@@ -154,9 +161,11 @@ pub async fn reconcile_plugin(
             (Some(id), None)
         }
         "route" => {
-            let r = obj.spec.scope_ref.clone().ok_or_else(|| {
-                anyhow!("plugin scope=route requires scopeRef")
-            })?;
+            let r = obj
+                .spec
+                .scope_ref
+                .clone()
+                .ok_or_else(|| anyhow!("plugin scope=route requires scopeRef"))?;
             let rk = (ns_str.clone(), r);
             let id = match ctx.state.route_map.get(&rk) {
                 Some(v) => *v.value(),
@@ -185,11 +194,7 @@ pub async fn reconcile_plugin(
     Ok(Action::requeue(Duration::from_secs(60)))
 }
 
-pub fn error_policy_plugin(
-    _obj: Arc<LynxxPlugin>,
-    err: &ReconcileError,
-    _ctx: Arc<Ctx>,
-) -> Action {
+pub fn error_policy_plugin(_obj: Arc<LynxxPlugin>, err: &ReconcileError, _ctx: Arc<Ctx>) -> Action {
     tracing::warn!(error = %err, "plugin reconcile error");
     Action::requeue(Duration::from_secs(10))
 }

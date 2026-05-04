@@ -302,11 +302,7 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn update_plugin(
-        &self,
-        id: &Uuid,
-        plugin: &PluginInstance,
-    ) -> Result<(), GatewayError> {
+    async fn update_plugin(&self, id: &Uuid, plugin: &PluginInstance) -> Result<(), GatewayError> {
         let config = serde_json::to_string(&plugin.config)
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
         sqlx::query(

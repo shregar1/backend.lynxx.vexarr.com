@@ -29,11 +29,7 @@ pub trait Repository: Send + Sync {
     async fn list_plugins(&self) -> Result<Vec<PluginInstance>, GatewayError>;
     async fn get_plugin(&self, id: &Uuid) -> Result<Option<PluginInstance>, GatewayError>;
     async fn create_plugin(&self, plugin: &PluginInstance) -> Result<(), GatewayError>;
-    async fn update_plugin(
-        &self,
-        id: &Uuid,
-        plugin: &PluginInstance,
-    ) -> Result<(), GatewayError>;
+    async fn update_plugin(&self, id: &Uuid, plugin: &PluginInstance) -> Result<(), GatewayError>;
     async fn delete_plugin(&self, id: &Uuid) -> Result<bool, GatewayError>;
 
     async fn list_consumers(&self) -> Result<Vec<Consumer>, GatewayError>;

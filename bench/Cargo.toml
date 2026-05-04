@@ -1,0 +1,16 @@
+[package]
+name = "lynxx-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone load generator for the Lynxx gateway"
+
+[[bin]]
+name = "lynxx-bench"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+hdrhistogram = "7"
+anyhow = "1"

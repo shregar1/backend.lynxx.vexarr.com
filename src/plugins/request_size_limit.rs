@@ -23,10 +23,7 @@ impl Plugin for RequestSizeLimitPlugin {
         "request-size-limit"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         if let Some(value) = req.headers().get(axum::http::header::CONTENT_LENGTH) {
             if let Some(len) = value.to_str().ok().and_then(|s| s.parse::<u64>().ok()) {
                 if len > self.max_bytes {

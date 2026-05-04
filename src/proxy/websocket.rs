@@ -42,9 +42,7 @@ pub async fn handle_websocket(
     let (mut parts, _body) = req.into_parts();
     let upgrade = WebSocketUpgrade::from_request_parts(&mut parts, &())
         .await
-        .map_err(|e| {
-            GatewayError::BadRequest(format!("websocket upgrade rejected: {e}"))
-        })?;
+        .map_err(|e| GatewayError::BadRequest(format!("websocket upgrade rejected: {e}")))?;
 
     let response = upgrade.on_upgrade(move |client_socket| async move {
         if let Err(e) = bridge(client_socket, ws_url.clone()).await {
@@ -110,12 +108,12 @@ fn axum_to_tt(msg: AxumMessage) -> Option<TtMessage> {
         AxumMessage::Binary(b) => TtMessage::Binary(b),
         AxumMessage::Ping(p) => TtMessage::Ping(p),
         AxumMessage::Pong(p) => TtMessage::Pong(p),
-        AxumMessage::Close(Some(cf)) => TtMessage::Close(Some(
-            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+        AxumMessage::Close(Some(cf)) => {
+            TtMessage::Close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
                 code: cf.code.into(),
                 reason: cf.reason,
-            },
-        )),
+            }))
+        }
         AxumMessage::Close(None) => TtMessage::Close(None),
     })
 }
@@ -126,12 +124,10 @@ fn tt_to_axum(msg: TtMessage) -> Option<AxumMessage> {
         TtMessage::Binary(b) => AxumMessage::Binary(b),
         TtMessage::Ping(p) => AxumMessage::Ping(p),
         TtMessage::Pong(p) => AxumMessage::Pong(p),
-        TtMessage::Close(Some(cf)) => AxumMessage::Close(Some(
-            axum::extract::ws::CloseFrame {
-                code: cf.code.into(),
-                reason: cf.reason,
-            },
-        )),
+        TtMessage::Close(Some(cf)) => AxumMessage::Close(Some(axum::extract::ws::CloseFrame {
+            code: cf.code.into(),
+            reason: cf.reason,
+        })),
         TtMessage::Close(None) => AxumMessage::Close(None),
         TtMessage::Frame(_) => return None,
     })

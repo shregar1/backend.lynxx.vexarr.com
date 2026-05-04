@@ -79,14 +79,18 @@ pub fn spawn_reloader(
     tokio::spawn(async move {
         while let Some(resp) = rx.recv().await {
             tracing::info!(path = %config_path, "config reload starting");
-            let result =
-                run_reload(&config_path, &repo, &route_table, &health, &lb, &plugin_exec).await;
+            let result = run_reload(
+                &config_path,
+                &repo,
+                &route_table,
+                &health,
+                &lb,
+                &plugin_exec,
+            )
+            .await;
             tracing::info!(?result, "config reload complete");
             if result.errors.is_empty() {
-                if let Err(e) = bus
-                    .publish(ChangeEvent::FullSync { origin: node_id })
-                    .await
-                {
+                if let Err(e) = bus.publish(ChangeEvent::FullSync { origin: node_id }).await {
                     tracing::warn!(error = %e, "failed to publish FullSync after reload");
                 }
             }
@@ -170,8 +174,10 @@ async fn diff_services(
     result: &mut ReloadResult,
 ) -> Result<(), GatewayError> {
     let existing = repo.list_services().await?;
-    let by_name: HashMap<String, Service> =
-        existing.iter().map(|s| (s.name.clone(), s.clone())).collect();
+    let by_name: HashMap<String, Service> = existing
+        .iter()
+        .map(|s| (s.name.clone(), s.clone()))
+        .collect();
     let cfg_names: std::collections::HashSet<&str> =
         cfg.services.iter().map(|s| s.name.as_str()).collect();
 
@@ -197,7 +203,9 @@ async fn diff_services(
                             route_table.update_service(&cur.id, updated);
                             result.updated_services += 1;
                         }
-                        Err(e) => result.errors.push(format!("update service {}: {e}", cur.name)),
+                        Err(e) => result
+                            .errors
+                            .push(format!("update service {}: {e}", cur.name)),
                     }
                 }
             }
@@ -219,7 +227,9 @@ async fn diff_services(
                         );
                         result.added_services += 1;
                     }
-                    Err(e) => result.errors.push(format!("create service {}: {e}", svc.name)),
+                    Err(e) => result
+                        .errors
+                        .push(format!("create service {}: {e}", svc.name)),
                 }
             }
         }
@@ -237,7 +247,9 @@ async fn diff_services(
                 result.removed_services += 1;
             }
             Ok(false) => {}
-            Err(e) => result.errors.push(format!("delete service {}: {e}", cur.name)),
+            Err(e) => result
+                .errors
+                .push(format!("delete service {}: {e}", cur.name)),
         }
     }
 
@@ -359,8 +371,10 @@ async fn diff_plugins(
         .into_iter()
         .filter(|p| p.service_id.is_none() && p.route_id.is_none())
         .collect();
-    let by_name: HashMap<String, PluginInstance> =
-        existing.iter().map(|p| (p.name.clone(), p.clone())).collect();
+    let by_name: HashMap<String, PluginInstance> = existing
+        .iter()
+        .map(|p| (p.name.clone(), p.clone()))
+        .collect();
     let cfg_names: std::collections::HashSet<&str> =
         cfg.plugins.iter().map(|p| p.name.as_str()).collect();
 
@@ -417,10 +431,11 @@ async fn diff_plugins(
         match repo.delete_plugin(&cur.id).await {
             Ok(true) => result.removed_plugins += 1,
             Ok(false) => {}
-            Err(e) => result.errors.push(format!("delete plugin {}: {e}", cur.name)),
+            Err(e) => result
+                .errors
+                .push(format!("delete plugin {}: {e}", cur.name)),
         }
     }
 
     Ok(())
 }
-

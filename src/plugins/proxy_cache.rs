@@ -92,7 +92,10 @@ impl ProxyCachePlugin {
             KeyStrategy::Uri => format!(
                 "{}|{}",
                 req.method(),
-                req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/")
+                req.uri()
+                    .path_and_query()
+                    .map(|p| p.as_str())
+                    .unwrap_or("/")
             ),
             KeyStrategy::MethodPathQuery => format!(
                 "{}|{}|{}",
@@ -114,10 +117,7 @@ impl Plugin for ProxyCachePlugin {
         "proxy-cache"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         if !self.method_cacheable(req.method().as_str()) {
             return Ok(());
         }
@@ -174,7 +174,11 @@ impl Plugin for ProxyCachePlugin {
 
         // Don't cache responses the upstream marked as private/no-store, or
         // anything that sets cookies.
-        if let Some(cc) = resp.headers().get("cache-control").and_then(|v| v.to_str().ok()) {
+        if let Some(cc) = resp
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+        {
             let lc = cc.to_ascii_lowercase();
             if lc.contains("no-store") || lc.contains("private") {
                 return Ok(());
@@ -187,7 +191,11 @@ impl Plugin for ProxyCachePlugin {
         let headers: Vec<(String, String)> = resp
             .headers()
             .iter()
-            .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.as_str().to_string(), v.to_string())))
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|v| (k.as_str().to_string(), v.to_string()))
+            })
             .collect();
 
         // Drain the body so we can both cache it and rebuild the response.

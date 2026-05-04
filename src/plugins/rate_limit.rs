@@ -79,10 +79,7 @@ impl Plugin for RateLimitPlugin {
         "rate-limit"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         let client_id = Self::get_client_id(req);
         let mut bucket = self
             .buckets
@@ -96,10 +93,7 @@ impl Plugin for RateLimitPlugin {
         }
     }
 
-    async fn on_response(
-        &self,
-        _resp: &mut Response<BoxBody>,
-    ) -> Result<(), PluginError> {
+    async fn on_response(&self, _resp: &mut Response<BoxBody>) -> Result<(), PluginError> {
         Ok(())
     }
 }

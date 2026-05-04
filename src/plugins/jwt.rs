@@ -53,9 +53,8 @@ impl JwtPlugin {
         // present we treat it as RS256 by default unless the caller asked for
         // an explicit RS variant.
         let decoding_key = if let Some(pk) = cfg.get("public_key").and_then(|v| v.as_str()) {
-            DecodingKey::from_rsa_pem(pk.as_bytes()).map_err(|e| {
-                GatewayError::BadRequest(format!("invalid jwt public_key PEM: {e}"))
-            })?
+            DecodingKey::from_rsa_pem(pk.as_bytes())
+                .map_err(|e| GatewayError::BadRequest(format!("invalid jwt public_key PEM: {e}")))?
         } else {
             let secret = cfg.get("secret").and_then(|v| v.as_str()).unwrap_or("");
             DecodingKey::from_secret(secret.as_bytes())
@@ -101,10 +100,7 @@ impl Plugin for JwtPlugin {
         "jwt"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         let raw = req
             .headers()
             .get(&self.header_name)

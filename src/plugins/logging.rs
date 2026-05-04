@@ -22,10 +22,7 @@ impl Plugin for LoggingPlugin {
         "logging"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         let request_id = req
             .headers()
             .get("x-request-id")
@@ -40,18 +37,13 @@ impl Plugin for LoggingPlugin {
             "incoming request"
         );
 
-        req.headers_mut().insert(
-            "x-request-id",
-            request_id.parse().unwrap(),
-        );
+        req.headers_mut()
+            .insert("x-request-id", request_id.parse().unwrap());
 
         Ok(())
     }
 
-    async fn on_response(
-        &self,
-        resp: &mut Response<BoxBody>,
-    ) -> Result<(), PluginError> {
+    async fn on_response(&self, resp: &mut Response<BoxBody>) -> Result<(), PluginError> {
         let request_id = resp
             .headers()
             .get("x-request-id")

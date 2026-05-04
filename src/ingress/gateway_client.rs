@@ -154,11 +154,7 @@ impl GatewayClient {
 
     // --- targets ---
 
-    pub async fn upsert_targets(
-        &self,
-        service_id: Uuid,
-        targets: &[LynxxTarget],
-    ) -> Result<()> {
+    pub async fn upsert_targets(&self, service_id: Uuid, targets: &[LynxxTarget]) -> Result<()> {
         // Reconcile: list existing, delete those not in spec, create missing.
         let existing: Vec<TargetResp> = self
             .http
@@ -304,9 +300,9 @@ impl GatewayClient {
             .error_for_status()?
             .json()
             .await?;
-        Ok(all.into_iter().find(|p| {
-            p.name == name && p.service_id == service_id && p.route_id == route_id
-        }))
+        Ok(all
+            .into_iter()
+            .find(|p| p.name == name && p.service_id == service_id && p.route_id == route_id))
     }
 
     pub async fn upsert_plugin(

@@ -62,10 +62,7 @@ impl Plugin for AclPlugin {
         "acl"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         let username = req
             .headers()
             .get("x-consumer-username")
