@@ -1,0 +1,13 @@
+apiVersion: lynxx.dev/v1
+kind: LynxxRoute
+metadata:
+  name: api-public
+  namespace: default
+spec:
+  serviceRef: api-backend
+  paths:
+    - /api/v1
+  methods:
+    - GET
+    - POST
+  stripPath: true

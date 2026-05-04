@@ -1,0 +1,230 @@
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "lynxxservices.lynxx.dev"
+  },
+  "spec": {
+    "group": "lynxx.dev",
+    "names": {
+      "categories": [],
+      "kind": "LynxxService",
+      "plural": "lynxxservices",
+      "shortNames": [
+        "lsvc"
+      ],
+      "singular": "lynxxservice"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [],
+        "name": "v1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for LynxxServiceSpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "properties": {
+                  "connectTimeoutMs": {
+                    "default": 5000,
+                    "format": "uint64",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "lbStrategy": {
+                    "nullable": true,
+                    "type": "string"
+                  },
+                  "retries": {
+                    "default": 3,
+                    "format": "uint32",
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "targets": {
+                    "default": [],
+                    "items": {
+                      "properties": {
+                        "url": {
+                          "type": "string"
+                        },
+                        "weight": {
+                          "default": 1,
+                          "format": "uint32",
+                          "minimum": 0.0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "url"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "url"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "LynxxService",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {}
+      }
+    ]
+  }
+}
+---
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "lynxxroutes.lynxx.dev"
+  },
+  "spec": {
+    "group": "lynxx.dev",
+    "names": {
+      "categories": [],
+      "kind": "LynxxRoute",
+      "plural": "lynxxroutes",
+      "shortNames": [
+        "lrt"
+      ],
+      "singular": "lynxxroute"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [],
+        "name": "v1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for LynxxRouteSpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "properties": {
+                  "methods": {
+                    "default": [],
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "paths": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "serviceRef": {
+                    "description": "Name of the LynxxService in the same namespace.",
+                    "type": "string"
+                  },
+                  "stripPath": {
+                    "default": false,
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "paths",
+                  "serviceRef"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "LynxxRoute",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {}
+      }
+    ]
+  }
+}
+---
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "lynxxplugins.lynxx.dev"
+  },
+  "spec": {
+    "group": "lynxx.dev",
+    "names": {
+      "categories": [],
+      "kind": "LynxxPlugin",
+      "plural": "lynxxplugins",
+      "shortNames": [
+        "lpl"
+      ],
+      "singular": "lynxxplugin"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [],
+        "name": "v1",
+        "schema": {
+          "openAPIV3Schema": {
+            "description": "Auto-generated derived type for LynxxPluginSpec via `CustomResource`",
+            "properties": {
+              "spec": {
+                "properties": {
+                  "config": {},
+                  "enabled": {
+                    "default": true,
+                    "type": "boolean"
+                  },
+                  "name": {
+                    "description": "Plugin type name (e.g. \"jwt\", \"rate-limit\").",
+                    "type": "string"
+                  },
+                  "scope": {
+                    "description": "\"global\" | \"service\" | \"route\"",
+                    "type": "string"
+                  },
+                  "scopeRef": {
+                    "description": "Name of the service or route resource (required when scope != global).",
+                    "nullable": true,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "scope"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "title": "LynxxPlugin",
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {}
+      }
+    ]
+  }
+}

@@ -1,0 +1,13 @@
+apiVersion: lynxx.dev/v1
+kind: LynxxPlugin
+metadata:
+  name: jwt-auth
+  namespace: default
+spec:
+  name: jwt
+  enabled: true
+  scope: route
+  scopeRef: api-public
+  config:
+    secret: shh
+    algorithm: HS256

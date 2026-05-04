@@ -1,0 +1,15 @@
+apiVersion: lynxx.dev/v1
+kind: LynxxService
+metadata:
+  name: api-backend
+  namespace: default
+spec:
+  url: http://api-svc.default.svc.cluster.local:8080
+  retries: 3
+  connectTimeoutMs: 5000
+  lbStrategy: round-robin
+  targets:
+    - url: http://10.0.0.1:8080
+      weight: 1
+    - url: http://10.0.0.2:8080
+      weight: 2
