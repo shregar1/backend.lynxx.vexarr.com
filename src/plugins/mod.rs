@@ -1,18 +1,23 @@
+pub mod acl;
 pub mod auth;
 pub mod basic_auth;
 pub mod bot_detection;
 pub mod cors;
 pub mod factory;
+pub mod hmac_auth;
 pub mod ip_restriction;
 pub mod jwt;
 pub mod key_auth;
 pub mod logging;
+pub mod oauth2_introspect;
 pub mod proxy_cache;
 pub mod rate_limit;
 pub mod request_size_limit;
 pub mod request_termination;
 pub mod request_transformer;
+pub mod request_validator;
 pub mod response_transformer;
+pub mod session;
 
 use crate::db::Repository;
 use crate::error::{GatewayError, PluginError};
