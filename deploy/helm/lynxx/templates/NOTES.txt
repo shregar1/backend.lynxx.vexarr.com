@@ -1,0 +1,26 @@
+Lynxx {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Gateway service:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "lynxx.gatewayName" . }} {{ .Values.config.adminPort }}:{{ .Values.config.adminPort }}
+  curl http://localhost:{{ .Values.config.adminPort }}/status
+
+Apply CRDs (one-time, cluster-scoped):
+  kubectl apply -f deploy/helm/lynxx/templates/crds/
+
+{{- if .Values.postgres.enabled }}
+
+WARNING: an in-cluster Postgres StatefulSet was deployed for development/demo
+use only. The default credentials in values.yaml ("lynxx" / "lynxx") are
+public and MUST be overridden for any non-trivial deployment:
+
+  helm upgrade {{ .Release.Name }} ./deploy/helm/lynxx \
+      --set postgres.credentials.password=$(openssl rand -hex 16)
+
+For production, set `postgres.enabled=false` and supply your own managed
+database via the DATABASE_URL secret.
+{{- else }}
+
+Postgres is disabled (`postgres.enabled=false`). Make sure the secret
+"{{ include "lynxx.secretName" . }}" points at a reachable database before
+the gateway pods will start.
+{{- end }}

@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "lynxx.controllerName" . }}
+  labels:
+    {{- include "lynxx.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "lynxx.controllerName" . }}
+  labels:
+    {{- include "lynxx.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups: ["lynxx.dev"]
+    resources: ["lynxxservices", "lynxxroutes", "lynxxplugins"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["lynxx.dev"]
+    resources: ["lynxxservices/status", "lynxxroutes/status", "lynxxplugins/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "lynxx.controllerName" . }}
+  labels:
+    {{- include "lynxx.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "lynxx.controllerName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "lynxx.controllerName" . }}
+    namespace: {{ .Release.Namespace }}

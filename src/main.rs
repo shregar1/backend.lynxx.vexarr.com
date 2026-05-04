@@ -13,7 +13,7 @@ mod proxy;
 mod reload;
 
 use crate::cluster::ChangeEvent;
-use crate::config::load_config;
+use crate::config::{apply_env_overrides, load_config};
 use crate::db::Repository;
 use crate::health::{HealthConfig, HealthRegistry};
 use crate::plugins::PluginExecutor;
@@ -36,7 +36,9 @@ async fn main() -> anyhow::Result<()> {
     let metrics_handle = metrics::install();
     metrics::describe();
 
-    let config = load_config("config.toml")?;
+    let config_path = std::env::var("LYNXX_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
+    let mut config = load_config(&config_path)?;
+    apply_env_overrides(&mut config);
 
     tracing::info!(
         proxy_port = config.gateway.proxy_port,
@@ -129,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let reload_handle = reload::spawn_reloader(
-        "config.toml".to_string(),
+        config_path.clone(),
         repo.clone(),
         route_table.clone(),
         health.clone(),

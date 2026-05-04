@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lynxx
+      POSTGRES_PASSWORD: lynxx
+      POSTGRES_DB: lynxx
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "lynxx"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    ports:
+      - "5432:5432"
+    volumes:
+      - lynxx-pg-data:/var/lib/postgresql/data
+
+  gateway:
+    build:
+      context: .
+      target: gateway
+    environment:
+      LYNXX_CONFIG: /etc/lynxx/config.toml
+      DATABASE_URL: postgres://lynxx:lynxx@postgres:5432/lynxx
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  gateway-2:
+    # second node for clustering demo
+    build:
+      context: .
+      target: gateway
+    environment:
+      LYNXX_CONFIG: /etc/lynxx/config.toml
+      DATABASE_URL: postgres://lynxx:lynxx@postgres:5432/lynxx
+    ports:
+      - "9100:9000"
+      - "9101:9001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  lynxx-pg-data:

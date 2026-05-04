@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lynxx.controllerName" . }}
+  labels:
+    {{- include "lynxx.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        {{- include "lynxx.labels" . | nindent 8 }}
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: {{ include "lynxx.controllerName" . }}
+      containers:
+        - name: controller
+          image: "{{ .Values.image.controller }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: LYNXX_ADMIN_URL
+              value: "http://{{ include "lynxx.gatewayName" . }}:{{ .Values.config.adminPort }}"
+            - name: RUST_LOG
+              value: info
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}

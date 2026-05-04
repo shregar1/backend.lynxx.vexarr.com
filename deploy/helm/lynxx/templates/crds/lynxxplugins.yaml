@@ -1,0 +1,42 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: lynxxplugins.lynxx.dev
+spec:
+  group: lynxx.dev
+  names:
+    kind: LynxxPlugin
+    plural: lynxxplugins
+    singular: lynxxplugin
+    shortNames:
+      - lpl
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          description: LynxxPlugin — global, service- or route-scoped plugin config.
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [name, scope]
+              properties:
+                name:
+                  type: string
+                  description: Plugin type name (e.g. "jwt", "rate-limit").
+                scope:
+                  type: string
+                  description: '"global" | "service" | "route"'
+                scopeRef:
+                  type: string
+                  nullable: true
+                  description: Name of the service or route resource (required when scope != global).
+                enabled:
+                  type: boolean
+                  default: true
+                config:
+                  x-kubernetes-preserve-unknown-fields: true

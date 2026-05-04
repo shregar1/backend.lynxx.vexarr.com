@@ -137,3 +137,40 @@ pub fn load_config(path: &str) -> anyhow::Result<GatewayConfig> {
         }
     }
 }
+
+/// Apply environment-variable overrides on top of the loaded TOML config.
+///
+/// TOML remains the primary source of truth; env vars provide a thin overlay
+/// for the values most commonly set in container/Helm deployments.
+///
+/// Recognised vars:
+///   * `DATABASE_URL`       overrides `gateway.database_url`
+///   * `LYNXX_PROXY_PORT`   overrides `gateway.proxy_port`
+///   * `LYNXX_ADMIN_PORT`   overrides `gateway.admin_port`
+pub fn apply_env_overrides(config: &mut GatewayConfig) {
+    if let Ok(url) = std::env::var("DATABASE_URL") {
+        if !url.is_empty() {
+            tracing::info!("DATABASE_URL env override applied");
+            config.gateway.database_url = url;
+        }
+    }
+    if let Some(port) = parse_port_env("LYNXX_PROXY_PORT") {
+        tracing::info!(port, "LYNXX_PROXY_PORT env override applied");
+        config.gateway.proxy_port = port;
+    }
+    if let Some(port) = parse_port_env("LYNXX_ADMIN_PORT") {
+        tracing::info!(port, "LYNXX_ADMIN_PORT env override applied");
+        config.gateway.admin_port = port;
+    }
+}
+
+fn parse_port_env(name: &str) -> Option<u16> {
+    let raw = std::env::var(name).ok()?;
+    match raw.parse::<u16>() {
+        Ok(p) => Some(p),
+        Err(e) => {
+            tracing::warn!(var = name, value = %raw, error = %e, "ignoring invalid port env var");
+            None
+        }
+    }
+}
