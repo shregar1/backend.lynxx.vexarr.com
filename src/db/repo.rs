@@ -329,7 +329,7 @@ impl Repository {
 
     pub async fn list_consumers(&self) -> Result<Vec<Consumer>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, username, custom_id, created_at, updated_at FROM consumers",
+            "SELECT id, username, custom_id, api_key, created_at, updated_at FROM consumers",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -339,12 +339,13 @@ impl Repository {
 
     pub async fn create_consumer(&self, consumer: &Consumer) -> Result<(), GatewayError> {
         sqlx::query(
-            "INSERT INTO consumers (id, username, custom_id, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO consumers (id, username, custom_id, api_key, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(consumer.id.to_string())
         .bind(&consumer.username)
         .bind(consumer.custom_id.as_deref())
+        .bind(consumer.api_key.as_deref())
         .bind(consumer.created_at.to_rfc3339())
         .bind(consumer.updated_at.to_rfc3339())
         .execute(&self.pool)
@@ -541,6 +542,7 @@ fn row_to_plugin(row: sqlx::sqlite::SqliteRow) -> Result<PluginInstance, Gateway
 fn row_to_consumer(row: sqlx::sqlite::SqliteRow) -> Result<Consumer, GatewayError> {
     let id: String = row.try_get("id")?;
     let custom_id: Option<String> = row.try_get("custom_id")?;
+    let api_key: Option<String> = row.try_get("api_key")?;
     let created_at: String = row.try_get("created_at")?;
     let updated_at: String = row.try_get("updated_at")?;
 
@@ -548,7 +550,7 @@ fn row_to_consumer(row: sqlx::sqlite::SqliteRow) -> Result<Consumer, GatewayErro
         id: parse_uuid(&id)?,
         username: row.try_get("username")?,
         custom_id,
-        api_key: None,
+        api_key,
         created_at: parse_dt(&created_at)?,
         updated_at: parse_dt(&updated_at)?,
     })

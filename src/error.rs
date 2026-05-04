@@ -54,10 +54,43 @@ pub enum PluginError {
 
     #[error("plugin internal error: {0}")]
     Internal(String),
+
+    /// Returned by plugins (e.g. proxy-cache hit, request-termination) to
+    /// short-circuit the request and return a synthesized response without
+    /// contacting upstream. The handler maps this directly to a Response.
+    #[error("short-circuit response")]
+    ShortCircuit {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    },
 }
 
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
+        // ShortCircuit gets special handling: build a real Response with
+        // the supplied status, headers, and body — no JSON envelope.
+        if let GatewayError::PluginError(PluginError::ShortCircuit {
+            status,
+            headers,
+            body,
+        }) = &self
+        {
+            let status_code =
+                StatusCode::from_u16(*status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let mut response = Response::new(axum::body::Body::from(body.clone()));
+            *response.status_mut() = status_code;
+            for (k, v) in headers {
+                if let (Ok(name), Ok(value)) = (
+                    axum::http::HeaderName::from_bytes(k.as_bytes()),
+                    HeaderValue::from_str(v),
+                ) {
+                    response.headers_mut().append(name, value);
+                }
+            }
+            return response;
+        }
+
         let mut circuit_open = false;
         let (status, message) = match &self {
             GatewayError::RouteNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
@@ -79,6 +112,7 @@ impl IntoResponse for GatewayError {
                 PluginError::Internal(msg) => {
                     (StatusCode::INTERNAL_SERVER_ERROR, msg.clone())
                 }
+                PluginError::ShortCircuit { .. } => unreachable!("handled above"),
             },
             GatewayError::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             GatewayError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),

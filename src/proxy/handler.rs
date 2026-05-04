@@ -187,6 +187,12 @@ pub async fn proxy_handler(
     }
 
     let headers = req.headers().clone();
+    // Capture any request-side plugin annotations (e.g. proxy-cache key) we
+    // need to forward onto the plugin response chain. These are stripped
+    // from the upstream request below.
+    let cache_key = headers
+        .get(crate::plugins::proxy_cache::CACHE_KEY_HEADER)
+        .cloned();
     let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
         .await
         .map_err(|e| GatewayError::Internal(format!("failed to read body: {e}")))?;
@@ -201,7 +207,10 @@ pub async fn proxy_handler(
         .body(body_bytes.to_vec());
 
     for (key, value) in &headers {
-        if key == "host" || key == "connection" {
+        if key == "host"
+            || key == "connection"
+            || key.as_str() == crate::plugins::proxy_cache::CACHE_KEY_HEADER
+        {
             continue;
         }
         if let Ok(v) = value.to_str() {
@@ -299,6 +308,13 @@ pub async fn proxy_handler(
 
     for (key, value) in &resp_headers {
         plugin_resp.headers_mut().insert(key, value.clone());
+    }
+    // Forward the proxy-cache key from request to response so the cache
+    // plugin's `on_response` can record under the correct key.
+    if let Some(v) = cache_key {
+        plugin_resp
+            .headers_mut()
+            .insert(crate::plugins::proxy_cache::CACHE_KEY_HEADER, v);
     }
 
     state

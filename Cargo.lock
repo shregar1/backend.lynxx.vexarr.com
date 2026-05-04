@@ -1221,6 +1221,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64",
  "chrono",
  "dashmap",
  "futures-util",

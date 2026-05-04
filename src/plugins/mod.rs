@@ -1,11 +1,16 @@
 pub mod auth;
+pub mod basic_auth;
 pub mod bot_detection;
 pub mod cors;
 pub mod factory;
 pub mod ip_restriction;
+pub mod jwt;
+pub mod key_auth;
 pub mod logging;
+pub mod proxy_cache;
 pub mod rate_limit;
 pub mod request_size_limit;
+pub mod request_termination;
 pub mod request_transformer;
 pub mod response_transformer;
 
@@ -61,7 +66,7 @@ impl PluginExecutor {
     /// Re-fetch all plugin rows from the DB and (re)build every enabled plugin.
     /// Disabled plugins are skipped. Build failures are logged but do not abort
     /// the rebuild — other plugins still load.
-    pub async fn rebuild(&self, repo: &Repository) -> Result<(), GatewayError> {
+    pub async fn rebuild(&self, repo: &Arc<Repository>) -> Result<(), GatewayError> {
         let rows = repo.list_plugins().await?;
         let mut built: HashMap<Uuid, Arc<dyn Plugin>> = HashMap::with_capacity(rows.len());
         let mut index = PluginIndex::default();
@@ -70,7 +75,7 @@ impl PluginExecutor {
             if !row.enabled {
                 continue;
             }
-            let plugin = match factory::build(&row.name, &row.config) {
+            let plugin = match factory::build(&row.name, &row.config, Some(repo.clone())) {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!(

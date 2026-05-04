@@ -311,7 +311,7 @@ pub async fn create_plugin(
 ) -> Result<Json<PluginInstance>, GatewayError> {
     validate_plugin_scope(&state, input.service_id, input.route_id).await?;
     // Eagerly validate the plugin can be built before persisting.
-    let _ = crate::plugins::factory::build(&input.name, &input.config)?;
+    let _ = crate::plugins::factory::build(&input.name, &input.config, Some(state.repo.clone()))?;
     let now = Utc::now();
     let plugin = PluginInstance {
         id: Uuid::new_v4(),
@@ -352,7 +352,7 @@ pub async fn update_plugin(
         .ok_or_else(|| GatewayError::NotFound(format!("plugin {id}")))?;
 
     validate_plugin_scope(&state, input.service_id, input.route_id).await?;
-    let _ = crate::plugins::factory::build(&input.name, &input.config)?;
+    let _ = crate::plugins::factory::build(&input.name, &input.config, Some(state.repo.clone()))?;
 
     let updated = PluginInstance {
         id: existing.id,
