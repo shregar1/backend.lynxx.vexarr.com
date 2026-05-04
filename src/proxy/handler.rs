@@ -1,7 +1,7 @@
 use crate::error::GatewayError;
 use crate::health::HealthRegistry;
 use crate::metrics as gw_metrics;
-use crate::plugins::{BoxBody, PluginRegistry};
+use crate::plugins::{BoxBody, PluginExecutor};
 use crate::proxy::grpc::{handle_grpc, GrpcClient};
 use crate::proxy::loadbalancer::{InFlightGuard, LoadBalancerRegistry};
 use crate::proxy::router::SharedRouteTable;
@@ -15,7 +15,7 @@ use std::time::Instant;
 #[derive(Clone)]
 pub struct ProxyState {
     pub route_table: SharedRouteTable,
-    pub plugins: Arc<PluginRegistry>,
+    pub plugins: Arc<PluginExecutor>,
     pub http_client: reqwest::Client,
     pub grpc_client: GrpcClient,
     pub health: Arc<HealthRegistry>,
@@ -109,12 +109,11 @@ pub async fn proxy_handler(
         None => (service.url.clone(), "-".to_string(), None),
     };
 
-    for plugin in state.plugins.plugins() {
-        plugin
-            .on_request(&mut req)
-            .await
-            .map_err(GatewayError::PluginError)?;
-    }
+    state
+        .plugins
+        .run_request(&mut req, Some(service.id), Some(route.id))
+        .await
+        .map_err(GatewayError::PluginError)?;
 
     let upstream_path = state.route_table.resolve_upstream_path(&route, &path);
     let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
@@ -302,12 +301,11 @@ pub async fn proxy_handler(
         plugin_resp.headers_mut().insert(key, value.clone());
     }
 
-    for plugin in state.plugins.plugins() {
-        plugin
-            .on_response(&mut plugin_resp)
-            .await
-            .map_err(GatewayError::PluginError)?;
-    }
+    state
+        .plugins
+        .run_response(&mut plugin_resp, Some(service.id), Some(route.id))
+        .await
+        .map_err(GatewayError::PluginError)?;
 
     let mut final_resp = Response::builder()
         .status(plugin_resp.status())

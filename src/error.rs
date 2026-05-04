@@ -49,6 +49,9 @@ pub enum PluginError {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    #[error("payload too large: {0}")]
+    PayloadTooLarge(String),
+
     #[error("plugin internal error: {0}")]
     Internal(String),
 }
@@ -70,6 +73,9 @@ impl IntoResponse for GatewayError {
                 }
                 PluginError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
                 PluginError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
+                PluginError::PayloadTooLarge(msg) => {
+                    (StatusCode::PAYLOAD_TOO_LARGE, msg.clone())
+                }
                 PluginError::Internal(msg) => {
                     (StatusCode::INTERNAL_SERVER_ERROR, msg.clone())
                 }

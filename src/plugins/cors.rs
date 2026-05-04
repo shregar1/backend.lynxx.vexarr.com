@@ -1,4 +1,4 @@
-use crate::error::PluginError;
+use crate::error::{GatewayError, PluginError};
 use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
 use axum::http::{header, HeaderValue, Request, Response};
@@ -16,6 +16,19 @@ impl CorsPlugin {
             allow_methods: "GET, POST, PUT, DELETE, PATCH, OPTIONS".into(),
             allow_headers: "Content-Type, Authorization, X-Api-Key, X-Request-Id".into(),
         }
+    }
+
+    pub fn from_config(cfg: &serde_json::Value) -> Result<Self, GatewayError> {
+        let origins = cfg
+            .get("allow_origins")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_else(|| vec!["*".to_string()]);
+        Ok(Self::new(origins))
     }
 }
 

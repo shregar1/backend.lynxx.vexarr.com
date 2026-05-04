@@ -254,12 +254,23 @@ impl Repository {
 
     pub async fn list_plugins(&self) -> Result<Vec<PluginInstance>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, name, enabled, config, created_at, updated_at FROM plugins",
+            "SELECT id, name, service_id, route_id, enabled, config, created_at, updated_at FROM plugins",
         )
         .fetch_all(&self.pool)
         .await?;
 
         rows.into_iter().map(row_to_plugin).collect()
+    }
+
+    pub async fn get_plugin(&self, id: &Uuid) -> Result<Option<PluginInstance>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, name, service_id, route_id, enabled, config, created_at, updated_at \
+             FROM plugins WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_plugin).transpose()
     }
 
     pub async fn create_plugin(&self, plugin: &PluginInstance) -> Result<(), GatewayError> {
@@ -268,14 +279,39 @@ impl Repository {
 
         sqlx::query(
             "INSERT INTO plugins (id, name, service_id, route_id, enabled, config, created_at, updated_at) \
-             VALUES (?, ?, NULL, NULL, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(plugin.id.to_string())
         .bind(&plugin.name)
+        .bind(plugin.service_id.map(|v| v.to_string()))
+        .bind(plugin.route_id.map(|v| v.to_string()))
         .bind(plugin.enabled as i64)
         .bind(config)
         .bind(plugin.created_at.to_rfc3339())
         .bind(plugin.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_plugin(
+        &self,
+        id: &Uuid,
+        plugin: &PluginInstance,
+    ) -> Result<(), GatewayError> {
+        let config = serde_json::to_string(&plugin.config)
+            .map_err(|e| GatewayError::Internal(e.to_string()))?;
+        sqlx::query(
+            "UPDATE plugins SET name = ?, service_id = ?, route_id = ?, enabled = ?, config = ?, updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(&plugin.name)
+        .bind(plugin.service_id.map(|v| v.to_string()))
+        .bind(plugin.route_id.map(|v| v.to_string()))
+        .bind(plugin.enabled as i64)
+        .bind(config)
+        .bind(plugin.updated_at.to_rfc3339())
+        .bind(id.to_string())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -381,6 +417,8 @@ impl Repository {
             let plugin = PluginInstance {
                 id: Uuid::new_v4(),
                 name: plugin_cfg.name.clone(),
+                service_id: None,
+                route_id: None,
                 enabled: plugin_cfg.enabled,
                 config: config_value,
                 created_at: now,
@@ -471,14 +509,27 @@ fn row_to_route(row: sqlx::sqlite::SqliteRow) -> Result<Route, GatewayError> {
 
 fn row_to_plugin(row: sqlx::sqlite::SqliteRow) -> Result<PluginInstance, GatewayError> {
     let id: String = row.try_get("id")?;
+    let service_id: Option<String> = row.try_get("service_id").ok();
+    let route_id: Option<String> = row.try_get("route_id").ok();
     let enabled: i64 = row.try_get("enabled")?;
     let config: String = row.try_get("config")?;
     let created_at: String = row.try_get("created_at")?;
     let updated_at: String = row.try_get("updated_at")?;
 
+    let service_id = match service_id.filter(|s| !s.is_empty()) {
+        Some(s) => Some(parse_uuid(&s)?),
+        None => None,
+    };
+    let route_id = match route_id.filter(|s| !s.is_empty()) {
+        Some(s) => Some(parse_uuid(&s)?),
+        None => None,
+    };
+
     Ok(PluginInstance {
         id: parse_uuid(&id)?,
         name: row.try_get("name")?,
+        service_id,
+        route_id,
         enabled: enabled != 0,
         config: serde_json::from_str(&config)
             .map_err(|e| GatewayError::Internal(format!("invalid plugin config json: {e}")))?,

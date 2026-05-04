@@ -7,18 +7,19 @@
 //! `POST /reload`. Reloads are serialised through a single mpsc receiver, so
 //! at most one runs at a time.
 //!
-//! v1 limitation: the in-process `PluginRegistry` (rate-limit / cors /
-//! logging) is built once at startup from `config.plugins` and is NOT swapped
-//! by reload. Reload only refreshes services, routes, and the persisted
-//! plugin records. Live plugin behaviour changes still require a restart.
-//! Consumers and targets are intentionally untouched — those are managed
-//! exclusively via the admin API.
+//! Reload syncs services, routes, and global (unscoped) plugin records from
+//! `config.toml`. Service- and route-scoped plugins are owned exclusively by
+//! the admin API and are not touched here. After a plugin diff, the in-memory
+//! `PluginExecutor` cache is rebuilt so live behaviour reflects the new
+//! configuration. Consumers and targets are managed exclusively via the admin
+//! API.
 
 use crate::config::{load_config, GatewayConfig};
 use crate::db::Repository;
 use crate::error::GatewayError;
 use crate::health::HealthRegistry;
 use crate::models::{PluginInstance, Route, Service};
+use crate::plugins::PluginExecutor;
 use crate::proxy::loadbalancer::{LbStrategy, LoadBalancerRegistry};
 use crate::proxy::router::SharedRouteTable;
 use chrono::Utc;
@@ -68,13 +69,15 @@ pub fn spawn_reloader(
     route_table: SharedRouteTable,
     health: Arc<HealthRegistry>,
     lb: Arc<LoadBalancerRegistry>,
+    plugin_exec: Arc<PluginExecutor>,
 ) -> ReloadHandle {
     let (tx, mut rx) = mpsc::channel::<Trigger>(8);
 
     tokio::spawn(async move {
         while let Some(resp) = rx.recv().await {
             tracing::info!(path = %config_path, "config reload starting");
-            let result = run_reload(&config_path, &repo, &route_table, &health, &lb).await;
+            let result =
+                run_reload(&config_path, &repo, &route_table, &health, &lb, &plugin_exec).await;
             tracing::info!(?result, "config reload complete");
             let _ = resp.send(result);
         }
@@ -114,6 +117,7 @@ async fn run_reload(
     route_table: &SharedRouteTable,
     health: &Arc<HealthRegistry>,
     lb: &Arc<LoadBalancerRegistry>,
+    plugin_exec: &Arc<PluginExecutor>,
 ) -> ReloadResult {
     let mut result = ReloadResult::default();
 
@@ -133,6 +137,12 @@ async fn run_reload(
     }
     if let Err(e) = diff_plugins(&new_config, repo, &mut result).await {
         result.errors.push(format!("plugins: {e}"));
+    }
+
+    if result.added_plugins + result.updated_plugins + result.removed_plugins > 0 {
+        if let Err(e) = plugin_exec.rebuild(repo).await {
+            result.errors.push(format!("plugin rebuild: {e}"));
+        }
     }
 
     result
@@ -330,7 +340,14 @@ async fn diff_plugins(
     repo: &Arc<Repository>,
     result: &mut ReloadResult,
 ) -> Result<(), GatewayError> {
-    let existing = repo.list_plugins().await?;
+    // Reload only manages global (unscoped) plugins; service- and route-scoped
+    // plugins are owned by the admin API and left alone here.
+    let existing: Vec<PluginInstance> = repo
+        .list_plugins()
+        .await?
+        .into_iter()
+        .filter(|p| p.service_id.is_none() && p.route_id.is_none())
+        .collect();
     let by_name: HashMap<String, PluginInstance> =
         existing.iter().map(|p| (p.name.clone(), p.clone())).collect();
     let cfg_names: std::collections::HashSet<&str> =
@@ -342,22 +359,18 @@ async fn diff_plugins(
         match by_name.get(&plugin_cfg.name) {
             Some(cur) => {
                 if cur.enabled != plugin_cfg.enabled || cur.config != new_config {
-                    // No update_plugin in repo; emulate via delete + insert preserving id.
                     let updated = PluginInstance {
                         id: cur.id,
                         name: cur.name.clone(),
+                        service_id: cur.service_id,
+                        route_id: cur.route_id,
                         enabled: plugin_cfg.enabled,
                         config: new_config,
                         created_at: cur.created_at,
                         updated_at: Utc::now(),
                     };
-                    match repo.delete_plugin(&cur.id).await {
-                        Ok(_) => match repo.create_plugin(&updated).await {
-                            Ok(_) => result.updated_plugins += 1,
-                            Err(e) => result
-                                .errors
-                                .push(format!("update plugin {}: {e}", plugin_cfg.name)),
-                        },
+                    match repo.update_plugin(&cur.id, &updated).await {
+                        Ok(_) => result.updated_plugins += 1,
                         Err(e) => result
                             .errors
                             .push(format!("update plugin {}: {e}", plugin_cfg.name)),
@@ -369,6 +382,8 @@ async fn diff_plugins(
                 let plugin = PluginInstance {
                     id: Uuid::new_v4(),
                     name: plugin_cfg.name.clone(),
+                    service_id: None,
+                    route_id: None,
                     enabled: plugin_cfg.enabled,
                     config: new_config,
                     created_at: now,
@@ -397,3 +412,4 @@ async fn diff_plugins(
 
     Ok(())
 }
+

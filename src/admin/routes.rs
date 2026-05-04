@@ -2,6 +2,7 @@ use crate::db::Repository;
 use crate::error::GatewayError;
 use crate::health::{HealthRegistry, ServiceHealth};
 use crate::models::{Consumer, PluginInstance, Route, Service, Target};
+use crate::plugins::PluginExecutor;
 use crate::proxy::loadbalancer::{LbStrategy, LoadBalancerRegistry};
 use crate::proxy::router::SharedRouteTable;
 use crate::reload::{ReloadHandle, ReloadResult};
@@ -24,6 +25,7 @@ pub struct AdminState {
     pub start_time: chrono::DateTime<Utc>,
     pub metrics_handle: PrometheusHandle,
     pub reload: ReloadHandle,
+    pub plugin_exec: Arc<PluginExecutor>,
 }
 
 pub async fn reload_handler(
@@ -85,6 +87,10 @@ pub struct CreateRoute {
 #[derive(Deserialize)]
 pub struct CreatePlugin {
     pub name: String,
+    #[serde(default)]
+    pub service_id: Option<Uuid>,
+    #[serde(default)]
+    pub route_id: Option<Uuid>,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
@@ -303,17 +309,95 @@ pub async fn create_plugin(
     State(state): State<AdminState>,
     Json(input): Json<CreatePlugin>,
 ) -> Result<Json<PluginInstance>, GatewayError> {
+    validate_plugin_scope(&state, input.service_id, input.route_id).await?;
+    // Eagerly validate the plugin can be built before persisting.
+    let _ = crate::plugins::factory::build(&input.name, &input.config)?;
     let now = Utc::now();
     let plugin = PluginInstance {
         id: Uuid::new_v4(),
         name: input.name,
+        service_id: input.service_id,
+        route_id: input.route_id,
         enabled: input.enabled,
         config: input.config,
         created_at: now,
         updated_at: now,
     };
     state.repo.create_plugin(&plugin).await?;
+    state.plugin_exec.rebuild(&state.repo).await?;
     Ok(Json(plugin))
+}
+
+pub async fn get_plugin(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<PluginInstance>, GatewayError> {
+    state
+        .repo
+        .get_plugin(&id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| GatewayError::NotFound(format!("plugin {id}")))
+}
+
+pub async fn update_plugin(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<CreatePlugin>,
+) -> Result<Json<PluginInstance>, GatewayError> {
+    let existing = state
+        .repo
+        .get_plugin(&id)
+        .await?
+        .ok_or_else(|| GatewayError::NotFound(format!("plugin {id}")))?;
+
+    validate_plugin_scope(&state, input.service_id, input.route_id).await?;
+    let _ = crate::plugins::factory::build(&input.name, &input.config)?;
+
+    let updated = PluginInstance {
+        id: existing.id,
+        name: input.name,
+        service_id: input.service_id,
+        route_id: input.route_id,
+        enabled: input.enabled,
+        config: input.config,
+        created_at: existing.created_at,
+        updated_at: Utc::now(),
+    };
+    state.repo.update_plugin(&id, &updated).await?;
+    state.plugin_exec.rebuild(&state.repo).await?;
+    Ok(Json(updated))
+}
+
+pub async fn delete_plugin(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    let deleted = state.repo.delete_plugin(&id).await?;
+    if deleted {
+        state.plugin_exec.rebuild(&state.repo).await?;
+        Ok(Json(serde_json::json!({"deleted": true})))
+    } else {
+        Err(GatewayError::NotFound(format!("plugin {id}")))
+    }
+}
+
+async fn validate_plugin_scope(
+    state: &AdminState,
+    service_id: Option<Uuid>,
+    route_id: Option<Uuid>,
+) -> Result<(), GatewayError> {
+    if let Some(sid) = service_id {
+        if state.route_table.get_service(&sid).is_none() {
+            return Err(GatewayError::BadRequest(format!("service {sid} not found")));
+        }
+    }
+    if let Some(rid) = route_id {
+        if state.route_table.get_route(&rid).is_none() {
+            return Err(GatewayError::BadRequest(format!("route {rid} not found")));
+        }
+    }
+    Ok(())
 }
 
 pub async fn list_consumers(

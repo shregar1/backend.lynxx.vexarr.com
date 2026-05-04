@@ -1,4 +1,4 @@
-use crate::error::PluginError;
+use crate::error::{GatewayError, PluginError};
 use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
 use axum::http::{Request, Response};
@@ -28,6 +28,28 @@ impl AuthPlugin {
 
     pub fn add_api_key(&self, key: String, consumer: String) {
         self.api_keys.insert(key, consumer);
+    }
+
+    pub fn from_config(cfg: &serde_json::Value) -> Result<Self, GatewayError> {
+        let secret = cfg
+            .get("jwt_secret")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let plugin = Self::new(secret);
+        if let Some(arr) = cfg.get("api_keys").and_then(|v| v.as_array()) {
+            for entry in arr {
+                let key = entry.get("key").and_then(|v| v.as_str());
+                let consumer = entry
+                    .get("consumer")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if let Some(k) = key {
+                    plugin.add_api_key(k.to_string(), consumer.to_string());
+                }
+            }
+        }
+        Ok(plugin)
     }
 
     fn validate_api_key(&self, key: &str) -> Result<(), PluginError> {

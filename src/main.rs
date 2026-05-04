@@ -14,10 +14,7 @@ mod reload;
 use crate::config::load_config;
 use crate::db::Repository;
 use crate::health::{HealthConfig, HealthRegistry};
-use crate::plugins::logging::LoggingPlugin;
-use crate::plugins::rate_limit::RateLimitPlugin;
-use crate::plugins::cors::CorsPlugin;
-use crate::plugins::PluginRegistry;
+use crate::plugins::PluginExecutor;
 use crate::proxy::handler::{proxy_handler, ProxyState};
 use crate::proxy::loadbalancer::{LbStrategy, LoadBalancerRegistry};
 use crate::proxy::router::RouteTable;
@@ -64,51 +61,10 @@ async fn main() -> anyhow::Result<()> {
         "loaded persisted state"
     );
 
-    let mut plugin_registry = PluginRegistry::new();
+    let plugin_exec = Arc::new(PluginExecutor::new());
+    plugin_exec.rebuild(&repo).await?;
+    tracing::info!("plugin executor ready");
 
-    for plugin_cfg in &config.plugins {
-        if !plugin_cfg.enabled {
-            continue;
-        }
-        match plugin_cfg.name.as_str() {
-            "rate-limit" => {
-                let rps = plugin_cfg
-                    .config
-                    .get("requests_per_second")
-                    .and_then(|v| v.as_float())
-                    .or_else(|| {
-                        plugin_cfg
-                            .config
-                            .get("requests_per_second")
-                            .and_then(|v| v.as_integer())
-                            .map(|i| i as f64)
-                    })
-                    .unwrap_or(100.0);
-                plugin_registry.register(Arc::new(RateLimitPlugin::new(rps)));
-            }
-            "cors" => {
-                let origins = plugin_cfg
-                    .config
-                    .get("allow_origins")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                            .collect()
-                    })
-                    .unwrap_or_else(|| vec!["*".to_string()]);
-                plugin_registry.register(Arc::new(CorsPlugin::new(origins)));
-            }
-            "logging" => {
-                plugin_registry.register(Arc::new(LoggingPlugin::new()));
-            }
-            other => {
-                tracing::warn!("unknown plugin: {other}, skipping");
-            }
-        }
-    }
-
-    let plugin_registry = Arc::new(plugin_registry);
     let http_client = reqwest::Client::new();
     let grpc_client = crate::proxy::grpc::build_grpc_client();
 
@@ -136,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
 
     let proxy_state = ProxyState {
         route_table: route_table.clone(),
-        plugins: plugin_registry,
+        plugins: plugin_exec.clone(),
         http_client,
         grpc_client,
         health: health.clone(),
@@ -160,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
         route_table.clone(),
         health.clone(),
         lb.clone(),
+        plugin_exec.clone(),
     );
     reload::install_sighup_handler(reload_handle.clone());
 
@@ -170,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
         lb,
         metrics_handle,
         reload_handle,
+        plugin_exec,
     );
 
     let proxy_addr = format!("0.0.0.0:{}", config.gateway.proxy_port);

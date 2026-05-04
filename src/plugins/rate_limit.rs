@@ -1,4 +1,4 @@
-use crate::error::PluginError;
+use crate::error::{GatewayError, PluginError};
 use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
 use axum::http::{Request, Response};
@@ -50,6 +50,14 @@ impl RateLimitPlugin {
             requests_per_second,
             burst_size: requests_per_second * 2.0,
         }
+    }
+
+    pub fn from_config(cfg: &serde_json::Value) -> Result<Self, GatewayError> {
+        let rps = cfg
+            .get("requests_per_second")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(100.0);
+        Ok(Self::new(rps))
     }
 
     fn get_client_id(req: &Request<axum::body::Body>) -> String {

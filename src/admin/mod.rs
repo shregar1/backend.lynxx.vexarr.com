@@ -2,6 +2,7 @@ pub mod routes;
 
 use crate::db::Repository;
 use crate::health::HealthRegistry;
+use crate::plugins::PluginExecutor;
 use crate::proxy::loadbalancer::LoadBalancerRegistry;
 use crate::proxy::router::SharedRouteTable;
 use crate::reload::ReloadHandle;
@@ -19,6 +20,7 @@ pub fn admin_router(
     lb: Arc<LoadBalancerRegistry>,
     metrics_handle: PrometheusHandle,
     reload: ReloadHandle,
+    plugin_exec: Arc<PluginExecutor>,
 ) -> Router {
     let state = AdminState {
         route_table,
@@ -28,6 +30,7 @@ pub fn admin_router(
         start_time: Utc::now(),
         metrics_handle,
         reload,
+        plugin_exec,
     };
 
     Router::new()
@@ -56,6 +59,12 @@ pub fn admin_router(
                 .delete(routes::delete_route),
         )
         .route("/plugins", get(routes::list_plugins).post(routes::create_plugin))
+        .route(
+            "/plugins/:id",
+            get(routes::get_plugin)
+                .put(routes::update_plugin)
+                .delete(routes::delete_plugin),
+        )
         .route(
             "/consumers",
             get(routes::list_consumers).post(routes::create_consumer),

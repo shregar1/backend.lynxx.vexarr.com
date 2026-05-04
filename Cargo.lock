@@ -1227,6 +1227,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "ipnet",
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",

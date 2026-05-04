@@ -1,4 +1,4 @@
-use crate::error::PluginError;
+use crate::error::{GatewayError, PluginError};
 use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
 use axum::http::{Request, Response};
@@ -9,6 +9,10 @@ pub struct LoggingPlugin;
 impl LoggingPlugin {
     pub fn new() -> Self {
         Self
+    }
+
+    pub fn from_config(_cfg: &serde_json::Value) -> Result<Self, GatewayError> {
+        Ok(Self)
     }
 }
 

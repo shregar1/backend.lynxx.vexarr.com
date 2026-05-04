@@ -34,6 +34,10 @@ pub struct Route {
 pub struct PluginInstance {
     pub id: Uuid,
     pub name: String,
+    #[serde(default)]
+    pub service_id: Option<Uuid>,
+    #[serde(default)]
+    pub route_id: Option<Uuid>,
     pub enabled: bool,
     pub config: serde_json::Value,
     pub created_at: DateTime<Utc>,
