@@ -9,8 +9,14 @@ pub struct Service {
     pub url: String,
     pub retries: u32,
     pub connect_timeout_ms: u64,
+    #[serde(default = "default_lb_strategy")]
+    pub lb_strategy: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_lb_strategy() -> String {
+    "round-robin".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,9 +54,26 @@ pub struct Consumer {
 pub struct Target {
     pub id: Uuid,
     pub service_id: Uuid,
-    pub host: String,
-    pub port: u16,
+    pub url: String,
     pub weight: u32,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Target {
+    pub fn new(service_id: Uuid, url: String, weight: u32) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            service_id,
+            url,
+            weight: weight.max(1),
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        }
+    }
 }
 
 impl Service {
@@ -62,6 +85,7 @@ impl Service {
             url,
             retries,
             connect_timeout_ms,
+            lb_strategy: default_lb_strategy(),
             created_at: now,
             updated_at: now,
         }

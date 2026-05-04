@@ -18,6 +18,18 @@ pub struct GatewaySettings {
     pub proxy_port: u16,
     #[serde(default = "default_admin_port")]
     pub admin_port: u16,
+    #[serde(default = "default_database_url")]
+    pub database_url: String,
+    #[serde(default)]
+    pub seed_from_config: bool,
+    #[serde(default = "default_hc_interval")]
+    pub health_check_interval_ms: u64,
+    #[serde(default = "default_hc_failure_threshold")]
+    pub health_circuit_failure_threshold: u32,
+    #[serde(default = "default_hc_success_threshold")]
+    pub health_circuit_success_threshold: u32,
+    #[serde(default = "default_hc_open_duration")]
+    pub health_circuit_open_duration_ms: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -64,7 +76,33 @@ fn default_gateway() -> GatewaySettings {
     GatewaySettings {
         proxy_port: 8000,
         admin_port: 8001,
+        database_url: default_database_url(),
+        seed_from_config: false,
+        health_check_interval_ms: default_hc_interval(),
+        health_circuit_failure_threshold: default_hc_failure_threshold(),
+        health_circuit_success_threshold: default_hc_success_threshold(),
+        health_circuit_open_duration_ms: default_hc_open_duration(),
     }
+}
+
+fn default_hc_interval() -> u64 {
+    10_000
+}
+
+fn default_hc_failure_threshold() -> u32 {
+    3
+}
+
+fn default_hc_success_threshold() -> u32 {
+    2
+}
+
+fn default_hc_open_duration() -> u64 {
+    30_000
+}
+
+fn default_database_url() -> String {
+    "sqlite://lynxx.db?mode=rwc".to_string()
 }
 
 fn default_proxy_port() -> u16 {

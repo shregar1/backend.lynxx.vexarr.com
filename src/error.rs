@@ -1,4 +1,4 @@
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
@@ -12,6 +12,9 @@ pub enum GatewayError {
 
     #[error("upstream error: {0}")]
     UpstreamError(String),
+
+    #[error("circuit open: {0}")]
+    CircuitOpen(String),
 
     #[error("plugin error: {0}")]
     PluginError(PluginError),
@@ -27,6 +30,12 @@ pub enum GatewayError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    #[error("database error: {0}")]
+    Sqlx(#[from] sqlx::Error),
+
+    #[error("migration error: {0}")]
+    Migrate(#[from] sqlx::migrate::MigrateError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -46,10 +55,15 @@ pub enum PluginError {
 
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
+        let mut circuit_open = false;
         let (status, message) = match &self {
             GatewayError::RouteNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             GatewayError::ServiceNotFound(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             GatewayError::UpstreamError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
+            GatewayError::CircuitOpen(_) => {
+                circuit_open = true;
+                (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
+            }
             GatewayError::PluginError(e) => match e {
                 PluginError::RateLimited => {
                     (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded".into())
@@ -62,13 +76,22 @@ impl IntoResponse for GatewayError {
             },
             GatewayError::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             GatewayError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            GatewayError::ConfigError(_) | GatewayError::Internal(_) => {
+            GatewayError::ConfigError(_)
+            | GatewayError::Internal(_)
+            | GatewayError::Sqlx(_)
+            | GatewayError::Migrate(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
             }
         };
 
         let body = json!({ "error": message });
-        (status, axum::Json(body)).into_response()
+        let mut response = (status, axum::Json(body)).into_response();
+        if circuit_open {
+            response
+                .headers_mut()
+                .insert("X-Lynxx-Circuit", HeaderValue::from_static("open"));
+        }
+        response
     }
 }
 

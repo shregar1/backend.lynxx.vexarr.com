@@ -2,19 +2,25 @@
 
 mod admin;
 mod config;
+mod db;
 mod error;
+mod health;
+mod metrics;
 mod models;
 mod plugins;
 mod proxy;
+mod reload;
 
 use crate::config::load_config;
+use crate::db::Repository;
+use crate::health::{HealthConfig, HealthRegistry};
 use crate::plugins::logging::LoggingPlugin;
 use crate::plugins::rate_limit::RateLimitPlugin;
 use crate::plugins::cors::CorsPlugin;
 use crate::plugins::PluginRegistry;
 use crate::proxy::handler::{proxy_handler, ProxyState};
+use crate::proxy::loadbalancer::{LbStrategy, LoadBalancerRegistry};
 use crate::proxy::router::RouteTable;
-use models::{Route, Service};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -27,6 +33,9 @@ async fn main() -> anyhow::Result<()> {
         }))
         .init();
 
+    let metrics_handle = metrics::install();
+    metrics::describe();
+
     let config = load_config("config.toml")?;
 
     tracing::info!(
@@ -35,30 +44,25 @@ async fn main() -> anyhow::Result<()> {
         "starting lynx gateway"
     );
 
-    let route_table = Arc::new(RouteTable::new());
+    let repo = Arc::new(Repository::new(&config.gateway.database_url).await?);
+    tracing::info!(database_url = %config.gateway.database_url, "database ready");
 
-    for svc_cfg in &config.services {
-        let service = Service::new(
-            svc_cfg.name.clone(),
-            svc_cfg.url.clone(),
-            svc_cfg.retries,
-            svc_cfg.connect_timeout_ms,
-        );
-        let service_id = service.id;
-        route_table.add_service(service);
-
-        for rt_cfg in &config.routes {
-            if rt_cfg.service == svc_cfg.name {
-                let route = Route::new(
-                    rt_cfg.paths.clone(),
-                    rt_cfg.methods.clone(),
-                    service_id,
-                    rt_cfg.strip_path,
-                );
-                route_table.add_route(route);
-            }
-        }
+    if config.gateway.seed_from_config && repo.is_empty().await? {
+        tracing::info!("database empty; seeding from config.toml");
+        repo.seed_from_config(&config).await?;
     }
+
+    let route_table = Arc::new(RouteTable::new());
+    let (svc_count, route_count) = route_table.load_from_repo(&repo).await?;
+    let plugin_count = repo.list_plugins().await?.len();
+    let consumer_count = repo.list_consumers().await?.len();
+    tracing::info!(
+        services = svc_count,
+        routes = route_count,
+        plugins = plugin_count,
+        consumers = consumer_count,
+        "loaded persisted state"
+    );
 
     let mut plugin_registry = PluginRegistry::new();
 
@@ -106,18 +110,67 @@ async fn main() -> anyhow::Result<()> {
 
     let plugin_registry = Arc::new(plugin_registry);
     let http_client = reqwest::Client::new();
+    let grpc_client = crate::proxy::grpc::build_grpc_client();
+
+    let health_config = HealthConfig {
+        failure_threshold: config.gateway.health_circuit_failure_threshold,
+        success_threshold: config.gateway.health_circuit_success_threshold,
+        open_duration_ms: config.gateway.health_circuit_open_duration_ms,
+    };
+    let health = Arc::new(HealthRegistry::with_config(health_config));
+    let lb = Arc::new(LoadBalancerRegistry::new());
+    for svc in route_table.list_services() {
+        health.register(svc.id);
+        let targets = repo.list_targets_for_service(&svc.id).await?;
+        lb.rebuild_for_service(svc.id, LbStrategy::from_str(&svc.lb_strategy), targets);
+    }
+
+    health::checker::spawn_health_checker(
+        route_table.clone(),
+        health.clone(),
+        repo.clone(),
+        lb.clone(),
+        http_client.clone(),
+        config.gateway.health_check_interval_ms,
+    );
 
     let proxy_state = ProxyState {
         route_table: route_table.clone(),
         plugins: plugin_registry,
         http_client,
+        grpc_client,
+        health: health.clone(),
+        lb: lb.clone(),
     };
 
     let proxy_app = axum::Router::new()
         .fallback(proxy_handler)
         .with_state(proxy_state);
 
-    let admin_app = admin::admin_router(route_table);
+    metrics::spawn_metrics_collector(
+        route_table.clone(),
+        repo.clone(),
+        health.clone(),
+        5_000,
+    );
+
+    let reload_handle = reload::spawn_reloader(
+        "config.toml".to_string(),
+        repo.clone(),
+        route_table.clone(),
+        health.clone(),
+        lb.clone(),
+    );
+    reload::install_sighup_handler(reload_handle.clone());
+
+    let admin_app = admin::admin_router(
+        route_table,
+        repo,
+        health,
+        lb,
+        metrics_handle,
+        reload_handle,
+    );
 
     let proxy_addr = format!("0.0.0.0:{}", config.gateway.proxy_port);
     let admin_addr = format!("0.0.0.0:{}", config.gateway.admin_port);

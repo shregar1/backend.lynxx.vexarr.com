@@ -6,3 +6,8 @@
 .DS_Store
 .idea/
 .vscode/
+lynxx.db
+lynxx.db-journal
+lynxx.db-wal
+lynxx.db-shm
+*.db

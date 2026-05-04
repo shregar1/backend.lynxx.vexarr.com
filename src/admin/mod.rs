@@ -1,34 +1,56 @@
 pub mod routes;
 
-use crate::models::{Consumer, PluginInstance};
+use crate::db::Repository;
+use crate::health::HealthRegistry;
+use crate::proxy::loadbalancer::LoadBalancerRegistry;
 use crate::proxy::router::SharedRouteTable;
-use axum::routing::get;
+use crate::reload::ReloadHandle;
+use axum::routing::{get, post};
 use axum::Router;
 use chrono::Utc;
-use dashmap::DashMap;
+use metrics_exporter_prometheus::PrometheusHandle;
 use routes::AdminState;
 use std::sync::Arc;
-use uuid::Uuid;
 
-pub fn admin_router(route_table: SharedRouteTable) -> Router {
+pub fn admin_router(
+    route_table: SharedRouteTable,
+    repo: Arc<Repository>,
+    health: Arc<HealthRegistry>,
+    lb: Arc<LoadBalancerRegistry>,
+    metrics_handle: PrometheusHandle,
+    reload: ReloadHandle,
+) -> Router {
     let state = AdminState {
         route_table,
-        plugins: Arc::new(DashMap::<Uuid, PluginInstance>::new()),
-        consumers: Arc::new(DashMap::<Uuid, Consumer>::new()),
+        repo,
+        health,
+        lb,
         start_time: Utc::now(),
+        metrics_handle,
+        reload,
     };
 
     Router::new()
         .route("/services", get(routes::list_services).post(routes::create_service))
         .route(
-            "/services/{id}",
+            "/services/:id",
             get(routes::get_service)
                 .put(routes::update_service)
                 .delete(routes::delete_service),
         )
+        .route(
+            "/services/:id/targets",
+            get(routes::list_service_targets).post(routes::create_service_target),
+        )
+        .route("/targets", get(routes::list_all_targets))
+        .route(
+            "/targets/:id",
+            axum::routing::put(routes::update_target_handler)
+                .delete(routes::delete_target_handler),
+        )
         .route("/routes", get(routes::list_routes).post(routes::create_route))
         .route(
-            "/routes/{id}",
+            "/routes/:id",
             get(routes::get_route)
                 .put(routes::update_route)
                 .delete(routes::delete_route),
@@ -38,6 +60,10 @@ pub fn admin_router(route_table: SharedRouteTable) -> Router {
             "/consumers",
             get(routes::list_consumers).post(routes::create_consumer),
         )
+        .route("/health", get(routes::list_health))
+        .route("/health/:service_id", get(routes::get_health))
         .route("/status", get(routes::gateway_status))
+        .route("/metrics", get(routes::metrics))
+        .route("/reload", post(routes::reload_handler))
         .with_state(state)
 }

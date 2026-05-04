@@ -1,10 +1,16 @@
+use crate::db::Repository;
 use crate::error::GatewayError;
-use crate::models::{Consumer, PluginInstance, Route, Service};
+use crate::health::{HealthRegistry, ServiceHealth};
+use crate::models::{Consumer, PluginInstance, Route, Service, Target};
+use crate::proxy::loadbalancer::{LbStrategy, LoadBalancerRegistry};
 use crate::proxy::router::SharedRouteTable;
+use crate::reload::{ReloadHandle, ReloadResult};
 use axum::extract::{Path, State};
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::Utc;
-use dashmap::DashMap;
+use metrics_exporter_prometheus::PrometheusHandle;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -12,9 +18,19 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct AdminState {
     pub route_table: SharedRouteTable,
-    pub plugins: Arc<DashMap<Uuid, PluginInstance>>,
-    pub consumers: Arc<DashMap<Uuid, Consumer>>,
+    pub repo: Arc<Repository>,
+    pub health: Arc<HealthRegistry>,
+    pub lb: Arc<LoadBalancerRegistry>,
     pub start_time: chrono::DateTime<Utc>,
+    pub metrics_handle: PrometheusHandle,
+    pub reload: ReloadHandle,
+}
+
+pub async fn reload_handler(
+    State(state): State<AdminState>,
+) -> Result<Json<ReloadResult>, GatewayError> {
+    let result = state.reload.trigger().await?;
+    Ok(Json(result))
 }
 
 #[derive(Deserialize)]
@@ -25,6 +41,28 @@ pub struct CreateService {
     pub retries: u32,
     #[serde(default = "default_timeout")]
     pub connect_timeout_ms: u64,
+    #[serde(default)]
+    pub lb_strategy: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct CreateTarget {
+    pub url: String,
+    #[serde(default = "default_weight")]
+    pub weight: u32,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateTarget {
+    pub url: Option<String>,
+    pub weight: Option<u32>,
+    pub enabled: Option<bool>,
+}
+
+fn default_weight() -> u32 {
+    1
 }
 
 fn default_retries() -> u32 {
@@ -74,9 +112,7 @@ pub struct StatusResponse {
     pub consumers_count: usize,
 }
 
-pub async fn list_services(
-    State(state): State<AdminState>,
-) -> Json<Vec<Service>> {
+pub async fn list_services(State(state): State<AdminState>) -> Json<Vec<Service>> {
     Json(state.route_table.list_services())
 }
 
@@ -84,9 +120,20 @@ pub async fn create_service(
     State(state): State<AdminState>,
     Json(input): Json<CreateService>,
 ) -> Result<Json<Service>, GatewayError> {
-    let service = Service::new(input.name, input.url, input.retries, input.connect_timeout_ms);
-    let id = state.route_table.add_service(service.clone());
-    tracing::info!(id = %id, "service created");
+    let mut service =
+        Service::new(input.name, input.url, input.retries, input.connect_timeout_ms);
+    if let Some(s) = input.lb_strategy {
+        service.lb_strategy = s;
+    }
+    state.repo.create_service(&service).await?;
+    state.route_table.add_service(service.clone());
+    state.health.register(service.id);
+    state.lb.rebuild_for_service(
+        service.id,
+        LbStrategy::from_str(&service.lb_strategy),
+        Vec::new(),
+    );
+    tracing::info!(id = %service.id, "service created");
     Ok(Json(service))
 }
 
@@ -112,17 +159,35 @@ pub async fn update_service(
         .get_service(&id)
         .ok_or_else(|| GatewayError::NotFound(format!("service {id}")))?;
 
+    let new_strategy = input
+        .lb_strategy
+        .clone()
+        .unwrap_or_else(|| existing.lb_strategy.clone());
+    let strategy_changed = new_strategy != existing.lb_strategy;
+
     let updated = Service {
         id,
         name: input.name,
         url: input.url,
         retries: input.retries,
         connect_timeout_ms: input.connect_timeout_ms,
+        lb_strategy: new_strategy,
         created_at: existing.created_at,
         updated_at: now,
     };
 
+    state.repo.update_service(&id, &updated).await?;
     state.route_table.update_service(&id, updated.clone());
+
+    if strategy_changed {
+        let targets = state.repo.list_targets_for_service(&id).await?;
+        state.lb.rebuild_for_service(
+            id,
+            LbStrategy::from_str(&updated.lb_strategy),
+            targets,
+        );
+    }
+
     Ok(Json(updated))
 }
 
@@ -130,16 +195,33 @@ pub async fn delete_service(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
-    if state.route_table.remove_service(&id) {
+    let deleted = state.repo.delete_service(&id).await?;
+    if deleted {
+        state.route_table.remove_service(&id);
+        state.health.unregister(&id);
+        state.lb.remove_service(&id);
         Ok(Json(serde_json::json!({"deleted": true})))
     } else {
         Err(GatewayError::NotFound(format!("service {id}")))
     }
 }
 
-pub async fn list_routes(
+pub async fn list_health(State(state): State<AdminState>) -> Json<Vec<ServiceHealth>> {
+    Json(state.health.list())
+}
+
+pub async fn get_health(
     State(state): State<AdminState>,
-) -> Json<Vec<Route>> {
+    Path(id): Path<Uuid>,
+) -> Result<Json<ServiceHealth>, GatewayError> {
+    state
+        .health
+        .get(&id)
+        .map(Json)
+        .ok_or_else(|| GatewayError::NotFound(format!("health for service {id}")))
+}
+
+pub async fn list_routes(State(state): State<AdminState>) -> Json<Vec<Route>> {
     Json(state.route_table.list_routes())
 }
 
@@ -155,8 +237,9 @@ pub async fn create_route(
     }
 
     let route = Route::new(input.paths, input.methods, input.service_id, input.strip_path);
-    let id = state.route_table.add_route(route.clone());
-    tracing::info!(id = %id, "route created");
+    state.repo.create_route(&route).await?;
+    state.route_table.add_route(route.clone());
+    tracing::info!(id = %route.id, "route created");
     Ok(Json(route))
 }
 
@@ -192,6 +275,7 @@ pub async fn update_route(
         updated_at: now,
     };
 
+    state.repo.update_route(&id, &updated).await?;
     state.route_table.update_route(&id, updated.clone());
     Ok(Json(updated))
 }
@@ -200,7 +284,9 @@ pub async fn delete_route(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
-    if state.route_table.remove_route(&id) {
+    let deleted = state.repo.delete_route(&id).await?;
+    if deleted {
+        state.route_table.remove_route(&id);
         Ok(Json(serde_json::json!({"deleted": true})))
     } else {
         Err(GatewayError::NotFound(format!("route {id}")))
@@ -209,15 +295,14 @@ pub async fn delete_route(
 
 pub async fn list_plugins(
     State(state): State<AdminState>,
-) -> Json<Vec<PluginInstance>> {
-    let plugins: Vec<PluginInstance> = state.plugins.iter().map(|p| p.clone()).collect();
-    Json(plugins)
+) -> Result<Json<Vec<PluginInstance>>, GatewayError> {
+    Ok(Json(state.repo.list_plugins().await?))
 }
 
 pub async fn create_plugin(
     State(state): State<AdminState>,
     Json(input): Json<CreatePlugin>,
-) -> Json<PluginInstance> {
+) -> Result<Json<PluginInstance>, GatewayError> {
     let now = Utc::now();
     let plugin = PluginInstance {
         id: Uuid::new_v4(),
@@ -227,40 +312,149 @@ pub async fn create_plugin(
         created_at: now,
         updated_at: now,
     };
-    state.plugins.insert(plugin.id, plugin.clone());
-    Json(plugin)
+    state.repo.create_plugin(&plugin).await?;
+    Ok(Json(plugin))
 }
 
 pub async fn list_consumers(
     State(state): State<AdminState>,
-) -> Json<Vec<Consumer>> {
-    let consumers: Vec<Consumer> = state.consumers.iter().map(|c| c.clone()).collect();
-    Json(consumers)
+) -> Result<Json<Vec<Consumer>>, GatewayError> {
+    Ok(Json(state.repo.list_consumers().await?))
 }
 
 pub async fn create_consumer(
     State(state): State<AdminState>,
     Json(input): Json<CreateConsumer>,
-) -> Json<Consumer> {
+) -> Result<Json<Consumer>, GatewayError> {
     let consumer = Consumer::new(input.username, input.custom_id);
-    state.consumers.insert(consumer.id, consumer.clone());
-    Json(consumer)
+    state.repo.create_consumer(&consumer).await?;
+    Ok(Json(consumer))
+}
+
+pub async fn metrics(State(state): State<AdminState>) -> Response {
+    let body = state.metrics_handle.render();
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; version=0.0.4"),
+        )],
+        body,
+    )
+        .into_response()
+}
+
+// ---------- targets ----------
+
+async fn rebuild_lb(state: &AdminState, service_id: Uuid) -> Result<(), GatewayError> {
+    let svc = state
+        .route_table
+        .get_service(&service_id)
+        .ok_or_else(|| GatewayError::NotFound(format!("service {service_id}")))?;
+    let targets = state.repo.list_targets_for_service(&service_id).await?;
+    state.lb.rebuild_for_service(
+        service_id,
+        LbStrategy::from_str(&svc.lb_strategy),
+        targets,
+    );
+    Ok(())
+}
+
+pub async fn list_all_targets(
+    State(state): State<AdminState>,
+) -> Result<Json<Vec<Target>>, GatewayError> {
+    Ok(Json(state.repo.list_targets().await?))
+}
+
+pub async fn list_service_targets(
+    State(state): State<AdminState>,
+    Path(service_id): Path<Uuid>,
+) -> Result<Json<Vec<Target>>, GatewayError> {
+    if state.route_table.get_service(&service_id).is_none() {
+        return Err(GatewayError::NotFound(format!("service {service_id}")));
+    }
+    Ok(Json(
+        state.repo.list_targets_for_service(&service_id).await?,
+    ))
+}
+
+pub async fn create_service_target(
+    State(state): State<AdminState>,
+    Path(service_id): Path<Uuid>,
+    Json(input): Json<CreateTarget>,
+) -> Result<Json<Target>, GatewayError> {
+    if state.route_table.get_service(&service_id).is_none() {
+        return Err(GatewayError::NotFound(format!("service {service_id}")));
+    }
+    let mut target = Target::new(service_id, input.url, input.weight);
+    target.enabled = input.enabled;
+    state.repo.create_target(&target).await?;
+    rebuild_lb(&state, service_id).await?;
+    tracing::info!(target_id = %target.id, service_id = %service_id, "target created");
+    Ok(Json(target))
+}
+
+pub async fn update_target_handler(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<UpdateTarget>,
+) -> Result<Json<Target>, GatewayError> {
+    let existing = state
+        .repo
+        .get_target(&id)
+        .await?
+        .ok_or_else(|| GatewayError::NotFound(format!("target {id}")))?;
+
+    let updated = Target {
+        id: existing.id,
+        service_id: existing.service_id,
+        url: input.url.unwrap_or(existing.url),
+        weight: input.weight.unwrap_or(existing.weight).max(1),
+        enabled: input.enabled.unwrap_or(existing.enabled),
+        created_at: existing.created_at,
+        updated_at: Utc::now(),
+    };
+
+    state.repo.update_target(&id, &updated).await?;
+    rebuild_lb(&state, updated.service_id).await?;
+    Ok(Json(updated))
+}
+
+pub async fn delete_target_handler(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    let existing = state
+        .repo
+        .get_target(&id)
+        .await?
+        .ok_or_else(|| GatewayError::NotFound(format!("target {id}")))?;
+    let deleted = state.repo.delete_target(&id).await?;
+    if deleted {
+        rebuild_lb(&state, existing.service_id).await?;
+        Ok(Json(serde_json::json!({"deleted": true})))
+    } else {
+        Err(GatewayError::NotFound(format!("target {id}")))
+    }
 }
 
 pub async fn gateway_status(
     State(state): State<AdminState>,
-) -> Json<StatusResponse> {
+) -> Result<Json<StatusResponse>, GatewayError> {
     let uptime = Utc::now()
         .signed_duration_since(state.start_time)
         .num_seconds();
 
-    Json(StatusResponse {
+    let plugins_count = state.repo.list_plugins().await?.len();
+    let consumers_count = state.repo.list_consumers().await?.len();
+
+    Ok(Json(StatusResponse {
         status: "running".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         uptime_seconds: uptime,
         services_count: state.route_table.list_services().len(),
         routes_count: state.route_table.list_routes().len(),
-        plugins_count: state.plugins.len(),
-        consumers_count: state.consumers.len(),
-    })
+        plugins_count,
+        consumers_count,
+    }))
 }

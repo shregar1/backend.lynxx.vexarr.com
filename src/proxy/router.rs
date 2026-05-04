@@ -1,3 +1,5 @@
+use crate::db::Repository;
+use crate::error::GatewayError;
 use crate::models::{Route, Service};
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -14,6 +16,25 @@ impl RouteTable {
             services: DashMap::new(),
             routes: DashMap::new(),
         }
+    }
+
+    /// Bulk-load services and routes from the persistent repository,
+    /// replacing whatever is currently in memory.
+    pub async fn load_from_repo(&self, repo: &Repository) -> Result<(usize, usize), GatewayError> {
+        let services = repo.list_services().await?;
+        let routes = repo.list_routes().await?;
+
+        self.services.clear();
+        self.routes.clear();
+
+        for svc in &services {
+            self.services.insert(svc.id, svc.clone());
+        }
+        for route in &routes {
+            self.routes.insert(route.id, route.clone());
+        }
+
+        Ok((services.len(), routes.len()))
     }
 
     pub fn add_service(&self, service: Service) -> Uuid {

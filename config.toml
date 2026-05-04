@@ -1,6 +1,12 @@
 [gateway]
-proxy_port = 8000
-admin_port = 8001
+proxy_port = 9000
+admin_port = 9001
+database_url = "sqlite://lynxx.db?mode=rwc"
+seed_from_config = true
+health_check_interval_ms = 10000
+health_circuit_failure_threshold = 3
+health_circuit_success_threshold = 2
+health_circuit_open_duration_ms = 30000
 
 [[services]]
 name = "example-service"
