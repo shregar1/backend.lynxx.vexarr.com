@@ -1,0 +1,33 @@
+[gateway]
+proxy_port = 8000
+admin_port = 8001
+
+[[services]]
+name = "example-service"
+url = "http://httpbin.org"
+retries = 3
+connect_timeout_ms = 5000
+
+[[routes]]
+paths = ["/example"]
+methods = ["GET", "POST"]
+service = "example-service"
+strip_path = true
+
+[[plugins]]
+name = "rate-limit"
+enabled = true
+
+[plugins.config]
+requests_per_second = 100
+
+[[plugins]]
+name = "cors"
+enabled = true
+
+[plugins.config]
+allow_origins = ["*"]
+
+[[plugins]]
+name = "logging"
+enabled = true
