@@ -257,7 +257,7 @@ async fn time_travel_capture_list_replay_delete() {
         replay["diff"]["body_diff"]
     );
 
-    // 10. Delete and verify the count drops.
+    // 10. Delete and verify the row no longer appears.
     let resp = http
         .delete(format!("{admin_base}/recordings/{id}"))
         .send()
@@ -273,9 +273,11 @@ async fn time_travel_capture_list_replay_delete() {
         .json()
         .await
         .unwrap();
-    assert_eq!(
-        after.len(),
-        rows.len() - 1,
-        "list should be one shorter after delete"
+    // Replaying through the gateway itself is also captured (sample_rate=1.0),
+    // so we don't compare absolute counts. We just verify the deleted id is
+    // no longer listed.
+    assert!(
+        after.iter().all(|r| r["id"].as_str() != Some(id.as_str())),
+        "deleted id should not appear in subsequent list"
     );
 }

@@ -282,12 +282,19 @@ pub async fn proxy_handler(
         .headers()
         .get(crate::plugins::proxy_cache::CACHE_KEY_HEADER)
         .cloned();
+    // Same bridge for the request-recorder's capture id. The plugin sets a
+    // request header in on_request and reads it back in on_response.
+    let recorder_id = req
+        .headers()
+        .get("x-lynxx-recorder-id")
+        .cloned();
 
     // Move parts out so we don't clone the HeaderMap. `req` is consumed.
     let (mut parts, body) = req.into_parts();
     parts.uri = upstream_uri;
     // Strip hop-by-hop and our internal proxy-cache marker.
     parts.headers.remove(crate::plugins::proxy_cache::CACHE_KEY_HEADER);
+    parts.headers.remove("x-lynxx-recorder-id");
     for h in HOP_BY_HOP.iter() {
         // safety: the constants are valid header names.
         if let Ok(name) = HeaderName::from_bytes(h.as_bytes()) {
@@ -415,6 +422,9 @@ pub async fn proxy_handler(
         plugin_resp
             .headers_mut()
             .insert(crate::plugins::proxy_cache::CACHE_KEY_HEADER, v);
+    }
+    if let Some(v) = recorder_id {
+        plugin_resp.headers_mut().insert("x-lynxx-recorder-id", v);
     }
 
     state
