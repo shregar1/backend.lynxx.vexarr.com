@@ -21,6 +21,8 @@ use crate::plugins::llm_gateway::LlmGatewayPlugin;
 use crate::plugins::logging::LoggingPlugin;
 use crate::plugins::mocking::MockingPlugin;
 use crate::plugins::oauth2_introspect::Oauth2IntrospectPlugin;
+use crate::plugins::openapi_drift::OpenApiDriftPlugin;
+use crate::plugins::openapi_mock::OpenApiMockPlugin;
 use crate::plugins::opentelemetry::OpenTelemetryPlugin;
 use crate::plugins::prometheus_per_consumer::PrometheusPerConsumerPlugin;
 use crate::plugins::proxy_cache::ProxyCachePlugin;
@@ -97,6 +99,8 @@ pub fn build(
         "llm-gateway" => Arc::new(LlmGatewayPlugin::from_config(config)?),
         "graphql-guard" => Arc::new(GraphqlGuardPlugin::from_config(config)?),
         "wasm" => Arc::new(WasmPlugin::from_config(config)?),
+        "openapi-drift" => Arc::new(OpenApiDriftPlugin::from_config(config)?),
+        "openapi-mock" => Arc::new(OpenApiMockPlugin::from_config(config)?),
         other => {
             return Err(GatewayError::BadRequest(format!("unknown plugin: {other}")));
         }

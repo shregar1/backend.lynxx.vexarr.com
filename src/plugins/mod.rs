@@ -20,6 +20,8 @@ pub mod llm_gateway;
 pub mod logging;
 pub mod mocking;
 pub mod oauth2_introspect;
+pub mod openapi_drift;
+pub mod openapi_mock;
 pub mod opentelemetry;
 pub mod prometheus_per_consumer;
 pub mod proxy_cache;

@@ -2945,6 +2945,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "mimalloc",
  "num_cpus",
+ "openapiv3",
  "rand 0.8.6",
  "redis",
  "regex",
@@ -3333,6 +3334,17 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "openapiv3"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c8d427828b22ae1fff2833a03d8486c2c881367f1c336349f307f321e7f4d05"
+dependencies = [
+ "indexmap 2.14.0",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "openssl"

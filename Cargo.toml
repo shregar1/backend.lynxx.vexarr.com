@@ -95,6 +95,15 @@ graphql-parser = "0.4"
 # surface limited to the explicit `lynxx_*` ABI in src/plugins/wasm/host.rs.
 wasmtime = "27"
 
+# OpenAPI 3.0 parsing for the `lynxx import` CLI flow and the
+# `openapi-drift` / `openapi-mock` plugins. We deliberately picked
+# `openapiv3` over `oas3`: the latter blew up on several real-world
+# 3.0 specs we tested (notably anything with deeply-nested `allOf`
+# in a request body). 3.1 specs work on a best-effort basis; the
+# pieces that matter for routing — paths, methods, parameters,
+# requestBody schemas, and response examples — are compatible.
+openapiv3 = "2"
+
 [lib]
 name = "lynx_gateway"
 path = "src/lib.rs"
