@@ -23,4 +23,5 @@ pub mod metrics;
 pub mod models;
 pub mod plugins;
 pub mod proxy;
+pub mod recording;
 pub mod reload;

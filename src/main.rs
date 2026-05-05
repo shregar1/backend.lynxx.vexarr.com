@@ -19,6 +19,7 @@ mod metrics;
 mod models;
 mod plugins;
 mod proxy;
+mod recording;
 mod reload;
 
 use crate::cluster::ChangeEvent;
