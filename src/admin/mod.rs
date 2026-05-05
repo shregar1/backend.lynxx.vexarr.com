@@ -7,12 +7,14 @@ use crate::plugins::PluginExecutor;
 use crate::proxy::loadbalancer::LoadBalancerRegistry;
 use crate::proxy::router::SharedRouteTable;
 use crate::reload::ReloadHandle;
+use axum::http::Method;
 use axum::routing::{get, post};
 use axum::Router;
 use chrono::Utc;
 use metrics_exporter_prometheus::PrometheusHandle;
 use routes::AdminState;
 use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
 pub fn admin_router(
@@ -89,4 +91,23 @@ pub fn admin_router(
         .route("/metrics", get(routes::metrics))
         .route("/reload", post(routes::reload_handler))
         .with_state(state)
+        .layer(admin_cors())
+}
+
+/// Permissive CORS for the admin API: any origin, common methods + headers.
+/// The admin port is meant for trusted control-plane traffic; locking origins
+/// down is the operator's responsibility behind a real auth/proxy layer.
+fn admin_cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::PATCH,
+            Method::OPTIONS,
+        ])
+        .allow_headers(Any)
+        .allow_origin(Any)
+        .expose_headers(Any)
 }
