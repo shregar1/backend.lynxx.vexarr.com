@@ -1,0 +1,170 @@
+# Production-grade Lynxx stack.
+#
+#   - 3 gateway replicas behind nginx TLS terminator
+#   - Postgres for the control plane (volume-backed)
+#   - Prometheus scraping every 5s, 7-day retention
+#   - Grafana with the bundled "Lynxx" dashboard pre-provisioned
+#
+# Quickstart:
+#   cp .env.example .env && edit
+#   docker compose -f docker-compose.production.yml up -d
+#
+# This file is *separate* from the repo-root docker-compose.yml, which is the
+# clustering demo. Don't merge them.
+
+name: lynxx-prod
+
+x-gateway-base: &gateway-base
+  image: ghcr.io/lynxx/lynxx-gateway:${LYNXX_TAG:-latest}
+  restart: unless-stopped
+  environment:
+    LYNXX_CONFIG: /etc/lynxx/config.toml
+    DATABASE_URL: postgres://lynxx:${POSTGRES_PASSWORD}@postgres:5432/lynxx
+    RUST_LOG: ${RUST_LOG:-info}
+  depends_on:
+    postgres:
+      condition: service_healthy
+  networks:
+    - lynxx-internal
+  # Admin port (9001) is intentionally not published to the host. Reach it
+  # over the internal network from the prometheus container.
+  expose:
+    - "9000"
+    - "9001"
+  healthcheck:
+    test: ["CMD", "/usr/local/bin/lynx-gateway", "healthcheck", "--addr", "127.0.0.1:9001"]
+    interval: 10s
+    timeout: 3s
+    retries: 5
+    start_period: 15s
+  deploy:
+    resources:
+      limits:
+        cpus: "${GATEWAY_CPU_LIMIT:-2}"
+        memory: "${GATEWAY_MEM_LIMIT:-512M}"
+
+services:
+  # ------------------------------------------------------------------
+  # Control plane database.
+  # ------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lynxx
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: lynxx
+      # Reasonable defaults for a small/medium deployment. Tune for your box.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - lynxx-pg-data:/var/lib/postgresql/data
+    networks:
+      - lynxx-internal
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "lynxx", "-d", "lynxx"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  # ------------------------------------------------------------------
+  # Three gateway replicas. nginx round-robins across them.
+  # ------------------------------------------------------------------
+  lynxx-gateway-1:
+    <<: *gateway-base
+    container_name: lynxx-gateway-1
+    hostname: lynxx-gateway-1
+
+  lynxx-gateway-2:
+    <<: *gateway-base
+    container_name: lynxx-gateway-2
+    hostname: lynxx-gateway-2
+
+  lynxx-gateway-3:
+    <<: *gateway-base
+    container_name: lynxx-gateway-3
+    hostname: lynxx-gateway-3
+
+  # ------------------------------------------------------------------
+  # TLS terminator + L7 round-robin.
+  # ------------------------------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - lynxx-gateway-1
+      - lynxx-gateway-2
+      - lynxx-gateway-3
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    networks:
+      - lynxx-internal
+      - lynxx-edge
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ------------------------------------------------------------------
+  # Metrics + dashboards.
+  # ------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+      - --web.console.libraries=/usr/share/prometheus/console_libraries
+      - --web.console.templates=/usr/share/prometheus/consoles
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - lynxx-prom-data:/prometheus
+    networks:
+      - lynxx-internal
+    expose:
+      - "9090"
+    # Bind to localhost only — Grafana reaches it on the internal net.
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in .env}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - lynxx-grafana-data:/var/lib/grafana
+    networks:
+      - lynxx-internal
+    ports:
+      - "127.0.0.1:3000:3000"
+
+networks:
+  # Internal: DB, gateway replicas, prometheus, grafana. Not internet-facing.
+  lynxx-internal:
+    driver: bridge
+    internal: false   # set true if you want zero egress; nginx still has its own net
+  # Edge: only nginx attaches here. This is what binds 80/443.
+  lynxx-edge:
+    driver: bridge
+
+volumes:
+  lynxx-pg-data:
+  lynxx-prom-data:
+  lynxx-grafana-data:

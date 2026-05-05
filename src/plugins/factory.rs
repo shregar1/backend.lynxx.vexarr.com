@@ -5,30 +5,40 @@ use crate::plugins::auth::AuthPlugin;
 use crate::plugins::aws_lambda::AwsLambdaPlugin;
 use crate::plugins::basic_auth::BasicAuthPlugin;
 use crate::plugins::bot_detection::BotDetectionPlugin;
+use crate::plugins::canary::CanaryPlugin;
 use crate::plugins::correlation_id::CorrelationIdPlugin;
 use crate::plugins::cors::CorsPlugin;
 use crate::plugins::datadog::DatadogPlugin;
 use crate::plugins::file_log::FileLogPlugin;
+use crate::plugins::grpc_web::GrpcWebPlugin;
 use crate::plugins::hmac_auth::HmacAuthPlugin;
+use crate::plugins::honeycomb::HoneycombPlugin;
 use crate::plugins::ip_restriction::IpRestrictionPlugin;
 use crate::plugins::jwt::JwtPlugin;
 use crate::plugins::key_auth::KeyAuthPlugin;
 use crate::plugins::logging::LoggingPlugin;
+use crate::plugins::mocking::MockingPlugin;
 use crate::plugins::oauth2_introspect::Oauth2IntrospectPlugin;
 use crate::plugins::opentelemetry::OpenTelemetryPlugin;
 use crate::plugins::prometheus_per_consumer::PrometheusPerConsumerPlugin;
 use crate::plugins::proxy_cache::ProxyCachePlugin;
 use crate::plugins::rate_limit::RateLimitPlugin;
 use crate::plugins::redis_rate_limit::RedisRateLimitPlugin;
+use crate::plugins::request_cleaner::RequestCleanerPlugin;
 use crate::plugins::request_id::RequestIdPlugin;
 use crate::plugins::request_size_limit::RequestSizeLimitPlugin;
 use crate::plugins::request_termination::RequestTerminationPlugin;
 use crate::plugins::request_transformer::RequestTransformerPlugin;
 use crate::plugins::request_validator::RequestValidatorPlugin;
+use crate::plugins::response_cleaner::ResponseCleanerPlugin;
+use crate::plugins::response_ratelimiting::ResponseRateLimitingPlugin;
 use crate::plugins::response_transformer::ResponseTransformerPlugin;
 use crate::plugins::session::SessionPlugin;
+use crate::plugins::shadow::ShadowPlugin;
+use crate::plugins::splunk::SplunkPlugin;
 use crate::plugins::statsd::StatsdPlugin;
 use crate::plugins::syslog::SyslogPlugin;
+use crate::plugins::websocket_size_limit::WebsocketSizeLimitPlugin;
 use crate::plugins::Plugin;
 use std::sync::Arc;
 
@@ -71,6 +81,16 @@ pub fn build(
         "prometheus-per-consumer" => Arc::new(PrometheusPerConsumerPlugin::from_config(config)?),
         "request-id" => Arc::new(RequestIdPlugin::from_config(config)?),
         "correlation-id" => Arc::new(CorrelationIdPlugin::from_config(config)?),
+        "splunk" => Arc::new(SplunkPlugin::from_config(config)?),
+        "honeycomb" => Arc::new(HoneycombPlugin::from_config(config)?),
+        "grpc-web" => Arc::new(GrpcWebPlugin::from_config(config)?),
+        "mocking" => Arc::new(MockingPlugin::from_config(config)?),
+        "response-ratelimiting" => Arc::new(ResponseRateLimitingPlugin::from_config(config)?),
+        "request-cleaner" => Arc::new(RequestCleanerPlugin::from_config(config)?),
+        "response-cleaner" => Arc::new(ResponseCleanerPlugin::from_config(config)?),
+        "canary" => Arc::new(CanaryPlugin::from_config(config)?),
+        "shadow" => Arc::new(ShadowPlugin::from_config(config)?),
+        "websocket-size-limit" => Arc::new(WebsocketSizeLimitPlugin::from_config(config)?),
         other => {
             return Err(GatewayError::BadRequest(format!("unknown plugin: {other}")));
         }

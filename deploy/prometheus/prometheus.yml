@@ -1,0 +1,46 @@
+# Prometheus scrape config for the production Lynxx stack.
+#
+# - 5s scrape interval (the gateway emits cheap counters/histograms; this
+#   gives you sub-minute alerting headroom).
+# - 7d local retention (configured via the `--storage.tsdb.retention.time`
+#   command-line flag in docker-compose.production.yml).
+# - All three gateway replicas scraped via their internal hostnames.
+
+global:
+  scrape_interval:     5s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: lynxx-prod
+    environment: production
+
+# Optional alert rules. Keep this file co-located so it ships with the stack.
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  # ----------------------------------------------------------------------
+  # Lynxx gateway replicas. The admin port (9001) is the metrics surface.
+  # ----------------------------------------------------------------------
+  - job_name: lynxx-gateway
+    metrics_path: /metrics
+    scrape_interval: 5s
+    scrape_timeout:  4s
+    static_configs:
+      - targets:
+          - lynxx-gateway-1:9001
+          - lynxx-gateway-2:9001
+          - lynxx-gateway-3:9001
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: 'lynxx-gateway-([0-9]+):.*'
+        target_label: replica
+        replacement: '$1'
+      - source_labels: [__address__]
+        target_label:  instance
+
+  # ----------------------------------------------------------------------
+  # Prometheus self-scrape — useful for monitoring scrape lag.
+  # ----------------------------------------------------------------------
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

@@ -1,0 +1,10 @@
+# Drop your TLS material here:
+#
+#   server.crt   - PEM-encoded full chain
+#   server.key   - PEM-encoded private key  (chmod 600)
+#
+# For a quick self-signed cert (development only):
+#
+#   openssl req -x509 -nodes -newkey rsa:4096 \
+#     -keyout server.key -out server.crt \
+#     -days 365 -subj "/CN=lynxx.local"

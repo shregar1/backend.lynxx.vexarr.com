@@ -1,0 +1,82 @@
+name: nightly
+
+# Builds Linux x86_64 binaries from the tip of the default branch every night
+# and uploads them as workflow artifacts. No GitHub Release, no Docker push —
+# this is a smoke build for downstream integrators who want bleeding-edge
+# binaries without waiting for the next tag.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"   # 04:17 UTC daily — off the top-of-hour stampede
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  nightly:
+    name: nightly linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp build metadata
+        id: stamp
+        run: |
+          set -euo pipefail
+          echo "date=$(date -u +%Y%m%d)"           >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-
+
+      - name: Build
+        run: |
+          cargo build --release --target x86_64-unknown-linux-gnu \
+            --bin lynx-gateway --bin lynxx-ingress --bin lynxx
+
+      - name: Stage artifact tree
+        id: stage
+        run: |
+          set -euo pipefail
+          name="lynxx-nightly-${{ steps.stamp.outputs.date }}-${{ steps.stamp.outputs.sha }}-x86_64-unknown-linux-gnu"
+          stage="dist/${name}"
+          mkdir -p "${stage}/migrations"
+          cp target/x86_64-unknown-linux-gnu/release/lynx-gateway  "${stage}/"
+          cp target/x86_64-unknown-linux-gnu/release/lynxx-ingress "${stage}/"
+          cp target/x86_64-unknown-linux-gnu/release/lynxx         "${stage}/"
+          chmod +x "${stage}"/lynx-gateway "${stage}"/lynxx-ingress "${stage}"/lynxx
+          [[ -f LICENSE ]] && cp LICENSE "${stage}/" || echo "no LICENSE file" > "${stage}/LICENSE"
+          cp README.md "${stage}/"
+          cp -R migrations/. "${stage}/migrations/"
+          (cd dist && tar -czf "${name}.tar.gz" "${name}")
+          (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload nightly artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.stage.outputs.name }}
+          path: |
+            dist/${{ steps.stage.outputs.name }}.tar.gz
+            dist/${{ steps.stage.outputs.name }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
