@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use index::{RecordingFilter, RecordingIndexRow};
-pub use replayer::{replay, BodyDiff, ReplayResult, ResponseDiff};
+pub use replayer::{replay, ReplayResult};
 pub use store::ContentAddressedStore;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
