@@ -195,6 +195,10 @@ async fn diff_services(
                         retries: svc_cfg.retries,
                         connect_timeout_ms: svc_cfg.connect_timeout_ms,
                         lb_strategy: cur.lb_strategy.clone(),
+                        tls_verify: cur.tls_verify,
+                        tls_client_cert_path: cur.tls_client_cert_path.clone(),
+                        tls_client_key_path: cur.tls_client_key_path.clone(),
+                        tls_ca_path: cur.tls_ca_path.clone(),
                         created_at: cur.created_at,
                         updated_at: Utc::now(),
                     };

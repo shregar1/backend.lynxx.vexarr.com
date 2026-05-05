@@ -1,7 +1,9 @@
+use crate::audit::{compute_hash, AuditEntry, AuditFilter, NewAuditEntry};
+use crate::auth::{AdminToken, Role};
 use crate::cluster::sqlite::SqliteBus;
 use crate::cluster::ClusterBus;
 use crate::config::GatewayConfig;
-use crate::db::Repository;
+use crate::db::{AdminTokenPatch, NewAdminToken, Repository};
 use crate::error::GatewayError;
 use crate::models::{Consumer, PluginInstance, Route, Service, Target};
 use async_trait::async_trait;
@@ -41,7 +43,9 @@ impl Repository for SqliteRepository {
 
     async fn list_services(&self) -> Result<Vec<Service>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, created_at, updated_at \
+            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, \
+                    tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
+                    created_at, updated_at \
              FROM services",
         )
         .fetch_all(&self.pool)
@@ -52,7 +56,9 @@ impl Repository for SqliteRepository {
 
     async fn get_service(&self, id: &Uuid) -> Result<Option<Service>, GatewayError> {
         let row = sqlx::query(
-            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, created_at, updated_at \
+            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, \
+                    tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
+                    created_at, updated_at \
              FROM services WHERE id = ?",
         )
         .bind(id.to_string())
@@ -64,8 +70,10 @@ impl Repository for SqliteRepository {
 
     async fn create_service(&self, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
-            "INSERT INTO services (id, name, url, retries, connect_timeout_ms, lb_strategy, enabled, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            "INSERT INTO services (id, name, url, retries, connect_timeout_ms, lb_strategy, \
+                                   tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
+                                   enabled, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
         )
         .bind(svc.id.to_string())
         .bind(&svc.name)
@@ -73,6 +81,10 @@ impl Repository for SqliteRepository {
         .bind(svc.retries as i64)
         .bind(svc.connect_timeout_ms as i64)
         .bind(&svc.lb_strategy)
+        .bind(svc.tls_verify as i64)
+        .bind(svc.tls_client_cert_path.as_deref())
+        .bind(svc.tls_client_key_path.as_deref())
+        .bind(svc.tls_ca_path.as_deref())
         .bind(svc.created_at.to_rfc3339())
         .bind(svc.updated_at.to_rfc3339())
         .execute(&self.pool)
@@ -82,7 +94,9 @@ impl Repository for SqliteRepository {
 
     async fn update_service(&self, id: &Uuid, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
-            "UPDATE services SET name = ?, url = ?, retries = ?, connect_timeout_ms = ?, lb_strategy = ?, updated_at = ? \
+            "UPDATE services SET name = ?, url = ?, retries = ?, connect_timeout_ms = ?, lb_strategy = ?, \
+                                 tls_verify = ?, tls_client_cert_path = ?, tls_client_key_path = ?, tls_ca_path = ?, \
+                                 updated_at = ? \
              WHERE id = ?",
         )
         .bind(&svc.name)
@@ -90,6 +104,10 @@ impl Repository for SqliteRepository {
         .bind(svc.retries as i64)
         .bind(svc.connect_timeout_ms as i64)
         .bind(&svc.lb_strategy)
+        .bind(svc.tls_verify as i64)
+        .bind(svc.tls_client_cert_path.as_deref())
+        .bind(svc.tls_client_key_path.as_deref())
+        .bind(svc.tls_ca_path.as_deref())
         .bind(svc.updated_at.to_rfc3339())
         .bind(id.to_string())
         .execute(&self.pool)
@@ -386,6 +404,227 @@ impl Repository for SqliteRepository {
     fn cluster_bus(&self) -> Arc<dyn ClusterBus> {
         Arc::new(SqliteBus::new(self.pool.clone()))
     }
+
+    // ---------- admin tokens ----------
+
+    async fn list_admin_tokens(&self) -> Result<Vec<AdminToken>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, name, role, created_at, expires_at, last_used_at \
+             FROM admin_tokens ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_admin_token).collect()
+    }
+
+    async fn get_admin_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<AdminToken>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, name, role, created_at, expires_at, last_used_at \
+             FROM admin_tokens WHERE token_hash = ?",
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_admin_token).transpose()
+    }
+
+    async fn get_admin_token(&self, id: &Uuid) -> Result<Option<AdminToken>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, name, role, created_at, expires_at, last_used_at \
+             FROM admin_tokens WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_admin_token).transpose()
+    }
+
+    async fn create_admin_token(&self, token: &NewAdminToken) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO admin_tokens (id, name, token_hash, role, created_at, expires_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(token.id.to_string())
+        .bind(&token.name)
+        .bind(&token.token_hash)
+        .bind(token.role.to_string())
+        .bind(token.created_at.to_rfc3339())
+        .bind(token.expires_at.map(|d| d.to_rfc3339()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn update_admin_token(
+        &self,
+        id: &Uuid,
+        patch: &AdminTokenPatch,
+    ) -> Result<Option<AdminToken>, GatewayError> {
+        // Read-modify-write under a single transaction; the table is tiny and
+        // updates are rare so the simpler shape beats a hand-built UPDATE.
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT id, name, role, created_at, expires_at, last_used_at \
+             FROM admin_tokens WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else { return Ok(None); };
+        let mut existing = row_to_admin_token(row)?;
+        if let Some(name) = patch.name.clone() {
+            existing.name = name;
+        }
+        if let Some(role) = patch.role {
+            existing.role = role;
+        }
+        if let Some(exp) = patch.expires_at {
+            existing.expires_at = exp;
+        }
+        sqlx::query(
+            "UPDATE admin_tokens SET name = ?, role = ?, expires_at = ? WHERE id = ?",
+        )
+        .bind(&existing.name)
+        .bind(existing.role.to_string())
+        .bind(existing.expires_at.map(|d| d.to_rfc3339()))
+        .bind(id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(existing))
+    }
+
+    async fn delete_admin_token(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let result = sqlx::query("DELETE FROM admin_tokens WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn update_admin_token_last_used(
+        &self,
+        id: &Uuid,
+        ts: DateTime<Utc>,
+    ) -> Result<(), GatewayError> {
+        sqlx::query("UPDATE admin_tokens SET last_used_at = ? WHERE id = ?")
+            .bind(ts.to_rfc3339())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn has_any_admin_token(&self) -> Result<bool, GatewayError> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_tokens")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count > 0)
+    }
+
+    // ---------- audit log ----------
+
+    async fn append_audit(&self, entry: &NewAuditEntry) -> Result<AuditEntry, GatewayError> {
+        // Hash chain: read the latest hash, compute new hash, insert.
+        // We do this in a transaction so concurrent admin writers serialise
+        // through here without two appends sharing the same prev_hash.
+        let mut tx = self.pool.begin().await?;
+        let prev_hash: Option<String> =
+            sqlx::query_scalar("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1")
+                .fetch_optional(&mut *tx)
+                .await?;
+        let hash = compute_hash(prev_hash.as_deref(), entry);
+        let diff_str = entry
+            .diff
+            .as_ref()
+            .map(|v| serde_json::to_string(v))
+            .transpose()
+            .map_err(|e| GatewayError::Internal(format!("audit diff serialize: {e}")))?;
+
+        let result = sqlx::query(
+            "INSERT INTO audit_log (ts, actor_id, actor_name, actor_role, action, resource_type, resource_id, diff, hash, prev_hash) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(entry.ts.to_rfc3339())
+        .bind(entry.actor_id.map(|u| u.to_string()))
+        .bind(entry.actor_name.as_deref())
+        .bind(entry.actor_role.as_deref())
+        .bind(&entry.action)
+        .bind(&entry.resource_type)
+        .bind(entry.resource_id.as_deref())
+        .bind(diff_str)
+        .bind(&hash)
+        .bind(prev_hash.as_deref())
+        .execute(&mut *tx)
+        .await?;
+        let id = result.last_insert_rowid();
+        tx.commit().await?;
+
+        Ok(AuditEntry {
+            id,
+            ts: entry.ts,
+            actor_id: entry.actor_id,
+            actor_name: entry.actor_name.clone(),
+            actor_role: entry.actor_role.clone(),
+            action: entry.action.clone(),
+            resource_type: entry.resource_type.clone(),
+            resource_id: entry.resource_id.clone(),
+            diff: entry.diff.clone(),
+            hash,
+            prev_hash,
+        })
+    }
+
+    async fn list_audit(&self, filter: &AuditFilter) -> Result<Vec<AuditEntry>, GatewayError> {
+        let limit = filter.effective_limit() as i64;
+        // QueryBuilder would be nice but we avoid it for parity with the
+        // rest of this file; manual params it is.
+        let mut sql = String::from(
+            "SELECT id, ts, actor_id, actor_name, actor_role, action, resource_type, resource_id, diff, hash, prev_hash FROM audit_log WHERE 1=1",
+        );
+        if filter.actor.is_some() {
+            sql.push_str(" AND (actor_id = ? OR actor_name = ?)");
+        }
+        if filter.action.is_some() {
+            sql.push_str(" AND action = ?");
+        }
+        if filter.resource_type.is_some() {
+            sql.push_str(" AND resource_type = ?");
+        }
+        if filter.since.is_some() {
+            sql.push_str(" AND ts >= ?");
+        }
+        sql.push_str(" ORDER BY id DESC LIMIT ?");
+
+        let mut q = sqlx::query(&sql);
+        if let Some(actor) = &filter.actor {
+            q = q.bind(actor).bind(actor);
+        }
+        if let Some(action) = &filter.action {
+            q = q.bind(action);
+        }
+        if let Some(rt) = &filter.resource_type {
+            q = q.bind(rt);
+        }
+        if let Some(since) = filter.since {
+            q = q.bind(since.to_rfc3339());
+        }
+        q = q.bind(limit);
+
+        let rows = q.fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_audit).collect()
+    }
+
+    async fn last_audit_hash(&self) -> Result<Option<String>, GatewayError> {
+        let v: Option<String> =
+            sqlx::query_scalar("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1")
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(v)
+    }
 }
 
 /// Shared seed logic — both repos express the same flow against the trait
@@ -467,6 +706,23 @@ fn row_to_service(row: sqlx::sqlite::SqliteRow) -> Result<Service, GatewayError>
         .try_get("lb_strategy")
         .unwrap_or_else(|_| "round-robin".to_string());
 
+    // TLS columns are introduced in migration 0006. `try_get` failure
+    // (e.g. running against an out-of-date schema) falls back to safe
+    // defaults: verify on, no client cert, no extra CA.
+    let tls_verify: bool = row.try_get::<i64, _>("tls_verify").map(|v| v != 0).unwrap_or(true);
+    let tls_client_cert_path: Option<String> = row
+        .try_get::<Option<String>, _>("tls_client_cert_path")
+        .ok()
+        .flatten();
+    let tls_client_key_path: Option<String> = row
+        .try_get::<Option<String>, _>("tls_client_key_path")
+        .ok()
+        .flatten();
+    let tls_ca_path: Option<String> = row
+        .try_get::<Option<String>, _>("tls_ca_path")
+        .ok()
+        .flatten();
+
     Ok(Service {
         id: parse_uuid(&id)?,
         name: row.try_get("name")?,
@@ -474,6 +730,10 @@ fn row_to_service(row: sqlx::sqlite::SqliteRow) -> Result<Service, GatewayError>
         retries: retries as u32,
         connect_timeout_ms: connect_timeout_ms as u64,
         lb_strategy,
+        tls_verify,
+        tls_client_cert_path,
+        tls_client_key_path,
+        tls_ca_path,
         created_at: parse_dt(&created_at)?,
         updated_at: parse_dt(&updated_at)?,
     })
@@ -548,6 +808,51 @@ fn row_to_plugin(row: sqlx::sqlite::SqliteRow) -> Result<PluginInstance, Gateway
             .map_err(|e| GatewayError::Internal(format!("invalid plugin config json: {e}")))?,
         created_at: parse_dt(&created_at)?,
         updated_at: parse_dt(&updated_at)?,
+    })
+}
+
+fn row_to_admin_token(row: sqlx::sqlite::SqliteRow) -> Result<AdminToken, GatewayError> {
+    let id: String = row.try_get("id")?;
+    let role: String = row.try_get("role")?;
+    let created_at: String = row.try_get("created_at")?;
+    let expires_at: Option<String> = row.try_get("expires_at")?;
+    let last_used_at: Option<String> = row.try_get("last_used_at")?;
+    Ok(AdminToken {
+        id: parse_uuid(&id)?,
+        name: row.try_get("name")?,
+        role: Role::from_str(&role)
+            .map_err(|e| GatewayError::Internal(format!("invalid role in db: {e}")))?,
+        created_at: parse_dt(&created_at)?,
+        expires_at: expires_at.map(|s| parse_dt(&s)).transpose()?,
+        last_used_at: last_used_at.map(|s| parse_dt(&s)).transpose()?,
+    })
+}
+
+fn row_to_audit(row: sqlx::sqlite::SqliteRow) -> Result<AuditEntry, GatewayError> {
+    let id: i64 = row.try_get("id")?;
+    let ts: String = row.try_get("ts")?;
+    let actor_id: Option<String> = row.try_get("actor_id")?;
+    let diff: Option<String> = row.try_get("diff")?;
+    let actor_id = actor_id.filter(|s| !s.is_empty()).map(|s| parse_uuid(&s)).transpose()?;
+    let diff = match diff {
+        Some(s) if !s.is_empty() => Some(
+            serde_json::from_str(&s)
+                .map_err(|e| GatewayError::Internal(format!("invalid audit diff json: {e}")))?,
+        ),
+        _ => None,
+    };
+    Ok(AuditEntry {
+        id,
+        ts: parse_dt(&ts)?,
+        actor_id,
+        actor_name: row.try_get("actor_name").ok(),
+        actor_role: row.try_get("actor_role").ok(),
+        action: row.try_get("action")?,
+        resource_type: row.try_get("resource_type")?,
+        resource_id: row.try_get("resource_id").ok(),
+        diff,
+        hash: row.try_get("hash")?,
+        prev_hash: row.try_get("prev_hash").ok(),
     })
 }
 

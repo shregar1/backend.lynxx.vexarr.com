@@ -3,7 +3,7 @@ use crate::health::HealthRegistry;
 use crate::metrics as gw_metrics;
 use crate::plugins::{BoxBody, PluginExecutor};
 use crate::proxy::grpc::{handle_grpc, GrpcClient};
-use crate::proxy::http_client::HttpProxyClient;
+use crate::proxy::http_client::{HttpProxyClient, ProxyClientPool};
 use crate::proxy::loadbalancer::{InFlightGuard, LoadBalancerRegistry};
 use crate::proxy::router::SharedRouteTable;
 use crate::proxy::websocket::handle_websocket;
@@ -20,7 +20,14 @@ pub struct ProxyState {
     /// Streaming hyper-util client used for the default HTTP/1.1 + HTTP/2
     /// proxy hot path. Bodies forward without buffering. See
     /// `crate::proxy::http_client` for the rationale.
+    ///
+    /// For HTTPS upstreams that need bespoke TLS (mTLS, private CA, or
+    /// `tls_verify = false`) the pool keeps per-service clients keyed
+    /// by service id; the `default_client` here is used for everything
+    /// else (the common case).
     pub http_client: HttpProxyClient,
+    /// Per-service client pool. See [`ProxyClientPool`] for cache semantics.
+    pub client_pool: Arc<ProxyClientPool>,
     pub grpc_client: GrpcClient,
     pub health: Arc<HealthRegistry>,
     pub lb: Arc<LoadBalancerRegistry>,
@@ -265,7 +272,22 @@ pub async fn proxy_handler(
 
     let upstream_req = Request::from_parts(parts, body);
 
-    let upstream_resp = match state.http_client.request(upstream_req).await {
+    // Per-service client lookup. For plain HTTP and for HTTPS services that
+    // don't customise TLS (the common case) this resolves to the shared
+    // default client without a hashmap miss in the steady state.
+    let client = match state.client_pool.client_for(&service) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                service = %svc_name,
+                error = %e,
+                "failed to build per-service tls client; falling back to default"
+            );
+            state.http_client.clone()
+        }
+    };
+
+    let upstream_resp = match client.request(upstream_req).await {
         Ok(r) => r,
         Err(e) => {
             let kind = if e.is_connect() { "connect" } else { "other" };

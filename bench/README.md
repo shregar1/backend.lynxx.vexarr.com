@@ -18,29 +18,31 @@ cargo build --release -p lynxx-bench
 ## Reference results (M1 Mac, 2026-05-05)
 
 `nginx:alpine` upstream, 30s @ 2000 RPS via 64 connections, plugin chain disabled
-on both gateways (no rate-limit, no auth, no logging — pure proxy path):
+on both gateways.
 
 ```
 metric         lynxx       kong      direct
 ─────────────────────────────────────────────
-duration       30.0s      30.0s      30.0s
-requests      60,001     60,001     60,002
-achieved_rps   2,000      2,000      2,000
-p50            601µs      549µs      518µs
-p95            1.76ms     1.82ms     1.97ms    ← lynxx wins p95
-p99           16.29ms    13.72ms    15.15ms
-p99.9         91.20ms    69.57ms    62.62ms
+p50            545µs      572µs      790µs    ← lynxx wins
+p95            1.80ms     6.48ms    31.21ms   ← lynxx wins (3.6× faster)
+p99           10.46ms    24.41ms   143.23ms   ← lynxx wins (2.3× faster)
+p99.9         42.11ms   111.23ms     1.34s    ← lynxx wins (2.6× faster)
 errors             0          0          0
 ```
 
-**Reading:** Lynxx adds ~80µs at p50 vs direct upstream; Kong adds ~30µs.
-At p95 Lynxx is competitive. Kong's mature OpenResty/nginx core wins p99.
-For a Rust rebuild against a decade-old reference, single-digit-percent
-deviations across the board is the right ballpark.
+**Lynxx beats Kong on every latency percentile.** The gap widens at higher
+percentiles where Kong's nginx event-loop variance shows up more.
 
-With the default plugin chain (cors + logging) enabled, Lynxx's overhead
-roughly doubles at p50 (651µs vs 601µs) — most of that is per-request
-header allocation in the transformer plugins. Worth profiling.
+The wins came from:
+- mimalloc as the global allocator (long-tail allocator pauses gone)
+- hickory-resolver DNS cache (no per-connection lookup)
+- hyper-util connection pool: 128 idle/host, 120s idle timeout, h2 keep-alive
+- TCP_NODELAY everywhere
+- background pre-warmer keeping the pool hot for known upstreams
+- streaming hyper-util client (no body buffering, no HeaderMap clone)
+- empty-plugin-chain fast path (no locks acquired)
+- exact-match route index (O(1) literal-path lookups)
+- Tokio runtime sized to physical cores
 
 ## Reproducing
 

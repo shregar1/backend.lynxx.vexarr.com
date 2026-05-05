@@ -2,5 +2,7 @@ pub mod grpc;
 pub mod handler;
 pub mod http_client;
 pub mod loadbalancer;
+pub mod prewarm;
 pub mod router;
+pub mod tls;
 pub mod websocket;

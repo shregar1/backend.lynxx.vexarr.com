@@ -11,8 +11,45 @@ pub struct Service {
     pub connect_timeout_ms: u64,
     #[serde(default = "default_lb_strategy")]
     pub lb_strategy: String,
+    /// Outbound TLS verification toggle for `https://` upstreams. When
+    /// `false`, the per-service hyper-util client skips certificate
+    /// validation entirely. Defaults to `true` and should stay there
+    /// for any production upstream.
+    #[serde(default = "default_tls_verify")]
+    pub tls_verify: bool,
+    /// Optional client certificate (PEM) presented by the gateway when
+    /// initiating mTLS to this service. Both this and `tls_client_key_path`
+    /// must be set for client auth to take effect.
+    #[serde(default)]
+    pub tls_client_cert_path: Option<String>,
+    /// PEM-encoded private key paired with `tls_client_cert_path`.
+    #[serde(default)]
+    pub tls_client_key_path: Option<String>,
+    /// Additional CA bundle (PEM) to trust when validating the upstream's
+    /// server certificate. Useful for private/internal CAs.
+    #[serde(default)]
+    pub tls_ca_path: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_tls_verify() -> bool {
+    true
+}
+
+impl Service {
+    /// Cache key fingerprint that captures every TLS-relevant field.
+    /// Used by `ProxyClientPool` to invalidate cached per-service clients
+    /// on update without resorting to full equality checks.
+    pub fn tls_fingerprint(&self) -> String {
+        format!(
+            "{}|{}|{}|{}",
+            self.tls_verify as u8,
+            self.tls_client_cert_path.as_deref().unwrap_or(""),
+            self.tls_client_key_path.as_deref().unwrap_or(""),
+            self.tls_ca_path.as_deref().unwrap_or(""),
+        )
+    }
 }
 
 fn default_lb_strategy() -> String {
@@ -90,6 +127,10 @@ impl Service {
             retries,
             connect_timeout_ms,
             lb_strategy: default_lb_strategy(),
+            tls_verify: true,
+            tls_client_cert_path: None,
+            tls_client_key_path: None,
+            tls_ca_path: None,
             created_at: now,
             updated_at: now,
         }

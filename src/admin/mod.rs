@@ -1,14 +1,19 @@
 pub mod routes;
 
+use crate::audit::AuditLog;
+use crate::auth::middleware::{extract_token, require_role};
+use crate::auth::Role;
 use crate::cluster::ClusterBus;
 use crate::db::Repository;
 use crate::health::HealthRegistry;
 use crate::plugins::PluginExecutor;
+use crate::proxy::http_client::ProxyClientPool;
 use crate::proxy::loadbalancer::LoadBalancerRegistry;
 use crate::proxy::router::SharedRouteTable;
 use crate::reload::ReloadHandle;
 use axum::http::Method;
-use axum::routing::{get, post};
+use axum::middleware;
+use axum::routing::{get, post, put};
 use axum::Router;
 use chrono::Utc;
 use metrics_exporter_prometheus::PrometheusHandle;
@@ -17,6 +22,7 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
+#[allow(clippy::too_many_arguments)]
 pub fn admin_router(
     route_table: SharedRouteTable,
     repo: Arc<dyn Repository>,
@@ -27,7 +33,10 @@ pub fn admin_router(
     plugin_exec: Arc<PluginExecutor>,
     bus: Arc<dyn ClusterBus>,
     node_id: Uuid,
+    auth_required: bool,
+    client_pool: Arc<ProxyClientPool>,
 ) -> Router {
+    let audit = AuditLog::new(repo.clone());
     let state = AdminState {
         route_table,
         repo,
@@ -39,58 +48,80 @@ pub fn admin_router(
         plugin_exec,
         bus,
         node_id,
+        audit,
+        auth_required,
+        client_pool,
     };
 
-    Router::new()
-        .route(
-            "/services",
-            get(routes::list_services).post(routes::create_service),
-        )
-        .route(
-            "/services/:id",
-            get(routes::get_service)
-                .put(routes::update_service)
-                .delete(routes::delete_service),
-        )
-        .route(
-            "/services/:id/targets",
-            get(routes::list_service_targets).post(routes::create_service_target),
-        )
+    // Routes that mutate live state require Operator or higher; token
+    // management is Admin-only. Reads are Viewer.
+    let viewer = require_role(Role::Viewer);
+    let operator = require_role(Role::Operator);
+    let admin_only = require_role(Role::Admin);
+
+    // ---- read-only (viewer) ----
+    let reads = Router::new()
+        .route("/services", get(routes::list_services))
+        .route("/services/:id", get(routes::get_service))
+        .route("/services/:id/targets", get(routes::list_service_targets))
         .route("/targets", get(routes::list_all_targets))
-        .route(
-            "/targets/:id",
-            axum::routing::put(routes::update_target_handler).delete(routes::delete_target_handler),
-        )
-        .route(
-            "/routes",
-            get(routes::list_routes).post(routes::create_route),
-        )
-        .route(
-            "/routes/:id",
-            get(routes::get_route)
-                .put(routes::update_route)
-                .delete(routes::delete_route),
-        )
-        .route(
-            "/plugins",
-            get(routes::list_plugins).post(routes::create_plugin),
-        )
-        .route(
-            "/plugins/:id",
-            get(routes::get_plugin)
-                .put(routes::update_plugin)
-                .delete(routes::delete_plugin),
-        )
-        .route(
-            "/consumers",
-            get(routes::list_consumers).post(routes::create_consumer),
-        )
+        .route("/routes", get(routes::list_routes))
+        .route("/routes/:id", get(routes::get_route))
+        .route("/plugins", get(routes::list_plugins))
+        .route("/plugins/:id", get(routes::get_plugin))
+        .route("/consumers", get(routes::list_consumers))
         .route("/health", get(routes::list_health))
         .route("/health/:service_id", get(routes::get_health))
         .route("/status", get(routes::gateway_status))
         .route("/metrics", get(routes::metrics))
+        .route_layer(middleware::from_fn(viewer));
+
+    // ---- mutations (operator) ----
+    let mutations = Router::new()
+        .route("/services", post(routes::create_service))
+        .route(
+            "/services/:id",
+            put(routes::update_service).delete(routes::delete_service),
+        )
+        .route("/services/:id/targets", post(routes::create_service_target))
+        .route(
+            "/targets/:id",
+            put(routes::update_target_handler).delete(routes::delete_target_handler),
+        )
+        .route("/routes", post(routes::create_route))
+        .route(
+            "/routes/:id",
+            put(routes::update_route).delete(routes::delete_route),
+        )
+        .route("/plugins", post(routes::create_plugin))
+        .route(
+            "/plugins/:id",
+            put(routes::update_plugin).delete(routes::delete_plugin),
+        )
+        .route("/consumers", post(routes::create_consumer))
         .route("/reload", post(routes::reload_handler))
-        .with_state(state)
+        // audit read access lives here — operator+ may inspect, viewers may not.
+        .route("/audit", get(routes::list_audit))
+        .route("/audit/verify", get(routes::verify_audit))
+        .route_layer(middleware::from_fn(operator));
+
+    // ---- token management (admin) ----
+    let tokens = Router::new()
+        .route("/tokens", get(routes::list_tokens).post(routes::create_token))
+        .route(
+            "/tokens/:id",
+            put(routes::update_token).delete(routes::delete_token),
+        )
+        .route_layer(middleware::from_fn(admin_only));
+
+    Router::new()
+        .merge(reads)
+        .merge(mutations)
+        .merge(tokens)
+        .with_state(state.clone())
+        // Auth extraction runs first (outermost). It needs &AdminState to
+        // hit the repo for the bootstrap check + token lookup.
+        .layer(middleware::from_fn_with_state(state, extract_token))
         .layer(admin_cors())
 }
 
@@ -111,3 +142,4 @@ fn admin_cors() -> CorsLayer {
         .allow_origin(Any)
         .expose_headers(Any)
 }
+

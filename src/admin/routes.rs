@@ -1,19 +1,24 @@
+use crate::audit::{AuditAction, AuditEntry, AuditFilter, AuditLog, ResourceType};
+use crate::auth::middleware::CurrentActor;
+use crate::auth::{generate_token, hash_token, AdminToken, Role};
 use crate::cluster::{ChangeEvent, ClusterBus};
-use crate::db::Repository;
+use crate::db::{AdminTokenPatch, NewAdminToken, Repository};
 use crate::error::GatewayError;
 use crate::health::{HealthRegistry, ServiceHealth};
 use crate::models::{Consumer, PluginInstance, Route, Service, Target};
 use crate::plugins::PluginExecutor;
+use crate::proxy::http_client::ProxyClientPool;
 use crate::proxy::loadbalancer::{LbStrategy, LoadBalancerRegistry};
 use crate::proxy::router::SharedRouteTable;
 use crate::reload::{ReloadHandle, ReloadResult};
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use metrics_exporter_prometheus::PrometheusHandle;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -29,6 +34,20 @@ pub struct AdminState {
     pub plugin_exec: Arc<PluginExecutor>,
     pub bus: Arc<dyn ClusterBus>,
     pub node_id: Uuid,
+    pub audit: AuditLog,
+    /// If true, force authentication regardless of whether any tokens exist
+    /// in the DB. When false, the gateway runs in bootstrap mode while the
+    /// `admin_tokens` table is empty.
+    pub auth_required: bool,
+    /// Per-service hyper-util client cache. Mutating service TLS config
+    /// here invalidates the corresponding cached entry so the next
+    /// request rebuilds with fresh certs.
+    pub client_pool: Arc<ProxyClientPool>,
+}
+
+/// Convenience: extract the optional actor from request extensions.
+fn actor_of(actor: &CurrentActor) -> Option<&AdminToken> {
+    actor.0.as_ref()
 }
 
 /// Publish a ChangeEvent on the cluster bus, logging but never failing the
@@ -42,8 +61,19 @@ async fn publish_event(state: &AdminState, event: ChangeEvent) {
 
 pub async fn reload_handler(
     State(state): State<AdminState>,
+    Extension(actor): Extension<CurrentActor>,
 ) -> Result<Json<ReloadResult>, GatewayError> {
     let result = state.reload.trigger().await?;
+    state
+        .audit
+        .record(
+            AuditAction::Reload,
+            ResourceType::Config,
+            None,
+            None,
+            actor_of(&actor),
+        )
+        .await;
     publish_event(
         &state,
         ChangeEvent::FullSync {
@@ -143,6 +173,7 @@ pub async fn list_services(State(state): State<AdminState>) -> Json<Vec<Service>
 
 pub async fn create_service(
     State(state): State<AdminState>,
+    Extension(actor): Extension<CurrentActor>,
     Json(input): Json<CreateService>,
 ) -> Result<Json<Service>, GatewayError> {
     let mut service = Service::new(
@@ -163,6 +194,16 @@ pub async fn create_service(
         Vec::new(),
     );
     tracing::info!(id = %service.id, "service created");
+    state
+        .audit
+        .record(
+            AuditAction::Create,
+            ResourceType::Service,
+            Some(service.id.to_string()),
+            serde_json::to_value(&service).ok(),
+            actor_of(&actor),
+        )
+        .await;
     publish_event(
         &state,
         ChangeEvent::ServiceCreated {
@@ -188,6 +229,7 @@ pub async fn get_service(
 pub async fn update_service(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
     Json(input): Json<CreateService>,
 ) -> Result<Json<Service>, GatewayError> {
     let now = Utc::now();
@@ -209,12 +251,21 @@ pub async fn update_service(
         retries: input.retries,
         connect_timeout_ms: input.connect_timeout_ms,
         lb_strategy: new_strategy,
+        // TLS settings are preserved on generic service updates; dedicated
+        // endpoints (or direct SQL) manage them in v1.
+        tls_verify: existing.tls_verify,
+        tls_client_cert_path: existing.tls_client_cert_path.clone(),
+        tls_client_key_path: existing.tls_client_key_path.clone(),
+        tls_ca_path: existing.tls_ca_path.clone(),
         created_at: existing.created_at,
         updated_at: now,
     };
 
     state.repo.update_service(&id, &updated).await?;
     state.route_table.update_service(&id, updated.clone());
+    // Drop the cached per-service hyper-util client; the pool will lazily
+    // rebuild on the next request, picking up any TLS-config changes.
+    state.client_pool.invalidate(&id);
 
     if strategy_changed {
         let targets = state.repo.list_targets_for_service(&id).await?;
@@ -223,6 +274,19 @@ pub async fn update_service(
             .rebuild_for_service(id, LbStrategy::from_str(&updated.lb_strategy), targets);
     }
 
+    state
+        .audit
+        .record(
+            AuditAction::Update,
+            ResourceType::Service,
+            Some(id.to_string()),
+            Some(serde_json::json!({
+                "before": existing,
+                "after": updated,
+            })),
+            actor_of(&actor),
+        )
+        .await;
     publish_event(
         &state,
         ChangeEvent::ServiceUpdated {
@@ -237,12 +301,24 @@ pub async fn update_service(
 pub async fn delete_service(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     let deleted = state.repo.delete_service(&id).await?;
     if deleted {
         state.route_table.remove_service(&id);
         state.health.unregister(&id);
         state.lb.remove_service(&id);
+        state.client_pool.invalidate(&id);
+        state
+            .audit
+            .record(
+                AuditAction::Delete,
+                ResourceType::Service,
+                Some(id.to_string()),
+                None,
+                actor_of(&actor),
+            )
+            .await;
         publish_event(
             &state,
             ChangeEvent::ServiceDeleted {
@@ -278,6 +354,7 @@ pub async fn list_routes(State(state): State<AdminState>) -> Json<Vec<Route>> {
 
 pub async fn create_route(
     State(state): State<AdminState>,
+    Extension(actor): Extension<CurrentActor>,
     Json(input): Json<CreateRoute>,
 ) -> Result<Json<Route>, GatewayError> {
     if state.route_table.get_service(&input.service_id).is_none() {
@@ -296,6 +373,16 @@ pub async fn create_route(
     state.repo.create_route(&route).await?;
     state.route_table.add_route(route.clone());
     tracing::info!(id = %route.id, "route created");
+    state
+        .audit
+        .record(
+            AuditAction::Create,
+            ResourceType::Route,
+            Some(route.id.to_string()),
+            serde_json::to_value(&route).ok(),
+            actor_of(&actor),
+        )
+        .await;
     publish_event(
         &state,
         ChangeEvent::RouteCreated {
@@ -321,6 +408,7 @@ pub async fn get_route(
 pub async fn update_route(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
     Json(input): Json<CreateRoute>,
 ) -> Result<Json<Route>, GatewayError> {
     let now = Utc::now();
@@ -341,6 +429,16 @@ pub async fn update_route(
 
     state.repo.update_route(&id, &updated).await?;
     state.route_table.update_route(&id, updated.clone());
+    state
+        .audit
+        .record(
+            AuditAction::Update,
+            ResourceType::Route,
+            Some(id.to_string()),
+            Some(serde_json::json!({ "before": existing, "after": updated })),
+            actor_of(&actor),
+        )
+        .await;
     publish_event(
         &state,
         ChangeEvent::RouteUpdated {
@@ -355,10 +453,21 @@ pub async fn update_route(
 pub async fn delete_route(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     let deleted = state.repo.delete_route(&id).await?;
     if deleted {
         state.route_table.remove_route(&id);
+        state
+            .audit
+            .record(
+                AuditAction::Delete,
+                ResourceType::Route,
+                Some(id.to_string()),
+                None,
+                actor_of(&actor),
+            )
+            .await;
         publish_event(
             &state,
             ChangeEvent::RouteDeleted {
@@ -381,6 +490,7 @@ pub async fn list_plugins(
 
 pub async fn create_plugin(
     State(state): State<AdminState>,
+    Extension(actor): Extension<CurrentActor>,
     Json(input): Json<CreatePlugin>,
 ) -> Result<Json<PluginInstance>, GatewayError> {
     validate_plugin_scope(&state, input.service_id, input.route_id).await?;
@@ -399,6 +509,16 @@ pub async fn create_plugin(
     };
     state.repo.create_plugin(&plugin).await?;
     state.plugin_exec.rebuild(&state.repo).await?;
+    state
+        .audit
+        .record(
+            AuditAction::Create,
+            ResourceType::Plugin,
+            Some(plugin.id.to_string()),
+            serde_json::to_value(&plugin).ok(),
+            actor_of(&actor),
+        )
+        .await;
     publish_event(
         &state,
         ChangeEvent::PluginChanged {
@@ -424,6 +544,7 @@ pub async fn get_plugin(
 pub async fn update_plugin(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
     Json(input): Json<CreatePlugin>,
 ) -> Result<Json<PluginInstance>, GatewayError> {
     let existing = state
@@ -447,6 +568,16 @@ pub async fn update_plugin(
     };
     state.repo.update_plugin(&id, &updated).await?;
     state.plugin_exec.rebuild(&state.repo).await?;
+    state
+        .audit
+        .record(
+            AuditAction::Update,
+            ResourceType::Plugin,
+            Some(id.to_string()),
+            Some(serde_json::json!({ "before": existing, "after": updated })),
+            actor_of(&actor),
+        )
+        .await;
     publish_event(
         &state,
         ChangeEvent::PluginChanged {
@@ -460,10 +591,21 @@ pub async fn update_plugin(
 pub async fn delete_plugin(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     let deleted = state.repo.delete_plugin(&id).await?;
     if deleted {
         state.plugin_exec.rebuild(&state.repo).await?;
+        state
+            .audit
+            .record(
+                AuditAction::Delete,
+                ResourceType::Plugin,
+                Some(id.to_string()),
+                None,
+                actor_of(&actor),
+            )
+            .await;
         publish_event(
             &state,
             ChangeEvent::PluginChanged {
@@ -503,10 +645,21 @@ pub async fn list_consumers(
 
 pub async fn create_consumer(
     State(state): State<AdminState>,
+    Extension(actor): Extension<CurrentActor>,
     Json(input): Json<CreateConsumer>,
 ) -> Result<Json<Consumer>, GatewayError> {
     let consumer = Consumer::new(input.username, input.custom_id);
     state.repo.create_consumer(&consumer).await?;
+    state
+        .audit
+        .record(
+            AuditAction::Create,
+            ResourceType::Consumer,
+            Some(consumer.id.to_string()),
+            serde_json::to_value(&consumer).ok(),
+            actor_of(&actor),
+        )
+        .await;
     publish_event(
         &state,
         ChangeEvent::ConsumerChanged {
@@ -565,6 +718,7 @@ pub async fn list_service_targets(
 pub async fn create_service_target(
     State(state): State<AdminState>,
     Path(service_id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
     Json(input): Json<CreateTarget>,
 ) -> Result<Json<Target>, GatewayError> {
     if state.route_table.get_service(&service_id).is_none() {
@@ -575,6 +729,16 @@ pub async fn create_service_target(
     state.repo.create_target(&target).await?;
     rebuild_lb(&state, service_id).await?;
     tracing::info!(target_id = %target.id, service_id = %service_id, "target created");
+    state
+        .audit
+        .record(
+            AuditAction::Create,
+            ResourceType::Target,
+            Some(target.id.to_string()),
+            serde_json::to_value(&target).ok(),
+            actor_of(&actor),
+        )
+        .await;
     publish_event(
         &state,
         ChangeEvent::TargetChanged {
@@ -589,6 +753,7 @@ pub async fn create_service_target(
 pub async fn update_target_handler(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
     Json(input): Json<UpdateTarget>,
 ) -> Result<Json<Target>, GatewayError> {
     let existing = state
@@ -600,7 +765,7 @@ pub async fn update_target_handler(
     let updated = Target {
         id: existing.id,
         service_id: existing.service_id,
-        url: input.url.unwrap_or(existing.url),
+        url: input.url.clone().unwrap_or_else(|| existing.url.clone()),
         weight: input.weight.unwrap_or(existing.weight).max(1),
         enabled: input.enabled.unwrap_or(existing.enabled),
         created_at: existing.created_at,
@@ -609,6 +774,16 @@ pub async fn update_target_handler(
 
     state.repo.update_target(&id, &updated).await?;
     rebuild_lb(&state, updated.service_id).await?;
+    state
+        .audit
+        .record(
+            AuditAction::Update,
+            ResourceType::Target,
+            Some(id.to_string()),
+            Some(serde_json::json!({ "before": existing, "after": updated })),
+            actor_of(&actor),
+        )
+        .await;
     publish_event(
         &state,
         ChangeEvent::TargetChanged {
@@ -623,6 +798,7 @@ pub async fn update_target_handler(
 pub async fn delete_target_handler(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     let existing = state
         .repo
@@ -632,6 +808,16 @@ pub async fn delete_target_handler(
     let deleted = state.repo.delete_target(&id).await?;
     if deleted {
         rebuild_lb(&state, existing.service_id).await?;
+        state
+            .audit
+            .record(
+                AuditAction::Delete,
+                ResourceType::Target,
+                Some(id.to_string()),
+                None,
+                actor_of(&actor),
+            )
+            .await;
         publish_event(
             &state,
             ChangeEvent::TargetChanged {
@@ -645,6 +831,202 @@ pub async fn delete_target_handler(
         Err(GatewayError::NotFound(format!("target {id}")))
     }
 }
+
+// ---------- admin tokens ----------
+
+#[derive(Serialize)]
+pub struct AdminTokenView {
+    pub id: Uuid,
+    pub name: String,
+    pub role: Role,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+impl From<AdminToken> for AdminTokenView {
+    fn from(t: AdminToken) -> Self {
+        Self {
+            id: t.id,
+            name: t.name,
+            role: t.role,
+            created_at: t.created_at,
+            expires_at: t.expires_at,
+            last_used_at: t.last_used_at,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CreateTokenInput {
+    pub name: String,
+    pub role: Role,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize)]
+pub struct CreatedTokenResponse {
+    #[serde(flatten)]
+    pub view: AdminTokenView,
+    /// Raw token. Returned ONCE on creation; never retrievable again.
+    pub token: String,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateTokenInput {
+    pub name: Option<String>,
+    pub role: Option<Role>,
+    /// `null` clears the expiry; field absence leaves it unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Option<DateTime<Utc>>>,
+}
+
+pub async fn list_tokens(
+    State(state): State<AdminState>,
+) -> Result<Json<Vec<AdminTokenView>>, GatewayError> {
+    let tokens = state.repo.list_admin_tokens().await?;
+    Ok(Json(tokens.into_iter().map(Into::into).collect()))
+}
+
+pub async fn create_token(
+    State(state): State<AdminState>,
+    Extension(actor): Extension<CurrentActor>,
+    Json(input): Json<CreateTokenInput>,
+) -> Result<Json<CreatedTokenResponse>, GatewayError> {
+    if input.name.trim().is_empty() {
+        return Err(GatewayError::BadRequest("token name required".into()));
+    }
+    let raw = generate_token();
+    let new = NewAdminToken {
+        id: Uuid::new_v4(),
+        name: input.name,
+        token_hash: hash_token(&raw),
+        role: input.role,
+        created_at: Utc::now(),
+        expires_at: input.expires_at,
+    };
+    state.repo.create_admin_token(&new).await?;
+    let view = AdminTokenView {
+        id: new.id,
+        name: new.name.clone(),
+        role: new.role,
+        created_at: new.created_at,
+        expires_at: new.expires_at,
+        last_used_at: None,
+    };
+    state
+        .audit
+        .record(
+            AuditAction::Create,
+            ResourceType::Token,
+            Some(new.id.to_string()),
+            Some(serde_json::json!({
+                "name": new.name,
+                "role": new.role,
+                "expires_at": new.expires_at,
+            })),
+            actor_of(&actor),
+        )
+        .await;
+    Ok(Json(CreatedTokenResponse { view, token: raw }))
+}
+
+pub async fn update_token(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
+    Json(input): Json<UpdateTokenInput>,
+) -> Result<Json<AdminTokenView>, GatewayError> {
+    let patch = AdminTokenPatch {
+        name: input.name,
+        role: input.role,
+        expires_at: input.expires_at,
+    };
+    let updated = state
+        .repo
+        .update_admin_token(&id, &patch)
+        .await?
+        .ok_or_else(|| GatewayError::NotFound(format!("token {id}")))?;
+    state
+        .audit
+        .record(
+            AuditAction::Update,
+            ResourceType::Token,
+            Some(id.to_string()),
+            Some(serde_json::json!({
+                "name": updated.name,
+                "role": updated.role,
+                "expires_at": updated.expires_at,
+            })),
+            actor_of(&actor),
+        )
+        .await;
+    Ok(Json(updated.into()))
+}
+
+pub async fn delete_token(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    let deleted = state.repo.delete_admin_token(&id).await?;
+    if !deleted {
+        return Err(GatewayError::NotFound(format!("token {id}")));
+    }
+    state
+        .audit
+        .record(
+            AuditAction::Delete,
+            ResourceType::Token,
+            Some(id.to_string()),
+            None,
+            actor_of(&actor),
+        )
+        .await;
+    Ok(Json(serde_json::json!({"deleted": true})))
+}
+
+// ---------- audit log ----------
+
+#[derive(Deserialize)]
+pub struct AuditQuery {
+    pub actor: Option<String>,
+    pub action: Option<String>,
+    pub resource_type: Option<String>,
+    pub since: Option<DateTime<Utc>>,
+    pub limit: Option<u32>,
+}
+
+pub async fn list_audit(
+    State(state): State<AdminState>,
+    Query(q): Query<AuditQuery>,
+) -> Result<Json<Vec<AuditEntry>>, GatewayError> {
+    let filter = AuditFilter {
+        actor: q.actor,
+        action: q.action,
+        resource_type: q.resource_type,
+        since: q.since,
+        limit: q.limit,
+    };
+    Ok(Json(state.audit.query(&filter).await?))
+}
+
+pub async fn verify_audit(
+    State(state): State<AdminState>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    let result = state.audit.verify_chain().await?;
+    Ok(Json(serde_json::json!({
+        "ok": result.ok,
+        "checked": result.checked,
+        "broken_at": result.broken_at,
+    })))
+}
+
+// Quiet unused-import warnings for items wired by mod.rs only.
+#[allow(dead_code)]
+const _USE_ROLE: fn() -> Role = || Role::Admin;
+#[allow(dead_code)]
+const _USE_FROMSTR: fn(&str) -> Result<Role, String> = Role::from_str;
 
 pub async fn gateway_status(
     State(state): State<AdminState>,

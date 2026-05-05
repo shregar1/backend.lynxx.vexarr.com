@@ -30,6 +30,78 @@ pub struct GatewaySettings {
     pub health_circuit_success_threshold: u32,
     #[serde(default = "default_hc_open_duration")]
     pub health_circuit_open_duration_ms: u64,
+
+    /// Inbound TLS termination for the proxy listener. Off by default;
+    /// when enabled the proxy listener serves HTTPS via axum-server +
+    /// rustls. See [`TlsSettings`].
+    #[serde(default)]
+    pub tls: TlsSettings,
+
+    /// Background connection pre-warmer interval in seconds. `0` disables
+    /// pre-warming. Pre-warm respects circuit-breaker state — services
+    /// whose circuit is `Open` are skipped.
+    #[serde(default = "default_prewarm_interval")]
+    pub prewarm_interval_secs: u64,
+
+    /// Maximum number of concurrent pre-warm requests. Capped to avoid
+    /// thundering-herd against many upstreams at once.
+    #[serde(default = "default_prewarm_concurrency")]
+    pub prewarm_concurrency: usize,
+
+    /// When true, admin API requests must always present a valid token
+    /// (no bootstrap mode). Defaults to false: bootstrap mode is allowed
+    /// while `admin_tokens` is empty, and auth turns on automatically as
+    /// soon as any token exists.
+    #[serde(default)]
+    pub auth_required: bool,
+}
+
+/// Inbound TLS termination knobs. When `enabled = false` (the default)
+/// the proxy port serves plain HTTP exactly as before. When set, the
+/// listener binds via `axum_server::bind_rustls` using the provided
+/// cert/key. If `client_ca_path` is non-empty the gateway additionally
+/// performs mTLS — incoming connections must present a client cert that
+/// chains to the configured CA.
+///
+/// `client_cert_required` toggles between optional and required client
+/// auth: with `optional`, the connection is accepted either way and any
+/// presented cert is verified; with `required`, the handshake fails if
+/// no client cert is sent.
+#[derive(Debug, Deserialize, Clone)]
+pub struct TlsSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub cert_path: String,
+    #[serde(default)]
+    pub key_path: String,
+    /// Optional. If set, mTLS is enabled — client certs are verified
+    /// against this CA bundle (PEM).
+    #[serde(default)]
+    pub client_ca_path: String,
+    /// `false` (default) = optional client auth; `true` = required.
+    /// Only meaningful when `client_ca_path` is set.
+    #[serde(default)]
+    pub client_cert_required: bool,
+}
+
+impl Default for TlsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cert_path: String::new(),
+            key_path: String::new(),
+            client_ca_path: String::new(),
+            client_cert_required: false,
+        }
+    }
+}
+
+impl TlsSettings {
+    /// Whether mTLS (client cert verification) is configured.
+    pub fn mtls_enabled(&self) -> bool {
+        !self.client_ca_path.is_empty()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -82,7 +154,21 @@ fn default_gateway() -> GatewaySettings {
         health_circuit_failure_threshold: default_hc_failure_threshold(),
         health_circuit_success_threshold: default_hc_success_threshold(),
         health_circuit_open_duration_ms: default_hc_open_duration(),
+        tls: TlsSettings::default(),
+        prewarm_interval_secs: default_prewarm_interval(),
+        prewarm_concurrency: default_prewarm_concurrency(),
+        auth_required: false,
     }
+}
+
+fn default_prewarm_interval() -> u64 {
+    // 30s by default — keeps idle pools hot without flooding lightly-used
+    // upstreams. Set to 0 in config to disable.
+    30
+}
+
+fn default_prewarm_concurrency() -> usize {
+    8
 }
 
 fn default_hc_interval() -> u64 {

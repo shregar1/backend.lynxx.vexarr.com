@@ -1,14 +1,17 @@
+use crate::audit::{compute_hash, AuditEntry, AuditFilter, NewAuditEntry};
+use crate::auth::{AdminToken, Role};
 use crate::cluster::postgres::PostgresBus;
 use crate::cluster::ClusterBus;
 use crate::config::GatewayConfig;
 use crate::db::sqlite::seed_from_config_generic;
-use crate::db::Repository;
+use crate::db::{AdminTokenPatch, NewAdminToken, Repository};
 use crate::error::GatewayError;
 use crate::models::{Consumer, PluginInstance, Route, Service, Target};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Row;
+use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -42,7 +45,9 @@ impl Repository for PostgresRepository {
 
     async fn list_services(&self) -> Result<Vec<Service>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, created_at, updated_at \
+            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, \
+                    tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
+                    created_at, updated_at \
              FROM services",
         )
         .fetch_all(&self.pool)
@@ -53,7 +58,9 @@ impl Repository for PostgresRepository {
 
     async fn get_service(&self, id: &Uuid) -> Result<Option<Service>, GatewayError> {
         let row = sqlx::query(
-            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, created_at, updated_at \
+            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, \
+                    tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
+                    created_at, updated_at \
              FROM services WHERE id = $1",
         )
         .bind(id)
@@ -65,8 +72,10 @@ impl Repository for PostgresRepository {
 
     async fn create_service(&self, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
-            "INSERT INTO services (id, name, url, retries, connect_timeout_ms, lb_strategy, enabled, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, TRUE, $7, $8)",
+            "INSERT INTO services (id, name, url, retries, connect_timeout_ms, lb_strategy, \
+                                   tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
+                                   enabled, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, $11, $12)",
         )
         .bind(svc.id)
         .bind(&svc.name)
@@ -74,6 +83,10 @@ impl Repository for PostgresRepository {
         .bind(svc.retries as i64)
         .bind(svc.connect_timeout_ms as i64)
         .bind(&svc.lb_strategy)
+        .bind(svc.tls_verify)
+        .bind(svc.tls_client_cert_path.as_deref())
+        .bind(svc.tls_client_key_path.as_deref())
+        .bind(svc.tls_ca_path.as_deref())
         .bind(svc.created_at)
         .bind(svc.updated_at)
         .execute(&self.pool)
@@ -83,14 +96,20 @@ impl Repository for PostgresRepository {
 
     async fn update_service(&self, id: &Uuid, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
-            "UPDATE services SET name = $1, url = $2, retries = $3, connect_timeout_ms = $4, lb_strategy = $5, updated_at = $6 \
-             WHERE id = $7",
+            "UPDATE services SET name = $1, url = $2, retries = $3, connect_timeout_ms = $4, lb_strategy = $5, \
+                                 tls_verify = $6, tls_client_cert_path = $7, tls_client_key_path = $8, tls_ca_path = $9, \
+                                 updated_at = $10 \
+             WHERE id = $11",
         )
         .bind(&svc.name)
         .bind(&svc.url)
         .bind(svc.retries as i64)
         .bind(svc.connect_timeout_ms as i64)
         .bind(&svc.lb_strategy)
+        .bind(svc.tls_verify)
+        .bind(svc.tls_client_cert_path.as_deref())
+        .bind(svc.tls_client_key_path.as_deref())
+        .bind(svc.tls_ca_path.as_deref())
         .bind(svc.updated_at)
         .bind(id)
         .execute(&self.pool)
@@ -382,6 +401,237 @@ impl Repository for PostgresRepository {
     fn cluster_bus(&self) -> Arc<dyn ClusterBus> {
         Arc::new(PostgresBus::new(self.pool.clone()))
     }
+
+    // ---------- admin tokens ----------
+
+    async fn list_admin_tokens(&self) -> Result<Vec<AdminToken>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, name, role, created_at, expires_at, last_used_at \
+             FROM admin_tokens ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_admin_token).collect()
+    }
+
+    async fn get_admin_token_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<AdminToken>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, name, role, created_at, expires_at, last_used_at \
+             FROM admin_tokens WHERE token_hash = $1",
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_admin_token).transpose()
+    }
+
+    async fn get_admin_token(&self, id: &Uuid) -> Result<Option<AdminToken>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, name, role, created_at, expires_at, last_used_at \
+             FROM admin_tokens WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_admin_token).transpose()
+    }
+
+    async fn create_admin_token(&self, token: &NewAdminToken) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO admin_tokens (id, name, token_hash, role, created_at, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(token.id)
+        .bind(&token.name)
+        .bind(&token.token_hash)
+        .bind(token.role.to_string())
+        .bind(token.created_at)
+        .bind(token.expires_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn update_admin_token(
+        &self,
+        id: &Uuid,
+        patch: &AdminTokenPatch,
+    ) -> Result<Option<AdminToken>, GatewayError> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT id, name, role, created_at, expires_at, last_used_at \
+             FROM admin_tokens WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else { return Ok(None); };
+        let mut existing = row_to_admin_token(row)?;
+        if let Some(name) = patch.name.clone() {
+            existing.name = name;
+        }
+        if let Some(role) = patch.role {
+            existing.role = role;
+        }
+        if let Some(exp) = patch.expires_at {
+            existing.expires_at = exp;
+        }
+        sqlx::query(
+            "UPDATE admin_tokens SET name = $1, role = $2, expires_at = $3 WHERE id = $4",
+        )
+        .bind(&existing.name)
+        .bind(existing.role.to_string())
+        .bind(existing.expires_at)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(existing))
+    }
+
+    async fn delete_admin_token(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let result = sqlx::query("DELETE FROM admin_tokens WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn update_admin_token_last_used(
+        &self,
+        id: &Uuid,
+        ts: DateTime<Utc>,
+    ) -> Result<(), GatewayError> {
+        sqlx::query("UPDATE admin_tokens SET last_used_at = $1 WHERE id = $2")
+            .bind(ts)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn has_any_admin_token(&self) -> Result<bool, GatewayError> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_tokens")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count > 0)
+    }
+
+    // ---------- audit log ----------
+
+    async fn append_audit(&self, entry: &NewAuditEntry) -> Result<AuditEntry, GatewayError> {
+        let mut tx = self.pool.begin().await?;
+        let prev_hash: Option<String> =
+            sqlx::query_scalar("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1")
+                .fetch_optional(&mut *tx)
+                .await?;
+        let hash = compute_hash(prev_hash.as_deref(), entry);
+
+        let row = sqlx::query(
+            "INSERT INTO audit_log (ts, actor_id, actor_name, actor_role, action, resource_type, resource_id, diff, hash, prev_hash) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
+        )
+        .bind(entry.ts)
+        .bind(entry.actor_id)
+        .bind(entry.actor_name.as_deref())
+        .bind(entry.actor_role.as_deref())
+        .bind(&entry.action)
+        .bind(&entry.resource_type)
+        .bind(entry.resource_id.as_deref())
+        .bind(&entry.diff)
+        .bind(&hash)
+        .bind(prev_hash.as_deref())
+        .fetch_one(&mut *tx)
+        .await?;
+        let id: i64 = row.try_get("id")?;
+        tx.commit().await?;
+
+        Ok(AuditEntry {
+            id,
+            ts: entry.ts,
+            actor_id: entry.actor_id,
+            actor_name: entry.actor_name.clone(),
+            actor_role: entry.actor_role.clone(),
+            action: entry.action.clone(),
+            resource_type: entry.resource_type.clone(),
+            resource_id: entry.resource_id.clone(),
+            diff: entry.diff.clone(),
+            hash,
+            prev_hash,
+        })
+    }
+
+    async fn list_audit(&self, filter: &AuditFilter) -> Result<Vec<AuditEntry>, GatewayError> {
+        let limit = filter.effective_limit() as i64;
+        let mut sql = String::from(
+            "SELECT id, ts, actor_id, actor_name, actor_role, action, resource_type, resource_id, diff, hash, prev_hash FROM audit_log WHERE TRUE",
+        );
+        let mut idx = 1;
+        let mut params: Vec<String> = Vec::new();
+        let mut actor_uuid: Option<Uuid> = None;
+        if let Some(actor) = &filter.actor {
+            actor_uuid = Uuid::parse_str(actor).ok();
+            if actor_uuid.is_some() {
+                sql.push_str(&format!(" AND (actor_id = ${} OR actor_name = ${})", idx, idx + 1));
+                idx += 2;
+                params.push(actor.clone());
+            } else {
+                sql.push_str(&format!(" AND actor_name = ${}", idx));
+                idx += 1;
+                params.push(actor.clone());
+            }
+        }
+        if let Some(action) = &filter.action {
+            sql.push_str(&format!(" AND action = ${}", idx));
+            idx += 1;
+            params.push(action.clone());
+        }
+        if let Some(rt) = &filter.resource_type {
+            sql.push_str(&format!(" AND resource_type = ${}", idx));
+            idx += 1;
+            params.push(rt.clone());
+        }
+        let mut since_param: Option<DateTime<Utc>> = None;
+        if let Some(since) = filter.since {
+            sql.push_str(&format!(" AND ts >= ${}", idx));
+            idx += 1;
+            since_param = Some(since);
+        }
+        sql.push_str(&format!(" ORDER BY id DESC LIMIT ${}", idx));
+
+        let mut q = sqlx::query(&sql);
+        if let Some(actor) = &filter.actor {
+            if let Some(u) = actor_uuid {
+                q = q.bind(u).bind(actor);
+            } else {
+                q = q.bind(actor);
+            }
+        }
+        // skip the actor entries we already bound; bind remaining text params
+        // beyond the actor.
+        let actor_params_consumed = if filter.actor.is_some() { 1 } else { 0 };
+        for p in params.iter().skip(actor_params_consumed) {
+            q = q.bind(p);
+        }
+        if let Some(s) = since_param {
+            q = q.bind(s);
+        }
+        q = q.bind(limit);
+
+        let rows = q.fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_audit).collect()
+    }
+
+    async fn last_audit_hash(&self) -> Result<Option<String>, GatewayError> {
+        let v: Option<String> =
+            sqlx::query_scalar("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1")
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(v)
+    }
 }
 
 // ---------- row mappers ----------
@@ -397,6 +647,20 @@ fn row_to_service(row: sqlx::postgres::PgRow) -> Result<Service, GatewayError> {
         .try_get("lb_strategy")
         .unwrap_or_else(|_| "round-robin".to_string());
 
+    let tls_verify: bool = row.try_get("tls_verify").unwrap_or(true);
+    let tls_client_cert_path: Option<String> =
+        row.try_get::<Option<String>, _>("tls_client_cert_path")
+            .ok()
+            .flatten();
+    let tls_client_key_path: Option<String> =
+        row.try_get::<Option<String>, _>("tls_client_key_path")
+            .ok()
+            .flatten();
+    let tls_ca_path: Option<String> = row
+        .try_get::<Option<String>, _>("tls_ca_path")
+        .ok()
+        .flatten();
+
     Ok(Service {
         id,
         name: row.try_get("name")?,
@@ -404,6 +668,10 @@ fn row_to_service(row: sqlx::postgres::PgRow) -> Result<Service, GatewayError> {
         retries: retries as u32,
         connect_timeout_ms: connect_timeout_ms as u64,
         lb_strategy,
+        tls_verify,
+        tls_client_cert_path,
+        tls_client_key_path,
+        tls_ca_path,
         created_at,
         updated_at,
     })
@@ -468,6 +736,43 @@ fn row_to_plugin(row: sqlx::postgres::PgRow) -> Result<PluginInstance, GatewayEr
         config,
         created_at,
         updated_at,
+    })
+}
+
+fn row_to_admin_token(row: sqlx::postgres::PgRow) -> Result<AdminToken, GatewayError> {
+    let id: Uuid = row.try_get("id")?;
+    let role: String = row.try_get("role")?;
+    let created_at: DateTime<Utc> = row.try_get("created_at")?;
+    let expires_at: Option<DateTime<Utc>> = row.try_get("expires_at")?;
+    let last_used_at: Option<DateTime<Utc>> = row.try_get("last_used_at")?;
+    Ok(AdminToken {
+        id,
+        name: row.try_get("name")?,
+        role: Role::from_str(&role)
+            .map_err(|e| GatewayError::Internal(format!("invalid role in db: {e}")))?,
+        created_at,
+        expires_at,
+        last_used_at,
+    })
+}
+
+fn row_to_audit(row: sqlx::postgres::PgRow) -> Result<AuditEntry, GatewayError> {
+    let id: i64 = row.try_get("id")?;
+    let ts: DateTime<Utc> = row.try_get("ts")?;
+    let actor_id: Option<Uuid> = row.try_get("actor_id")?;
+    let diff: Option<serde_json::Value> = row.try_get("diff")?;
+    Ok(AuditEntry {
+        id,
+        ts,
+        actor_id,
+        actor_name: row.try_get("actor_name").ok(),
+        actor_role: row.try_get("actor_role").ok(),
+        action: row.try_get("action")?,
+        resource_type: row.try_get("resource_type")?,
+        resource_id: row.try_get("resource_id").ok(),
+        diff,
+        hash: row.try_get("hash")?,
+        prev_hash: row.try_get("prev_hash").ok(),
     })
 }
 
