@@ -16,6 +16,7 @@ use crate::plugins::honeycomb::HoneycombPlugin;
 use crate::plugins::ip_restriction::IpRestrictionPlugin;
 use crate::plugins::jwt::JwtPlugin;
 use crate::plugins::key_auth::KeyAuthPlugin;
+use crate::plugins::llm_gateway::LlmGatewayPlugin;
 use crate::plugins::logging::LoggingPlugin;
 use crate::plugins::mocking::MockingPlugin;
 use crate::plugins::oauth2_introspect::Oauth2IntrospectPlugin;
@@ -91,6 +92,7 @@ pub fn build(
         "canary" => Arc::new(CanaryPlugin::from_config(config)?),
         "shadow" => Arc::new(ShadowPlugin::from_config(config)?),
         "websocket-size-limit" => Arc::new(WebsocketSizeLimitPlugin::from_config(config)?),
+        "llm-gateway" => Arc::new(LlmGatewayPlugin::from_config(config)?),
         other => {
             return Err(GatewayError::BadRequest(format!("unknown plugin: {other}")));
         }

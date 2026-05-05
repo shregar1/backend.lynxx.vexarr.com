@@ -15,6 +15,7 @@ pub mod honeycomb;
 pub mod ip_restriction;
 pub mod jwt;
 pub mod key_auth;
+pub mod llm_gateway;
 pub mod logging;
 pub mod mocking;
 pub mod oauth2_introspect;

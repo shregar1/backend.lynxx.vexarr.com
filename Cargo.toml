@@ -79,6 +79,11 @@ redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 aws-config = { version = "=1.5.0", features = ["behavior-version-latest"] }
 aws-sdk-lambda = "=1.40.0"
 
+# LLM gateway plugin: tokenizer for OpenAI-family models. Other providers
+# (Anthropic, local) fall back to a `len/4` heuristic — see plugins/llm_gateway.
+tiktoken-rs = "0.6"
+regex = "1"
+
 [[bin]]
 name = "lynx-gateway"
 path = "src/main.rs"
@@ -93,3 +98,4 @@ path = "src/cli/main.rs"
 
 [dev-dependencies]
 tempfile = "3"
+wiremock = "0.6"
