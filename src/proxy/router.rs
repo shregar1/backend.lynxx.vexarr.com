@@ -8,6 +8,11 @@ use uuid::Uuid;
 pub struct RouteTable {
     services: DashMap<Uuid, Service>,
     routes: DashMap<Uuid, Route>,
+    /// Exact-path index: `path` -> `route_id` for routes whose `paths` entries
+    /// are literal (no trailing `*`). The hot path consults this first to turn
+    /// route matching from O(N) into O(1) for the common "exact path" case.
+    /// Prefix and wildcard routes still fall through to the linear scan.
+    exact_index: DashMap<String, Uuid>,
 }
 
 impl RouteTable {
@@ -15,6 +20,19 @@ impl RouteTable {
         Self {
             services: DashMap::new(),
             routes: DashMap::new(),
+            exact_index: DashMap::new(),
+        }
+    }
+
+    fn rebuild_exact_index(&self) {
+        self.exact_index.clear();
+        for entry in self.routes.iter() {
+            let route = entry.value();
+            for p in &route.paths {
+                if !p.ends_with('*') {
+                    self.exact_index.insert(p.clone(), route.id);
+                }
+            }
         }
     }
 
@@ -36,6 +54,7 @@ impl RouteTable {
         for route in &routes {
             self.routes.insert(route.id, route.clone());
         }
+        self.rebuild_exact_index();
 
         Ok((services.len(), routes.len()))
     }
@@ -77,6 +96,7 @@ impl RouteTable {
     pub fn add_route(&self, route: Route) -> Uuid {
         let id = route.id;
         self.routes.insert(id, route);
+        self.rebuild_exact_index();
         id
     }
 
@@ -91,6 +111,7 @@ impl RouteTable {
     pub fn update_route(&self, id: &Uuid, route: Route) -> bool {
         if self.routes.contains_key(id) {
             self.routes.insert(*id, route);
+            self.rebuild_exact_index();
             true
         } else {
             false
@@ -98,10 +119,31 @@ impl RouteTable {
     }
 
     pub fn remove_route(&self, id: &Uuid) -> bool {
-        self.routes.remove(id).is_some()
+        let removed = self.routes.remove(id).is_some();
+        if removed {
+            self.rebuild_exact_index();
+        }
+        removed
     }
 
     pub fn match_route(&self, path: &str, method: &str) -> Option<(Route, Service)> {
+        // Fast path: exact-path lookup. Avoids the O(N) scan for the common
+        // case of a busy API with literal route paths.
+        if let Some(id_ref) = self.exact_index.get(path) {
+            let id = *id_ref;
+            drop(id_ref);
+            if let Some(route_ref) = self.routes.get(&id) {
+                let route = route_ref.value();
+                let method_matches =
+                    route.methods.is_empty() || route.methods.iter().any(|m| m == method);
+                if method_matches {
+                    if let Some(service) = self.get_service(&route.service_id) {
+                        return Some((route.clone(), service));
+                    }
+                }
+            }
+        }
+
         for entry in self.routes.iter() {
             let route = entry.value();
 

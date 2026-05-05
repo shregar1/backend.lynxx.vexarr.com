@@ -25,6 +25,7 @@ use async_trait::async_trait;
 use axum::http::{Request, Response};
 use hyper::body::Bytes;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -52,6 +53,12 @@ pub struct PluginIndex {
 pub struct PluginExecutor {
     built: RwLock<HashMap<Uuid, Arc<dyn Plugin>>>,
     index: RwLock<PluginIndex>,
+    /// Fast-path flag: `true` when no plugins are configured anywhere. Lets the
+    /// hot path skip the `RwLock` reads entirely. Updated atomically on every
+    /// `rebuild`. When this is set, both `run_request` and `run_response`
+    /// return without acquiring any lock — the common production-default case
+    /// when a route has zero scoped plugins.
+    is_empty: AtomicBool,
 }
 
 impl PluginExecutor {
@@ -59,7 +66,15 @@ impl PluginExecutor {
         Self {
             built: RwLock::new(HashMap::new()),
             index: RwLock::new(PluginIndex::default()),
+            is_empty: AtomicBool::new(true),
         }
+    }
+
+    /// Lock-free check used by the proxy hot path to skip plugin dispatch
+    /// entirely when no plugin is configured.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.is_empty.load(Ordering::Acquire)
     }
 
     /// Re-fetch all plugin rows from the DB and (re)build every enabled plugin.
@@ -102,8 +117,13 @@ impl PluginExecutor {
             built.insert(row.id, plugin);
         }
 
+        let empty = built.is_empty()
+            && index.global.is_empty()
+            && index.by_service.is_empty()
+            && index.by_route.is_empty();
         *self.built.write().await = built;
         *self.index.write().await = index;
+        self.is_empty.store(empty, Ordering::Release);
         Ok(())
     }
 
@@ -149,6 +169,9 @@ impl PluginExecutor {
         service_id: Option<Uuid>,
         route_id: Option<Uuid>,
     ) -> Result<(), PluginError> {
+        if self.is_empty() {
+            return Ok(());
+        }
         let chain = self.resolve_chain(service_id, route_id).await;
         for p in &chain {
             p.on_request(req).await?;
@@ -162,6 +185,9 @@ impl PluginExecutor {
         service_id: Option<Uuid>,
         route_id: Option<Uuid>,
     ) -> Result<(), PluginError> {
+        if self.is_empty() {
+            return Ok(());
+        }
         let chain = self.resolve_chain(service_id, route_id).await;
         for p in chain.iter().rev() {
             p.on_response(resp).await?;

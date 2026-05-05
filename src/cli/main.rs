@@ -2,19 +2,24 @@
 //!
 //! Talks HTTP to the gateway's admin port (default `http://localhost:9001`).
 //! Produces human-friendly tables by default and JSON/YAML on request, plus
-//! an `apply`/`dump` pair for idempotent declarative state management.
+//! an `apply`/`dump` pair for idempotent declarative state management,
+//! a live `watch`/`tail`, and a `exec` smoke-tester.
 //!
-//! Aesthetic: monochrome ANSI (bold + dim only), narrow columns, no fancy
-//! borders. Errors go to stderr with a "✗" prefix when stdout is a TTY.
+//! Aesthetic: monochrome ANSI (bold + dim only) plus light box-drawing
+//! borders on TTY tables. Errors go to stderr with a "✗" prefix and a
+//! dim "└─" continuation when stdout is a TTY.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
 use serde::{Deserialize, Serialize};
@@ -30,16 +35,28 @@ use uuid::Uuid;
     name = "lynxx",
     version,
     about = "Declarative CLI for the Lynxx gateway",
+    long_about = "lynxx is the official admin client for the Lynxx gateway. \
+                  It speaks to the gateway's admin HTTP API and offers \
+                  imperative CRUD, declarative apply/dump, live watch/tail, \
+                  and a built-in route smoke-tester.",
     propagate_version = true
 )]
 struct Cli {
-    /// Admin API base URL
-    #[arg(long, env = "LYNXX_ADMIN", default_value = "http://localhost:9001", global = true)]
-    admin: String,
+    /// Admin API base URL (overrides config file)
+    #[arg(long, env = "LYNXX_ADMIN", global = true)]
+    admin: Option<String>,
 
     /// Output format for machine-readable commands
-    #[arg(long, value_enum, default_value_t = OutputFormat::Table, global = true)]
-    output: OutputFormat,
+    #[arg(long, value_enum, global = true)]
+    output: Option<OutputFormat>,
+
+    /// Disable ANSI color output (also honors NO_COLOR env)
+    #[arg(long, global = true)]
+    no_color: bool,
+
+    /// Show full UUIDs in tables instead of 8-char prefixes
+    #[arg(long, global = true)]
+    full_id: bool,
 
     #[command(subcommand)]
     command: Cmd,
@@ -80,19 +97,80 @@ enum Cmd {
     /// Dump full declarative state to stdout (YAML)
     Dump,
     /// Apply a declarative state file (upsert by name, delete missing)
+    #[command(long_about = "Compute a Kubernetes-style diff plan against the current \
+                            gateway state and apply it. Order: services → targets → \
+                            routes → plugins, then deletes in reverse. Failures stop \
+                            execution; partial application is NOT rolled back.")]
     Apply {
         /// Path to YAML state file ("-" for stdin)
         #[arg(short = 'f', long = "file")]
         file: PathBuf,
-        /// Print the diff plan but do not mutate
+        /// Print the diff plan but do not mutate (alias of plan-only)
         #[arg(long)]
         dry_run: bool,
+        /// Skip the interactive confirmation (CI-friendly)
+        #[arg(long)]
+        auto_approve: bool,
     },
+    /// Validate a declarative state file without applying
+    Validate {
+        /// Path to YAML state file ("-" for stdin)
+        #[arg(short = 'f', long = "file")]
+        file: PathBuf,
+    },
+    /// Live-tail a list view; redraws every N seconds
+    #[command(long_about = "Periodically re-renders the chosen list view in place. \
+                            Resources: services, routes, plugins, health. Press Ctrl-C \
+                            to exit; the cursor is always restored.")]
+    Watch {
+        /// Resource to watch
+        resource: WatchResource,
+        /// Refresh interval in seconds
+        #[arg(short = 'n', long, default_value_t = 2)]
+        interval: u64,
+    },
+    /// Live tail of /metrics, deriving per-tick request deltas
+    Tail {
+        /// Refresh interval in seconds
+        #[arg(short = 'n', long, default_value_t = 1)]
+        interval: u64,
+    },
+    /// Smoke-test a route through the gateway proxy
+    Exec {
+        /// Path on the gateway proxy (e.g. /api/v1/users)
+        path: String,
+        /// HTTP method
+        #[arg(short = 'X', long, default_value = "GET")]
+        method: String,
+        /// Request body. Prefix with @ to read from a file (e.g. @payload.json)
+        #[arg(long)]
+        body: Option<String>,
+        /// Custom header (repeatable): "Key: Value"
+        #[arg(short = 'H', long = "header")]
+        headers: Vec<String>,
+        /// Override proxy base URL (default: admin host with port - 1)
+        #[arg(long)]
+        proxy: Option<String>,
+        /// Body truncation limit in bytes (0 = no truncation)
+        #[arg(long, default_value_t = 4096)]
+        max_body: usize,
+    },
+    /// Manage local CLI config (~/.config/lynxx/config.toml)
+    #[command(subcommand)]
+    Config(ConfigCmd),
     /// Generate shell completion script
     Completion {
         /// Target shell
         shell: Shell,
     },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum WatchResource {
+    Services,
+    Routes,
+    Plugins,
+    Health,
 }
 
 #[derive(Subcommand, Debug)]
@@ -178,6 +256,18 @@ enum TargetsCmd {
         weight: u32,
     },
     Delete { id: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigCmd {
+    /// Set a config key (e.g. `lynxx config set admin http://host:9001`)
+    Set { key: String, value: String },
+    /// Get a config key
+    Get { key: String },
+    /// Show the resolved config file
+    Show,
+    /// Print the config file path
+    Path,
 }
 
 // ---------------------------------------------------------------------------
@@ -330,9 +420,87 @@ fn default_weight() -> u32 { 1 }
 fn default_lb() -> String { "round-robin".into() }
 fn default_scope() -> String { "global".into() }
 
+/// Inline catalog for `validate`. Mirrors the gateway's built-in plugins.
+const PLUGIN_CATALOG: &[&str] = &[
+    "jwt",
+    "key-auth",
+    "basic-auth",
+    "hmac-auth",
+    "rate-limit",
+    "rate-limiting",
+    "cors",
+    "ip-restriction",
+    "request-transformer",
+    "response-transformer",
+    "request-size-limit",
+    "prometheus",
+    "logging",
+    "correlation-id",
+    "acl",
+    "oauth2",
+];
+
 // ---------------------------------------------------------------------------
-// HTTP client
+// Color / TTY plumbing.
 // ---------------------------------------------------------------------------
+
+static COLOR_OFF: AtomicBool = AtomicBool::new(false);
+static FULL_ID: AtomicBool = AtomicBool::new(false);
+
+fn color_enabled() -> bool {
+    !COLOR_OFF.load(Ordering::Relaxed) && io::stdout().is_terminal()
+}
+fn color_enabled_stderr() -> bool {
+    !COLOR_OFF.load(Ordering::Relaxed) && io::stderr().is_terminal()
+}
+
+fn bold(s: &str) -> String {
+    if color_enabled() { format!("\x1b[1m{s}\x1b[0m") } else { s.to_string() }
+}
+fn dim(s: &str) -> String {
+    if color_enabled() { format!("\x1b[2m{s}\x1b[0m") } else { s.to_string() }
+}
+fn red(s: &str) -> String {
+    if color_enabled_stderr() { format!("\x1b[31m{s}\x1b[0m") } else { s.to_string() }
+}
+fn green(s: &str) -> String {
+    if color_enabled() { format!("\x1b[32m{s}\x1b[0m") } else { s.to_string() }
+}
+fn yellow(s: &str) -> String {
+    if color_enabled() { format!("\x1b[33m{s}\x1b[0m") } else { s.to_string() }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP client. Surfaces JSON `{error: "…"}` envelopes.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct ApiError {
+    method: &'static str,
+    url: String,
+    status: reqwest::StatusCode,
+    body: String,
+    /// Best-effort parse of `{error: "..."}` or `{message: "..."}`.
+    message: Option<String>,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let msg = self.message.as_deref().unwrap_or_else(|| {
+            if self.body.is_empty() { self.status.canonical_reason().unwrap_or("error") }
+            else { self.body.as_str() }
+        });
+        write!(f, "{} {} → {}: {}", self.method, self.url, self.status, msg.trim())
+    }
+}
+impl std::error::Error for ApiError {}
+
+fn parse_error_envelope(body: &str) -> Option<String> {
+    let v: Json = serde_json::from_str(body).ok()?;
+    if let Some(s) = v.get("error").and_then(|x| x.as_str()) { return Some(s.into()); }
+    if let Some(s) = v.get("message").and_then(|x| x.as_str()) { return Some(s.into()); }
+    None
+}
 
 struct Client {
     base: String,
@@ -354,9 +522,29 @@ impl Client {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            bail!("GET {url} → {status}: {}", text.trim());
+            return Err(ApiError {
+                method: "GET", url, status,
+                message: parse_error_envelope(&text),
+                body: text,
+            }.into());
         }
         serde_json::from_str(&text).with_context(|| format!("decoding response from {url}"))
+    }
+
+    async fn get_text(&self, path: &str) -> Result<String> {
+        let url = format!("{}{}", self.base, path);
+        let resp = self.http.get(&url).send().await
+            .with_context(|| format!("GET {url}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(ApiError {
+                method: "GET", url, status,
+                message: parse_error_envelope(&text),
+                body: text,
+            }.into());
+        }
+        Ok(text)
     }
 
     async fn post<B: Serialize, T: for<'de> Deserialize<'de>>(
@@ -370,7 +558,11 @@ impl Client {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            bail!("POST {url} → {status}: {}", text.trim());
+            return Err(ApiError {
+                method: "POST", url, status,
+                message: parse_error_envelope(&text),
+                body: text,
+            }.into());
         }
         serde_json::from_str(&text).with_context(|| format!("decoding response from {url}"))
     }
@@ -382,7 +574,11 @@ impl Client {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            bail!("POST {url} → {status}: {}", text.trim());
+            return Err(ApiError {
+                method: "POST", url, status,
+                message: parse_error_envelope(&text),
+                body: text,
+            }.into());
         }
         if text.is_empty() {
             return Ok(Json::Null);
@@ -397,30 +593,22 @@ impl Client {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            bail!("DELETE {url} → {status}: {}", text.trim());
+            return Err(ApiError {
+                method: "DELETE", url, status,
+                message: parse_error_envelope(&text),
+                body: text,
+            }.into());
         }
         Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Output helpers — bold/dim ANSI when stdout is a terminal.
+// Output helpers.
 // ---------------------------------------------------------------------------
 
-fn tty() -> bool {
-    io::stdout().is_terminal()
-}
-
-fn bold(s: &str) -> String {
-    if tty() { format!("\x1b[1m{s}\x1b[0m") } else { s.to_string() }
-}
-
-fn dim(s: &str) -> String {
-    if tty() { format!("\x1b[2m{s}\x1b[0m") } else { s.to_string() }
-}
-
-/// Print a simple monospace table. `headers` is rendered dim; rows are normal.
-/// Column widths fit the longest cell in each column.
+/// Print a monospace table. On TTY, uses light box-drawing chars (dim).
+/// On non-TTY, falls back to plain pipe separators.
 fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     if rows.is_empty() {
         eprintln!("{}", dim("(no rows)"));
@@ -430,35 +618,49 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
     for row in rows {
         for (i, cell) in row.iter().enumerate().take(ncol) {
-            if cell.len() > widths[i] {
-                widths[i] = cell.len();
-            }
+            if cell.len() > widths[i] { widths[i] = cell.len(); }
         }
     }
-    // Header
-    let mut out = String::new();
-    for (i, h) in headers.iter().enumerate() {
-        let pad = " ".repeat(widths[i].saturating_sub(h.len()));
-        if i + 1 < ncol {
-            out.push_str(&format!("{}{}  ", h, pad));
-        } else {
-            out.push_str(h);
+
+    let tty = color_enabled();
+    let (h, v, tl, tr, bl, br, mt, mb, ml, mr, x) =
+        if tty { ("─", "│", "┌", "┐", "└", "┘", "┬", "┴", "├", "┤", "┼") }
+        else   { ("-", "|", "+", "+", "+", "+", "+", "+", "+", "+", "+") };
+
+    // Build a horizontal rule with given junctions.
+    let rule = |left: &str, mid: &str, right: &str| {
+        let mut out = String::from(left);
+        for (i, w) in widths.iter().enumerate() {
+            out.push_str(&h.repeat(w + 2));
+            out.push_str(if i + 1 < ncol { mid } else { right });
         }
+        out
+    };
+
+    println!("{}", dim(&rule(tl, mt, tr)));
+    // Header row.
+    let mut header_line = String::new();
+    header_line.push_str(&dim(v));
+    for (i, hd) in headers.iter().enumerate() {
+        let pad = " ".repeat(widths[i].saturating_sub(hd.len()));
+        header_line.push_str(&format!(" {}{} ", bold(hd), pad));
+        header_line.push_str(&dim(v));
+        let _ = i;
     }
-    println!("{}", dim(&out));
-    // Rows
+    println!("{header_line}");
+    println!("{}", dim(&rule(ml, x, mr)));
+    // Body rows.
     for row in rows {
         let mut line = String::new();
+        line.push_str(&dim(v));
         for (i, cell) in row.iter().enumerate().take(ncol) {
             let pad = " ".repeat(widths[i].saturating_sub(cell.len()));
-            if i + 1 < ncol {
-                line.push_str(&format!("{}{}  ", cell, pad));
-            } else {
-                line.push_str(cell);
-            }
+            line.push_str(&format!(" {cell}{pad} "));
+            line.push_str(&dim(v));
         }
-        println!("{}", line);
+        println!("{line}");
     }
+    println!("{}", dim(&rule(bl, mb, br)));
 }
 
 /// Emit a value in the requested format. `Table` falls back to JSON.
@@ -474,13 +676,50 @@ fn emit<T: Serialize>(v: &T, fmt: OutputFormat) -> Result<()> {
     Ok(())
 }
 
-fn short_id(id: &Uuid) -> String {
-    let s = id.to_string();
-    s[..8].to_string()
+fn fmt_id(id: &Uuid) -> String {
+    if FULL_ID.load(Ordering::Relaxed) { id.to_string() }
+    else { id.to_string()[..8].to_string() }
 }
 
 // ---------------------------------------------------------------------------
-// Resolve helpers — accept name OR id for human convenience.
+// Levenshtein for "did you mean?" hints.
+// ---------------------------------------------------------------------------
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let (m, n) = (a.len(), b.len());
+    if m == 0 { return n; }
+    if n == 0 { return m; }
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut cur = vec![0usize; n + 1];
+    for i in 1..=m {
+        cur[0] = i;
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1)
+                .min(cur[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[n]
+}
+
+fn fuzzy_suggest<'a>(needle: &str, haystack: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let n_lower = needle.to_lowercase();
+    let mut best: Option<(usize, &str)> = None;
+    for cand in haystack {
+        let d = levenshtein(&n_lower, &cand.to_lowercase());
+        let threshold = (cand.len() / 3).max(2);
+        if d <= threshold && best.map_or(true, |(bd, _)| d < bd) {
+            best = Some((d, cand));
+        }
+    }
+    best.map(|(_, s)| s.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Resolve helpers — accept name OR id for human convenience, with suggestions.
 // ---------------------------------------------------------------------------
 
 async fn resolve_service(client: &Client, ident: &str) -> Result<Service> {
@@ -493,13 +732,18 @@ async fn resolve_service(client: &Client, ident: &str) -> Result<Service> {
     if let Some(s) = services.iter().find(|s| s.name == ident) {
         return Ok(s.clone());
     }
-    // Allow short-prefix id match.
     let matches: Vec<&Service> = services.iter()
         .filter(|s| s.id.to_string().starts_with(ident))
         .collect();
     match matches.len() {
         1 => Ok(matches[0].clone()),
-        0 => Err(anyhow!("no service matched '{ident}'")),
+        0 => {
+            let suggest = fuzzy_suggest(ident, services.iter().map(|s| s.name.as_str()));
+            match suggest {
+                Some(s) => Err(anyhow!("no service matched '{ident}'. Did you mean: {s}?")),
+                None => Err(anyhow!("no service matched '{ident}'")),
+            }
+        }
         _ => Err(anyhow!("'{ident}' is ambiguous ({} matches)", matches.len())),
     }
 }
@@ -511,21 +755,102 @@ async fn resolve_consumer(client: &Client, ident: &str) -> Result<Consumer> {
             return Ok(c.clone());
         }
     }
-    consumers.iter()
-        .find(|c| c.username == ident)
-        .cloned()
-        .ok_or_else(|| anyhow!("no consumer matched '{ident}'"))
+    if let Some(c) = consumers.iter().find(|c| c.username == ident) {
+        return Ok(c.clone());
+    }
+    let suggest = fuzzy_suggest(ident, consumers.iter().map(|c| c.username.as_str()));
+    match suggest {
+        Some(s) => Err(anyhow!("no consumer matched '{ident}'. Did you mean: {s}?")),
+        None => Err(anyhow!("no consumer matched '{ident}'")),
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Commands
+// Local config (~/.config/lynxx/config.toml)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct LocalConfig {
+    #[serde(default)]
+    admin: Option<String>,
+    #[serde(default)]
+    output: Option<String>,
+}
+
+fn config_path() -> Result<PathBuf> {
+    let base = dirs::config_dir()
+        .ok_or_else(|| anyhow!("could not determine user config dir"))?;
+    Ok(base.join("lynxx").join("config.toml"))
+}
+
+fn load_config() -> LocalConfig {
+    let path = match config_path() { Ok(p) => p, Err(_) => return LocalConfig::default() };
+    let raw = match fs::read_to_string(&path) { Ok(s) => s, Err(_) => return LocalConfig::default() };
+    toml::from_str(&raw).unwrap_or_default()
+}
+
+fn save_config(cfg: &LocalConfig) -> Result<PathBuf> {
+    let path = config_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let raw = toml::to_string_pretty(cfg)?;
+    fs::write(&path, raw).with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
+fn cmd_config(action: ConfigCmd) -> Result<()> {
+    match action {
+        ConfigCmd::Path => {
+            println!("{}", config_path()?.display());
+        }
+        ConfigCmd::Show => {
+            let path = config_path()?;
+            match fs::read_to_string(&path) {
+                Ok(raw) => print!("{raw}"),
+                Err(_) => println!("{}", dim(&format!("(no config at {})", path.display()))),
+            }
+        }
+        ConfigCmd::Get { key } => {
+            let cfg = load_config();
+            let val = match key.as_str() {
+                "admin" => cfg.admin,
+                "output" => cfg.output,
+                other => bail!("unknown config key '{other}' (valid: admin, output)"),
+            };
+            match val {
+                Some(v) => println!("{v}"),
+                None => println!("{}", dim("(unset)")),
+            }
+        }
+        ConfigCmd::Set { key, value } => {
+            let mut cfg = load_config();
+            match key.as_str() {
+                "admin" => cfg.admin = Some(value.clone()),
+                "output" => {
+                    if !["table", "json", "yaml"].contains(&value.as_str()) {
+                        bail!("output must be one of: table, json, yaml");
+                    }
+                    cfg.output = Some(value.clone());
+                }
+                other => bail!("unknown config key '{other}' (valid: admin, output)"),
+            }
+            let path = save_config(&cfg)?;
+            println!("{} set {}={} ({})", bold("✓"), key, value, dim(&path.display().to_string()));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Existing commands (with FULL_ID-aware id formatting).
 // ---------------------------------------------------------------------------
 
 async fn cmd_ping(client: &Client) -> Result<()> {
     let s: StatusResponse = client.get("/status").await?;
     println!(
         "{} lynxx {} — {} (up {})",
-        bold("✓"),
+        green("✓"),
         s.version,
         s.status,
         humanize_secs(s.uptime_seconds)
@@ -551,19 +876,15 @@ fn humanize_secs(s: i64) -> String {
 
 async fn cmd_services_list(client: &Client, fmt: OutputFormat) -> Result<()> {
     let services: Vec<Service> = client.get("/services").await?;
-    if fmt != OutputFormat::Table {
-        return emit(&services, fmt);
-    }
-    let rows: Vec<Vec<String>> = services.iter().map(|s| {
-        vec![
-            short_id(&s.id),
-            s.name.clone(),
-            s.url.clone(),
-            s.retries.to_string(),
-            format!("{}ms", s.connect_timeout_ms),
-            s.lb_strategy.clone().unwrap_or_else(|| "round-robin".into()),
-        ]
-    }).collect();
+    if fmt != OutputFormat::Table { return emit(&services, fmt); }
+    let rows: Vec<Vec<String>> = services.iter().map(|s| vec![
+        fmt_id(&s.id),
+        s.name.clone(),
+        s.url.clone(),
+        s.retries.to_string(),
+        format!("{}ms", s.connect_timeout_ms),
+        s.lb_strategy.clone().unwrap_or_else(|| "round-robin".into()),
+    ]).collect();
     print_table(&["ID", "NAME", "URL", "RETRIES", "TIMEOUT", "LB"], &rows);
     Ok(())
 }
@@ -583,105 +904,77 @@ async fn cmd_services_create(
     fmt: OutputFormat,
 ) -> Result<()> {
     let mut body = serde_json::json!({
-        "name": name,
-        "url": url,
-        "retries": retries,
-        "connect_timeout_ms": connect_timeout_ms,
+        "name": name, "url": url,
+        "retries": retries, "connect_timeout_ms": connect_timeout_ms,
     });
-    if let Some(lb) = lb_strategy {
-        body["lb_strategy"] = Json::String(lb);
-    }
+    if let Some(lb) = lb_strategy { body["lb_strategy"] = Json::String(lb); }
     let svc: Service = client.post("/services", &body).await?;
     if fmt == OutputFormat::Table {
-        println!("{} created service {} ({})", bold("✓"), svc.name, short_id(&svc.id));
-    } else {
-        emit(&svc, fmt)?;
-    }
+        println!("{} created service {} ({})", green("✓"), svc.name, fmt_id(&svc.id));
+    } else { emit(&svc, fmt)?; }
     Ok(())
 }
 
 async fn cmd_services_delete(client: &Client, ident: &str) -> Result<()> {
     let svc = resolve_service(client, ident).await?;
     client.delete(&format!("/services/{}", svc.id)).await?;
-    println!("{} deleted service {} ({})", bold("✓"), svc.name, short_id(&svc.id));
+    println!("{} deleted service {} ({})", green("✓"), svc.name, fmt_id(&svc.id));
     Ok(())
 }
 
 async fn cmd_routes_list(client: &Client, fmt: OutputFormat) -> Result<()> {
     let routes: Vec<Route> = client.get("/routes").await?;
-    if fmt != OutputFormat::Table {
-        return emit(&routes, fmt);
-    }
-    // Build id→name map for nicer rendering.
+    if fmt != OutputFormat::Table { return emit(&routes, fmt); }
     let services: Vec<Service> = client.get("/services").await.unwrap_or_default();
     let by_id: HashMap<Uuid, String> = services.iter().map(|s| (s.id, s.name.clone())).collect();
-    let rows: Vec<Vec<String>> = routes.iter().map(|r| {
-        vec![
-            short_id(&r.id),
-            by_id.get(&r.service_id).cloned().unwrap_or_else(|| short_id(&r.service_id)),
-            r.paths.join(","),
-            if r.methods.is_empty() { "*".into() } else { r.methods.join(",") },
-            if r.strip_path { "yes".into() } else { "no".into() },
-        ]
-    }).collect();
+    let rows: Vec<Vec<String>> = routes.iter().map(|r| vec![
+        fmt_id(&r.id),
+        by_id.get(&r.service_id).cloned().unwrap_or_else(|| fmt_id(&r.service_id)),
+        r.paths.join(","),
+        if r.methods.is_empty() { "*".into() } else { r.methods.join(",") },
+        if r.strip_path { "yes".into() } else { "no".into() },
+    ]).collect();
     print_table(&["ID", "SERVICE", "PATHS", "METHODS", "STRIP"], &rows);
     Ok(())
 }
 
 async fn cmd_routes_create(
-    client: &Client,
-    service: String,
-    paths: Vec<String>,
-    methods: Vec<String>,
-    strip_path: bool,
-    fmt: OutputFormat,
+    client: &Client, service: String, paths: Vec<String>,
+    methods: Vec<String>, strip_path: bool, fmt: OutputFormat,
 ) -> Result<()> {
     let svc = resolve_service(client, &service).await?;
     let body = serde_json::json!({
-        "paths": paths,
-        "methods": methods,
-        "service_id": svc.id,
-        "strip_path": strip_path,
+        "paths": paths, "methods": methods,
+        "service_id": svc.id, "strip_path": strip_path,
     });
     let route: Route = client.post("/routes", &body).await?;
     if fmt == OutputFormat::Table {
-        println!(
-            "{} created route {} → {} (paths: {})",
-            bold("✓"),
-            short_id(&route.id),
-            svc.name,
-            route.paths.join(",")
-        );
-    } else {
-        emit(&route, fmt)?;
-    }
+        println!("{} created route {} → {} (paths: {})",
+            green("✓"), fmt_id(&route.id), svc.name, route.paths.join(","));
+    } else { emit(&route, fmt)?; }
     Ok(())
 }
 
 async fn cmd_routes_delete(client: &Client, id: &str) -> Result<()> {
     let uuid = Uuid::parse_str(id).context("route id must be a UUID")?;
     client.delete(&format!("/routes/{uuid}")).await?;
-    println!("{} deleted route {}", bold("✓"), short_id(&uuid));
+    println!("{} deleted route {}", green("✓"), fmt_id(&uuid));
     Ok(())
 }
 
 async fn cmd_plugins_list(client: &Client, fmt: OutputFormat) -> Result<()> {
     let plugins: Vec<PluginInstance> = client.get("/plugins").await?;
-    if fmt != OutputFormat::Table {
-        return emit(&plugins, fmt);
-    }
+    if fmt != OutputFormat::Table { return emit(&plugins, fmt); }
     let services: Vec<Service> = client.get("/services").await.unwrap_or_default();
     let by_id: HashMap<Uuid, String> = services.iter().map(|s| (s.id, s.name.clone())).collect();
     let rows: Vec<Vec<String>> = plugins.iter().map(|p| {
         let scope = match (p.service_id, p.route_id) {
-            (Some(s), _) => format!("service:{}", by_id.get(&s).cloned().unwrap_or_else(|| short_id(&s))),
-            (_, Some(r)) => format!("route:{}", short_id(&r)),
+            (Some(s), _) => format!("service:{}", by_id.get(&s).cloned().unwrap_or_else(|| fmt_id(&s))),
+            (_, Some(r)) => format!("route:{}", fmt_id(&r)),
             _ => "global".into(),
         };
         vec![
-            short_id(&p.id),
-            p.name.clone(),
-            scope,
+            fmt_id(&p.id), p.name.clone(), scope,
             if p.enabled { "yes".into() } else { "no".into() },
         ]
     }).collect();
@@ -690,12 +983,8 @@ async fn cmd_plugins_list(client: &Client, fmt: OutputFormat) -> Result<()> {
 }
 
 async fn cmd_plugins_install(
-    client: &Client,
-    name: String,
-    service: Option<String>,
-    route: Option<String>,
-    config: String,
-    fmt: OutputFormat,
+    client: &Client, name: String, service: Option<String>,
+    route: Option<String>, config: String, fmt: OutputFormat,
 ) -> Result<()> {
     let cfg: Json = serde_json::from_str(&config)
         .context("--config must be a valid JSON object")?;
@@ -707,68 +996,53 @@ async fn cmd_plugins_install(
         None => None,
     };
     let body = serde_json::json!({
-        "name": name,
-        "service_id": service_id,
-        "route_id": route_id,
-        "enabled": true,
-        "config": cfg,
+        "name": name, "service_id": service_id, "route_id": route_id,
+        "enabled": true, "config": cfg,
     });
     let plugin: PluginInstance = client.post("/plugins", &body).await?;
     if fmt == OutputFormat::Table {
-        println!("{} installed plugin {} ({})", bold("✓"), plugin.name, short_id(&plugin.id));
-    } else {
-        emit(&plugin, fmt)?;
-    }
+        println!("{} installed plugin {} ({})", green("✓"), plugin.name, fmt_id(&plugin.id));
+    } else { emit(&plugin, fmt)?; }
     Ok(())
 }
 
 async fn cmd_plugins_delete(client: &Client, id: &str) -> Result<()> {
     let uuid = Uuid::parse_str(id).context("plugin id must be a UUID")?;
     client.delete(&format!("/plugins/{uuid}")).await?;
-    println!("{} deleted plugin {}", bold("✓"), short_id(&uuid));
+    println!("{} deleted plugin {}", green("✓"), fmt_id(&uuid));
     Ok(())
 }
 
 async fn cmd_consumers_list(client: &Client, fmt: OutputFormat) -> Result<()> {
     let consumers: Vec<Consumer> = client.get("/consumers").await?;
-    if fmt != OutputFormat::Table {
-        return emit(&consumers, fmt);
-    }
-    let rows: Vec<Vec<String>> = consumers.iter().map(|c| {
-        vec![
-            short_id(&c.id),
-            c.username.clone(),
-            c.custom_id.clone().unwrap_or_default(),
-            c.api_key.clone().map(|k| {
-                let n = k.len().min(8);
-                format!("{}…", &k[..n])
-            }).unwrap_or_default(),
-        ]
-    }).collect();
+    if fmt != OutputFormat::Table { return emit(&consumers, fmt); }
+    let rows: Vec<Vec<String>> = consumers.iter().map(|c| vec![
+        fmt_id(&c.id), c.username.clone(),
+        c.custom_id.clone().unwrap_or_default(),
+        c.api_key.clone().map(|k| {
+            let n = k.len().min(8);
+            format!("{}…", &k[..n])
+        }).unwrap_or_default(),
+    ]).collect();
     print_table(&["ID", "USERNAME", "CUSTOM_ID", "API_KEY"], &rows);
     Ok(())
 }
 
 async fn cmd_consumers_create(
-    client: &Client,
-    username: String,
-    custom_id: Option<String>,
-    fmt: OutputFormat,
+    client: &Client, username: String, custom_id: Option<String>, fmt: OutputFormat,
 ) -> Result<()> {
     let body = serde_json::json!({ "username": username, "custom_id": custom_id });
     let consumer: Consumer = client.post("/consumers", &body).await?;
     if fmt == OutputFormat::Table {
-        println!("{} created consumer {} ({})", bold("✓"), consumer.username, short_id(&consumer.id));
-    } else {
-        emit(&consumer, fmt)?;
-    }
+        println!("{} created consumer {} ({})", green("✓"), consumer.username, fmt_id(&consumer.id));
+    } else { emit(&consumer, fmt)?; }
     Ok(())
 }
 
 async fn cmd_consumers_delete(client: &Client, ident: &str) -> Result<()> {
     let consumer = resolve_consumer(client, ident).await?;
     client.delete(&format!("/consumers/{}", consumer.id)).await?;
-    println!("{} deleted consumer {} ({})", bold("✓"), consumer.username, short_id(&consumer.id));
+    println!("{} deleted consumer {} ({})", green("✓"), consumer.username, fmt_id(&consumer.id));
     Ok(())
 }
 
@@ -780,73 +1054,57 @@ async fn cmd_targets_list(client: &Client, service: Option<String>, fmt: OutputF
         }
         None => client.get("/targets").await?,
     };
-    if fmt != OutputFormat::Table {
-        return emit(&targets, fmt);
-    }
+    if fmt != OutputFormat::Table { return emit(&targets, fmt); }
     let services: Vec<Service> = client.get("/services").await.unwrap_or_default();
     let by_id: HashMap<Uuid, String> = services.iter().map(|s| (s.id, s.name.clone())).collect();
-    let rows: Vec<Vec<String>> = targets.iter().map(|t| {
-        vec![
-            short_id(&t.id),
-            by_id.get(&t.service_id).cloned().unwrap_or_else(|| short_id(&t.service_id)),
-            t.url.clone(),
-            t.weight.to_string(),
-            if t.enabled { "yes".into() } else { "no".into() },
-        ]
-    }).collect();
+    let rows: Vec<Vec<String>> = targets.iter().map(|t| vec![
+        fmt_id(&t.id),
+        by_id.get(&t.service_id).cloned().unwrap_or_else(|| fmt_id(&t.service_id)),
+        t.url.clone(), t.weight.to_string(),
+        if t.enabled { "yes".into() } else { "no".into() },
+    ]).collect();
     print_table(&["ID", "SERVICE", "URL", "WEIGHT", "ENABLED"], &rows);
     Ok(())
 }
 
 async fn cmd_targets_add(
-    client: &Client,
-    service: String,
-    url: String,
-    weight: u32,
-    fmt: OutputFormat,
+    client: &Client, service: String, url: String, weight: u32, fmt: OutputFormat,
 ) -> Result<()> {
     let svc = resolve_service(client, &service).await?;
     let body = serde_json::json!({ "url": url, "weight": weight, "enabled": true });
     let target: Target = client.post(&format!("/services/{}/targets", svc.id), &body).await?;
     if fmt == OutputFormat::Table {
-        println!("{} added target {} → {}", bold("✓"), target.url, svc.name);
-    } else {
-        emit(&target, fmt)?;
-    }
+        println!("{} added target {} → {}", green("✓"), target.url, svc.name);
+    } else { emit(&target, fmt)?; }
     Ok(())
 }
 
 async fn cmd_targets_delete(client: &Client, id: &str) -> Result<()> {
     let uuid = Uuid::parse_str(id).context("target id must be a UUID")?;
     client.delete(&format!("/targets/{uuid}")).await?;
-    println!("{} deleted target {}", bold("✓"), short_id(&uuid));
+    println!("{} deleted target {}", green("✓"), fmt_id(&uuid));
     Ok(())
 }
 
 async fn cmd_health(client: &Client, fmt: OutputFormat) -> Result<()> {
     let health: Vec<ServiceHealth> = client.get("/health").await?;
-    if fmt != OutputFormat::Table {
-        return emit(&health, fmt);
-    }
+    if fmt != OutputFormat::Table { return emit(&health, fmt); }
     let services: Vec<Service> = client.get("/services").await.unwrap_or_default();
     let by_id: HashMap<Uuid, String> = services.iter().map(|s| (s.id, s.name.clone())).collect();
-    let rows: Vec<Vec<String>> = health.iter().map(|h| {
-        vec![
-            by_id.get(&h.service_id).cloned().unwrap_or_else(|| short_id(&h.service_id)),
-            h.status.clone(),
-            h.circuit.clone(),
-            h.consecutive_failures.to_string(),
-            h.last_check_at.map(|t| t.to_rfc3339()).unwrap_or_else(|| "—".into()),
-            h.last_error.clone().unwrap_or_else(|| "—".into()).chars().take(60).collect(),
-        ]
-    }).collect();
+    let rows: Vec<Vec<String>> = health.iter().map(|h| vec![
+        by_id.get(&h.service_id).cloned().unwrap_or_else(|| fmt_id(&h.service_id)),
+        h.status.clone(), h.circuit.clone(),
+        h.consecutive_failures.to_string(),
+        h.last_check_at.map(|t| t.to_rfc3339()).unwrap_or_else(|| "—".into()),
+        h.last_error.clone().unwrap_or_else(|| "—".into()).chars().take(60).collect(),
+    ]).collect();
     print_table(&["SERVICE", "STATUS", "CIRCUIT", "FAILS", "LAST_CHECK", "LAST_ERROR"], &rows);
     Ok(())
 }
 
 async fn cmd_reload(client: &Client) -> Result<()> {
     let v = client.post_empty("/reload").await?;
-    println!("{} reload triggered", bold("✓"));
+    println!("{} reload triggered", green("✓"));
     if !v.is_null() {
         println!("{}", dim(&serde_json::to_string_pretty(&v)?));
     }
@@ -854,7 +1112,7 @@ async fn cmd_reload(client: &Client) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Dump: snapshot the gateway into the declarative schema and emit YAML.
+// Dump
 // ---------------------------------------------------------------------------
 
 async fn cmd_dump(client: &Client) -> Result<()> {
@@ -869,79 +1127,112 @@ async fn cmd_dump(client: &Client) -> Result<()> {
     let mut targets_by_svc: HashMap<Uuid, Vec<DeclTarget>> = HashMap::new();
     for t in &targets {
         targets_by_svc.entry(t.service_id).or_default().push(DeclTarget {
-            url: t.url.clone(),
-            weight: t.weight,
+            url: t.url.clone(), weight: t.weight,
         });
     }
 
     let decl_services: Vec<DeclService> = services.iter().map(|s| DeclService {
-        name: s.name.clone(),
-        url: s.url.clone(),
-        retries: s.retries,
-        connect_timeout_ms: s.connect_timeout_ms,
+        name: s.name.clone(), url: s.url.clone(),
+        retries: s.retries, connect_timeout_ms: s.connect_timeout_ms,
         lb_strategy: s.lb_strategy.clone().unwrap_or_else(default_lb),
         targets: targets_by_svc.remove(&s.id).unwrap_or_default(),
     }).collect();
 
     let decl_routes: Vec<DeclRoute> = routes.iter().map(|r| DeclRoute {
-        service: svc_by_id.get(&r.service_id)
-            .map(|s| s.name.clone())
+        service: svc_by_id.get(&r.service_id).map(|s| s.name.clone())
             .unwrap_or_else(|| r.service_id.to_string()),
-        paths: r.paths.clone(),
-        methods: r.methods.clone(),
+        paths: r.paths.clone(), methods: r.methods.clone(),
         strip_path: r.strip_path,
     }).collect();
 
     let decl_plugins: Vec<DeclPlugin> = plugins.iter().map(|p| {
         let (scope, service, route) = match (p.service_id, p.route_id) {
-            (Some(sid), _) => (
-                "service".into(),
-                svc_by_id.get(&sid).map(|s| s.name.clone()),
-                None,
-            ),
-            (_, Some(rid)) => (
-                "route".into(),
-                None,
-                route_by_id.get(&rid).map(|r| r.paths.join(";")),
-            ),
+            (Some(sid), _) => ("service".into(),
+                svc_by_id.get(&sid).map(|s| s.name.clone()), None),
+            (_, Some(rid)) => ("route".into(), None,
+                route_by_id.get(&rid).map(|r| r.paths.join(";"))),
             _ => ("global".into(), None, None),
         };
-        DeclPlugin {
-            name: p.name.clone(),
-            scope,
-            service,
-            route,
-            config: p.config.clone(),
-        }
+        DeclPlugin { name: p.name.clone(), scope, service, route, config: p.config.clone() }
     }).collect();
 
-    let state = DeclarativeState {
-        services: decl_services,
-        routes: decl_routes,
-        plugins: decl_plugins,
-    };
+    let state = DeclarativeState { services: decl_services, routes: decl_routes, plugins: decl_plugins };
     print!("{}", serde_yaml::to_string(&state)?);
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// Apply: read a YAML state file and reconcile the gateway to match.
-//
-// Semantics: upsert-by-name for services and (service, paths) for routes;
-// missing items are deleted. Plugins are reconciled by (name, scope-key).
+// Apply: diff plan + ordered execution.
 // ---------------------------------------------------------------------------
 
-async fn cmd_apply(client: &Client, file: PathBuf, dry_run: bool) -> Result<()> {
+// A simple plan entry, rendered like `+ service api-backend` etc.
+#[derive(Debug, Clone)]
+struct PlanEntry {
+    sigil: char,        // '+', '~', '-'
+    kind: &'static str, // "service", "route", "plugin", "target"
+    label: String,
+    detail: Option<String>,
+    /// Execution stage: 0=svc-upsert, 1=tgt, 2=route-upsert, 3=plugin-upsert,
+    /// 4=plugin-delete, 5=route-delete, 6=svc-delete
+    stage: u8,
+    action: PlanAction,
+}
+
+#[derive(Debug, Clone)]
+enum PlanAction {
+    CreateService(DeclService),
+    UpdateService { id: Uuid, ds: DeclService },
+    DeleteService { id: Uuid },
+    AddTarget { service_id: Uuid, url: String, weight: u32 },
+    UpdateTarget { id: Uuid, weight: u32 },
+    DeleteTarget { id: Uuid },
+    CreateRoute { service_name: String, paths: Vec<String>, methods: Vec<String>, strip_path: bool },
+    DeleteRoute { id: Uuid },
+    CreatePlugin { name: String, service: Option<String>, route_paths: Option<Vec<String>>, config: Json },
+    DeletePlugin { id: Uuid },
+}
+
+fn render_plan(entries: &[PlanEntry]) {
+    for e in entries {
+        let sigil_str = e.sigil.to_string();
+        let colored = match e.sigil {
+            '+' => green(&sigil_str),
+            '~' => yellow(&sigil_str),
+            '-' => red(&sigil_str),
+            _ => sigil_str.clone(),
+        };
+        let detail = match &e.detail {
+            Some(d) => format!(" {}", dim(&format!("({d})"))),
+            None => String::new(),
+        };
+        println!("{colored} {} {}{}", e.kind, e.label, detail);
+    }
+}
+
+fn confirm(prompt: &str) -> Result<bool> {
+    if !io::stdin().is_terminal() {
+        // No TTY → safest to bail out and require --auto-approve
+        bail!("non-interactive shell; pass --auto-approve to confirm");
+    }
+    eprint!("{prompt}");
+    let _ = io::stderr().flush();
+    let mut buf = String::new();
+    io::stdin().read_line(&mut buf)?;
+    let s = buf.trim().to_ascii_lowercase();
+    Ok(s == "y" || s == "yes")
+}
+
+async fn cmd_apply(
+    client: &Client, file: PathBuf, dry_run: bool, auto_approve: bool,
+) -> Result<()> {
     let raw = if file == PathBuf::from("-") {
         let mut buf = String::new();
         io::stdin().read_to_string(&mut buf)?;
         buf
     } else {
-        fs::read_to_string(&file)
-            .with_context(|| format!("reading {}", file.display()))?
+        fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?
     };
-    let desired: DeclarativeState = serde_yaml::from_str(&raw)
-        .context("parsing state YAML")?;
+    let desired: DeclarativeState = serde_yaml::from_str(&raw).context("parsing state YAML")?;
 
     // Snapshot current state.
     let cur_services: Vec<Service> = client.get("/services").await?;
@@ -951,182 +1242,150 @@ async fn cmd_apply(client: &Client, file: PathBuf, dry_run: bool) -> Result<()> 
 
     let svc_by_name: HashMap<String, &Service> =
         cur_services.iter().map(|s| (s.name.clone(), s)).collect();
+    let svc_name_by_id: HashMap<Uuid, String> =
+        cur_services.iter().map(|s| (s.id, s.name.clone())).collect();
     let want_svc_names: std::collections::HashSet<&str> =
         desired.services.iter().map(|s| s.name.as_str()).collect();
 
-    let mut plan: Vec<String> = Vec::new();
+    let mut plan: Vec<PlanEntry> = Vec::new();
 
-    // ---- services: upsert ------------------------------------------------
+    // ---- services upsert (stage 0)
     for ds in &desired.services {
         match svc_by_name.get(ds.name.as_str()) {
             Some(existing) => {
-                let needs_update = existing.url != ds.url
-                    || existing.retries != ds.retries
-                    || existing.connect_timeout_ms != ds.connect_timeout_ms
-                    || existing.lb_strategy.as_deref().unwrap_or("round-robin") != ds.lb_strategy;
-                if needs_update {
-                    plan.push(format!("update service {}", ds.name));
-                    if !dry_run {
-                        let body = serde_json::json!({
-                            "name": ds.name,
-                            "url": ds.url,
-                            "retries": ds.retries,
-                            "connect_timeout_ms": ds.connect_timeout_ms,
-                            "lb_strategy": ds.lb_strategy,
-                        });
-                        let url = format!("{}/services/{}", client.base, existing.id);
-                        let resp = client.http.put(&url).json(&body).send().await?;
-                        if !resp.status().is_success() {
-                            bail!("PUT {url} → {}: {}", resp.status(), resp.text().await.unwrap_or_default());
-                        }
-                    }
+                let mut diffs: Vec<&'static str> = Vec::new();
+                if existing.url != ds.url { diffs.push("url"); }
+                if existing.retries != ds.retries { diffs.push("retries"); }
+                if existing.connect_timeout_ms != ds.connect_timeout_ms { diffs.push("timeout"); }
+                if existing.lb_strategy.as_deref().unwrap_or("round-robin") != ds.lb_strategy {
+                    diffs.push("lb_strategy");
                 }
-            }
-            None => {
-                plan.push(format!("create service {}", ds.name));
-                if !dry_run {
-                    let body = serde_json::json!({
-                        "name": ds.name,
-                        "url": ds.url,
-                        "retries": ds.retries,
-                        "connect_timeout_ms": ds.connect_timeout_ms,
-                        "lb_strategy": ds.lb_strategy,
+                if !diffs.is_empty() {
+                    plan.push(PlanEntry {
+                        sigil: '~', kind: "service", label: ds.name.clone(),
+                        detail: Some(format!("{} changed", diffs.join(", "))),
+                        stage: 0,
+                        action: PlanAction::UpdateService { id: existing.id, ds: ds.clone() },
                     });
-                    let _: Service = client.post("/services", &body).await?;
                 }
             }
+            None => plan.push(PlanEntry {
+                sigil: '+', kind: "service", label: ds.name.clone(),
+                detail: Some(ds.url.clone()),
+                stage: 0,
+                action: PlanAction::CreateService(ds.clone()),
+            }),
         }
     }
 
-    // Re-snapshot services so we can resolve names → ids for the rest.
-    let services_now: Vec<Service> = if dry_run {
-        cur_services.clone()
-    } else {
-        client.get("/services").await?
-    };
-    let svc_id_by_name: HashMap<String, Uuid> =
-        services_now.iter().map(|s| (s.name.clone(), s.id)).collect();
-
-    // ---- targets: replace per service ------------------------------------
+    // ---- targets diff (stage 1) — uses current snapshot for ids
     let mut targets_by_svc: HashMap<Uuid, Vec<&Target>> = HashMap::new();
     for t in &cur_targets {
         targets_by_svc.entry(t.service_id).or_default().push(t);
     }
     for ds in &desired.services {
-        let svc_id = match svc_id_by_name.get(&ds.name) {
-            Some(id) => *id,
-            None if dry_run => continue,
-            None => bail!("internal: service {} not found post-create", ds.name),
-        };
-        let existing = targets_by_svc.remove(&svc_id).unwrap_or_default();
+        // Look up current id (if it exists pre-apply)
+        let existing_svc_id = svc_by_name.get(ds.name.as_str()).map(|s| s.id);
+        let have: BTreeMap<String, (Uuid, u32)> = existing_svc_id
+            .and_then(|sid| targets_by_svc.get(&sid))
+            .map(|v| v.iter().map(|t| (t.url.clone(), (t.id, t.weight))).collect())
+            .unwrap_or_default();
         let want: BTreeMap<String, u32> = ds.targets.iter()
             .map(|t| (t.url.clone(), t.weight)).collect();
-        let have: BTreeMap<String, (Uuid, u32)> = existing.iter()
-            .map(|t| (t.url.clone(), (t.id, t.weight))).collect();
 
         for (url, weight) in &want {
             match have.get(url) {
                 Some((_, w)) if w == weight => {}
-                Some((tid, _)) => {
-                    plan.push(format!("update target {}={}", url, weight));
-                    if !dry_run {
-                        let body = serde_json::json!({ "weight": weight });
-                        let resp = client.http
-                            .put(&format!("{}/targets/{}", client.base, tid))
-                            .json(&body).send().await?;
-                        if !resp.status().is_success() {
-                            bail!("update target {tid}: {}", resp.status());
-                        }
-                    }
-                }
+                Some((tid, _)) => plan.push(PlanEntry {
+                    sigil: '~', kind: "target",
+                    label: format!("{} ({})", url, ds.name),
+                    detail: Some(format!("weight={weight}")),
+                    stage: 1,
+                    action: PlanAction::UpdateTarget { id: *tid, weight: *weight },
+                }),
                 None => {
-                    plan.push(format!("add target {} → {}", url, ds.name));
-                    if !dry_run {
-                        let body = serde_json::json!({ "url": url, "weight": weight, "enabled": true });
-                        let _: Target = client.post(&format!("/services/{}/targets", svc_id), &body).await?;
-                    }
+                    // Need to defer service_id resolution until after stage 0.
+                    // We mark the action with the pre-existing id if any; otherwise
+                    // it'll be resolved at execution time via the post-stage-0 map.
+                    let svc_id_marker = existing_svc_id.unwrap_or(Uuid::nil());
+                    plan.push(PlanEntry {
+                        sigil: '+', kind: "target",
+                        label: format!("{} ({})", url, ds.name),
+                        detail: Some(format!("weight={weight}")),
+                        stage: 1,
+                        action: PlanAction::AddTarget {
+                            service_id: svc_id_marker,
+                            url: url.clone(), weight: *weight,
+                        },
+                    });
                 }
             }
         }
         for (url, (tid, _)) in &have {
             if !want.contains_key(url) {
-                plan.push(format!("delete target {}", url));
-                if !dry_run {
-                    client.delete(&format!("/targets/{}", tid)).await?;
-                }
+                plan.push(PlanEntry {
+                    sigil: '-', kind: "target",
+                    label: format!("{} ({})", url, ds.name),
+                    detail: None, stage: 5, // delete-stage; before route deletes
+                    action: PlanAction::DeleteTarget { id: *tid },
+                });
             }
         }
     }
 
-    // ---- routes: identify by (service, paths-set) ------------------------
+    // ---- routes diff (stage 2 create / 6 delete)
     fn route_key(svc: &str, paths: &[String]) -> String {
         let mut p = paths.to_vec();
         p.sort();
         format!("{svc}|{}", p.join(","))
     }
-    let svc_name_by_id: HashMap<Uuid, String> =
-        services_now.iter().map(|s| (s.id, s.name.clone())).collect();
-    let cur_route_keys: HashMap<String, &Route> = cur_routes.iter()
-        .map(|r| {
-            let svc = svc_name_by_id.get(&r.service_id).cloned()
-                .unwrap_or_else(|| r.service_id.to_string());
-            (route_key(&svc, &r.paths), r)
-        })
-        .collect();
+    let cur_route_keys: HashMap<String, &Route> = cur_routes.iter().map(|r| {
+        let svc = svc_name_by_id.get(&r.service_id).cloned()
+            .unwrap_or_else(|| r.service_id.to_string());
+        (route_key(&svc, &r.paths), r)
+    }).collect();
     let want_route_keys: std::collections::HashSet<String> = desired.routes.iter()
         .map(|r| route_key(&r.service, &r.paths))
         .collect();
 
     for dr in &desired.routes {
         let key = route_key(&dr.service, &dr.paths);
-        if cur_route_keys.contains_key(&key) {
-            continue; // route already exists with matching shape
-        }
-        plan.push(format!("create route {} → {}", dr.paths.join(","), dr.service));
-        if dry_run { continue; }
-        let svc_id = svc_id_by_name.get(&dr.service)
-            .ok_or_else(|| anyhow!("route references unknown service '{}'", dr.service))?;
-        let body = serde_json::json!({
-            "paths": dr.paths,
-            "methods": dr.methods,
-            "service_id": svc_id,
-            "strip_path": dr.strip_path,
+        if cur_route_keys.contains_key(&key) { continue; }
+        plan.push(PlanEntry {
+            sigil: '+', kind: "route", label: dr.paths.join(","),
+            detail: Some(format!("→ {}", dr.service)),
+            stage: 2,
+            action: PlanAction::CreateRoute {
+                service_name: dr.service.clone(),
+                paths: dr.paths.clone(), methods: dr.methods.clone(),
+                strip_path: dr.strip_path,
+            },
         });
-        let _: Route = client.post("/routes", &body).await?;
     }
     for (key, route) in &cur_route_keys {
         if !want_route_keys.contains(key) {
-            plan.push(format!("delete route {}", route.paths.join(",")));
-            if !dry_run {
-                client.delete(&format!("/routes/{}", route.id)).await?;
-            }
+            plan.push(PlanEntry {
+                sigil: '-', kind: "route", label: route.paths.join(","),
+                detail: None, stage: 6,
+                action: PlanAction::DeleteRoute { id: route.id },
+            });
         }
     }
 
-    // ---- plugins: identify by (name, scope-key) --------------------------
+    // ---- plugins diff (stage 3 create / 4 delete)
     fn plugin_key(name: &str, scope: &str, target: &str) -> String {
         format!("{name}|{scope}|{target}")
     }
-    let route_id_by_key: HashMap<String, Uuid> = cur_routes.iter().map(|r| {
-        let svc = svc_name_by_id.get(&r.service_id).cloned()
-            .unwrap_or_else(|| r.service_id.to_string());
-        (route_key(&svc, &r.paths), r.id)
-    }).collect();
-
     let cur_plugin_keys: HashMap<String, &PluginInstance> = cur_plugins.iter().map(|p| {
         let (scope, target) = match (p.service_id, p.route_id) {
-            (Some(s), _) => (
-                "service",
-                svc_name_by_id.get(&s).cloned().unwrap_or_else(|| s.to_string()),
-            ),
+            (Some(s), _) => ("service",
+                svc_name_by_id.get(&s).cloned().unwrap_or_else(|| s.to_string())),
             (_, Some(r)) => {
-                // find route by id, render its service|paths key for symmetry
                 let k = cur_routes.iter().find(|rt| rt.id == r).map(|rt| {
                     let svc = svc_name_by_id.get(&rt.service_id).cloned()
                         .unwrap_or_else(|| rt.service_id.to_string());
-                    format!("{}|{}", svc, {
-                        let mut ps = rt.paths.clone(); ps.sort(); ps.join(";")
-                    })
+                    let mut ps = rt.paths.clone(); ps.sort();
+                    format!("{}|{}", svc, ps.join(";"))
                 }).unwrap_or_else(|| r.to_string());
                 ("route", k)
             }
@@ -1137,84 +1396,737 @@ async fn cmd_apply(client: &Client, file: PathBuf, dry_run: bool) -> Result<()> 
 
     let mut want_plugin_keys: std::collections::HashSet<String> = Default::default();
     for dp in &desired.plugins {
-        let (scope, target) = match dp.scope.as_str() {
+        let (scope, target, route_paths_opt) = match dp.scope.as_str() {
             "service" => {
                 let s = dp.service.as_deref()
                     .ok_or_else(|| anyhow!("plugin {} scope=service requires `service:`", dp.name))?;
-                ("service", s.to_string())
+                ("service", s.to_string(), None)
             }
             "route" => {
                 let r = dp.route.as_deref()
                     .ok_or_else(|| anyhow!("plugin {} scope=route requires `route:` (paths joined by ';')", dp.name))?;
-                // route value is "p1;p2"; produce normalized key as "<svc>|<sorted-paths>"
-                // we don't know the service here directly — match by paths only.
                 let mut ps: Vec<String> = r.split(';').map(|s| s.to_string()).collect();
                 ps.sort();
                 let joined = ps.join(";");
-                // try to find a route whose paths match
                 let svc = cur_routes.iter().find(|rt| {
                     let mut got = rt.paths.clone(); got.sort();
                     got.join(";") == joined
                 }).and_then(|rt| svc_name_by_id.get(&rt.service_id).cloned())
                     .unwrap_or_else(|| "?".into());
-                ("route", format!("{svc}|{joined}"))
+                ("route", format!("{svc}|{joined}"), Some(ps))
             }
-            "global" => ("global", String::new()),
+            "global" => ("global", String::new(), None),
             other => bail!("unknown plugin scope '{other}'"),
         };
         let key = plugin_key(&dp.name, scope, &target);
         want_plugin_keys.insert(key.clone());
 
         if !cur_plugin_keys.contains_key(&key) {
-            plan.push(format!("install plugin {} ({}{})", dp.name, scope,
-                if target.is_empty() { String::new() } else { format!(":{}", target) }));
-            if dry_run { continue; }
-            let (service_id, route_id) = match scope {
-                "service" => (svc_id_by_name.get(&target).copied(), None),
-                "route" => {
-                    // route key was "<svc>|<sorted-paths>"
-                    let rid = route_id_by_key.get(&target).copied();
-                    (None, rid)
-                }
-                _ => (None, None),
+            let scope_label = if target.is_empty() {
+                scope.to_string()
+            } else {
+                format!("{scope} {target}")
             };
-            let body = serde_json::json!({
-                "name": dp.name,
-                "service_id": service_id,
-                "route_id": route_id,
-                "enabled": true,
-                "config": dp.config,
+            plan.push(PlanEntry {
+                sigil: '+', kind: "plugin", label: dp.name.clone(),
+                detail: Some(scope_label),
+                stage: 3,
+                action: PlanAction::CreatePlugin {
+                    name: dp.name.clone(),
+                    service: if scope == "service" { Some(target.clone()) } else { None },
+                    route_paths: route_paths_opt,
+                    config: dp.config.clone(),
+                },
             });
-            let _: PluginInstance = client.post("/plugins", &body).await?;
         }
     }
     for (key, p) in &cur_plugin_keys {
         if !want_plugin_keys.contains(key) {
-            plan.push(format!("delete plugin {} ({})", p.name, short_id(&p.id)));
-            if !dry_run {
-                client.delete(&format!("/plugins/{}", p.id)).await?;
-            }
+            plan.push(PlanEntry {
+                sigil: '-', kind: "plugin", label: p.name.clone(),
+                detail: Some(fmt_id(&p.id)), stage: 4,
+                action: PlanAction::DeletePlugin { id: p.id },
+            });
         }
     }
 
-    // ---- services: delete missing (after routes/plugins are gone) --------
+    // ---- service deletes (stage 7)
     for s in &cur_services {
         if !want_svc_names.contains(s.name.as_str()) {
-            plan.push(format!("delete service {}", s.name));
-            if !dry_run {
-                client.delete(&format!("/services/{}", s.id)).await?;
+            plan.push(PlanEntry {
+                sigil: '-', kind: "service", label: s.name.clone(),
+                detail: None, stage: 7,
+                action: PlanAction::DeleteService { id: s.id },
+            });
+        }
+    }
+
+    // Sort by execution stage (rendering follows stage order — natural plan readout).
+    plan.sort_by_key(|e| e.stage);
+
+    if plan.is_empty() {
+        println!("{} nothing to do", green("✓"));
+        return Ok(());
+    }
+
+    render_plan(&plan);
+
+    if dry_run {
+        eprintln!("{}", dim(&format!("(dry-run: {} change(s) not applied)", plan.len())));
+        return Ok(());
+    }
+
+    if !auto_approve {
+        eprintln!();
+        let ok = confirm(&format!("Apply {} change(s)? (y/N): ", plan.len()))?;
+        if !ok {
+            eprintln!("{}", dim("aborted."));
+            return Ok(());
+        }
+    }
+
+    // Re-snapshot service ids if we created any (stage 0). We do this lazily.
+    let mut svc_id_by_name: HashMap<String, Uuid> =
+        cur_services.iter().map(|s| (s.name.clone(), s.id)).collect();
+    let mut route_id_by_key: HashMap<String, Uuid> = cur_routes.iter().map(|r| {
+        let svc = svc_name_by_id.get(&r.service_id).cloned()
+            .unwrap_or_else(|| r.service_id.to_string());
+        let mut ps = r.paths.clone(); ps.sort();
+        (format!("{}|{}", svc, ps.join(";")), r.id)
+    }).collect();
+
+    let mut applied = 0usize;
+    for entry in &plan {
+        let res = apply_one(client, &entry.action, &mut svc_id_by_name, &mut route_id_by_key).await;
+        match res {
+            Ok(()) => {
+                applied += 1;
+                let s = entry.sigil.to_string();
+                let colored = match entry.sigil {
+                    '+' => green(&s), '~' => yellow(&s), '-' => red(&s), _ => s.clone(),
+                };
+                println!("  {} {} {}", colored, dim("applied"), entry.label);
+            }
+            Err(e) => {
+                eprintln!("{} step failed at stage {}: {} {}",
+                    red("✗"), entry.stage, entry.kind, entry.label);
+                eprintln!("  {} {:#}", dim("└─"), e);
+                eprintln!("{}", dim(&format!(
+                    "(stopped after {applied}/{} ops; partial state was NOT rolled back)",
+                    plan.len()
+                )));
+                return Err(e);
             }
         }
     }
 
-    if plan.is_empty() {
-        println!("{} nothing to do", bold("✓"));
-    } else {
-        let header = if dry_run { "plan (dry-run)" } else { "applied" };
-        println!("{} {}:", bold("✓"), header);
-        for line in &plan {
-            println!("  {}", line);
+    println!("{} applied {} change(s)", green("✓"), applied);
+    Ok(())
+}
+
+async fn apply_one(
+    client: &Client,
+    action: &PlanAction,
+    svc_id_by_name: &mut HashMap<String, Uuid>,
+    route_id_by_key: &mut HashMap<String, Uuid>,
+) -> Result<()> {
+    match action {
+        PlanAction::CreateService(ds) => {
+            let body = serde_json::json!({
+                "name": ds.name, "url": ds.url, "retries": ds.retries,
+                "connect_timeout_ms": ds.connect_timeout_ms,
+                "lb_strategy": ds.lb_strategy,
+            });
+            let svc: Service = client.post("/services", &body).await?;
+            svc_id_by_name.insert(svc.name.clone(), svc.id);
+            Ok(())
         }
+        PlanAction::UpdateService { id, ds } => {
+            let body = serde_json::json!({
+                "name": ds.name, "url": ds.url, "retries": ds.retries,
+                "connect_timeout_ms": ds.connect_timeout_ms,
+                "lb_strategy": ds.lb_strategy,
+            });
+            let url = format!("{}/services/{}", client.base, id);
+            let resp = client.http.put(&url).json(&body).send().await?;
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                return Err(ApiError {
+                    method: "PUT", url, status,
+                    message: parse_error_envelope(&text),
+                    body: text,
+                }.into());
+            }
+            Ok(())
+        }
+        PlanAction::DeleteService { id } => {
+            client.delete(&format!("/services/{}", id)).await
+        }
+        PlanAction::AddTarget { service_id, url, weight } => {
+            let sid = if service_id.is_nil() {
+                bail!("internal: target add missing service id")
+            } else { *service_id };
+            let body = serde_json::json!({ "url": url, "weight": weight, "enabled": true });
+            let _: Target = client.post(&format!("/services/{}/targets", sid), &body).await?;
+            Ok(())
+        }
+        PlanAction::UpdateTarget { id, weight } => {
+            let body = serde_json::json!({ "weight": weight });
+            let url = format!("{}/targets/{}", client.base, id);
+            let resp = client.http.put(&url).json(&body).send().await?;
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                return Err(ApiError {
+                    method: "PUT", url, status,
+                    message: parse_error_envelope(&text),
+                    body: text,
+                }.into());
+            }
+            Ok(())
+        }
+        PlanAction::DeleteTarget { id } => {
+            client.delete(&format!("/targets/{}", id)).await
+        }
+        PlanAction::CreateRoute { service_name, paths, methods, strip_path } => {
+            let svc_id = svc_id_by_name.get(service_name).copied()
+                .ok_or_else(|| anyhow!("route references unknown service '{service_name}'"))?;
+            let body = serde_json::json!({
+                "paths": paths, "methods": methods,
+                "service_id": svc_id, "strip_path": strip_path,
+            });
+            let route: Route = client.post("/routes", &body).await?;
+            let mut ps = route.paths.clone(); ps.sort();
+            route_id_by_key.insert(format!("{}|{}", service_name, ps.join(";")), route.id);
+            Ok(())
+        }
+        PlanAction::DeleteRoute { id } => {
+            client.delete(&format!("/routes/{}", id)).await
+        }
+        PlanAction::CreatePlugin { name, service, route_paths, config } => {
+            let service_id = match service {
+                Some(s) => Some(svc_id_by_name.get(s).copied()
+                    .ok_or_else(|| anyhow!("plugin {name} references unknown service '{s}'"))?),
+                None => None,
+            };
+            let route_id = match route_paths {
+                Some(ps) => {
+                    let mut ps2 = ps.clone(); ps2.sort();
+                    let joined = ps2.join(";");
+                    // Find any route with matching paths set (across all services).
+                    route_id_by_key.iter().find_map(|(k, v)| {
+                        k.split_once('|').filter(|(_, p)| *p == joined).map(|_| *v)
+                    })
+                }
+                None => None,
+            };
+            let body = serde_json::json!({
+                "name": name, "service_id": service_id, "route_id": route_id,
+                "enabled": true, "config": config,
+            });
+            let _: PluginInstance = client.post("/plugins", &body).await?;
+            Ok(())
+        }
+        PlanAction::DeletePlugin { id } => {
+            client.delete(&format!("/plugins/{}", id)).await
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Validate
+// ---------------------------------------------------------------------------
+
+async fn cmd_validate(client: &Client, file: PathBuf) -> Result<()> {
+    let raw = if file == PathBuf::from("-") {
+        let mut buf = String::new();
+        io::stdin().read_to_string(&mut buf)?;
+        buf
+    } else {
+        fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?
+    };
+    let state: DeclarativeState = serde_yaml::from_str(&raw).context("parsing state YAML")?;
+
+    let mut errors: Vec<String> = Vec::new();
+
+    // services[*].url
+    for (i, s) in state.services.iter().enumerate() {
+        match url::Url::parse(&s.url) {
+            Ok(u) => {
+                if u.scheme().is_empty() {
+                    errors.push(format!("services[{i}].url: invalid URL: missing scheme"));
+                }
+            }
+            Err(e) => errors.push(format!("services[{i}].url ({}): invalid URL: {}", s.url, e)),
+        }
+        for (j, t) in s.targets.iter().enumerate() {
+            if let Err(e) = url::Url::parse(&t.url) {
+                errors.push(format!("services[{i}].targets[{j}].url ({}): invalid URL: {}", t.url, e));
+            }
+        }
+        if s.name.is_empty() {
+            errors.push(format!("services[{i}].name: must not be empty"));
+        }
+    }
+
+    // routes[*].service exists in desired services or current gateway
+    let want_svc: std::collections::HashSet<&str> =
+        state.services.iter().map(|s| s.name.as_str()).collect();
+    let cur_services: Vec<Service> = client.get("/services").await.unwrap_or_default();
+    let cur_svc_names: std::collections::HashSet<String> =
+        cur_services.iter().map(|s| s.name.clone()).collect();
+
+    for (i, r) in state.routes.iter().enumerate() {
+        if !want_svc.contains(r.service.as_str()) && !cur_svc_names.contains(&r.service) {
+            let suggest = fuzzy_suggest(
+                &r.service,
+                want_svc.iter().copied().chain(cur_svc_names.iter().map(|s| s.as_str())),
+            );
+            let hint = suggest.map(|s| format!(". Did you mean '{s}'?")).unwrap_or_default();
+            errors.push(format!(
+                "routes[{i}].service ('{}'): no such service in state or gateway{hint}",
+                r.service
+            ));
+        }
+        if r.paths.is_empty() {
+            errors.push(format!("routes[{i}].paths: must not be empty"));
+        }
+        for (j, p) in r.paths.iter().enumerate() {
+            if !p.starts_with('/') {
+                errors.push(format!("routes[{i}].paths[{j}]: path must start with '/' (got '{p}')"));
+            }
+        }
+    }
+
+    // plugins[*].name in catalog; config must be a JSON object (not scalar)
+    for (i, p) in state.plugins.iter().enumerate() {
+        if !PLUGIN_CATALOG.contains(&p.name.as_str()) {
+            let suggest = fuzzy_suggest(&p.name, PLUGIN_CATALOG.iter().copied());
+            let hint = suggest.map(|s| format!(". Did you mean '{s}'?")).unwrap_or_default();
+            errors.push(format!(
+                "plugins[{i}].name ('{}'): unknown plugin{hint}",
+                p.name
+            ));
+        }
+        match &p.config {
+            Json::Object(_) | Json::Null => {}
+            _ => errors.push(format!(
+                "plugins[{i}].config: must be a JSON object (got {})",
+                match &p.config {
+                    Json::String(_) => "string",
+                    Json::Number(_) => "number",
+                    Json::Bool(_) => "bool",
+                    Json::Array(_) => "array",
+                    _ => "scalar",
+                }
+            )),
+        }
+        match p.scope.as_str() {
+            "global" => {}
+            "service" => {
+                if p.service.is_none() {
+                    errors.push(format!("plugins[{i}]: scope=service requires `service:`"));
+                } else if let Some(sn) = &p.service {
+                    if !want_svc.contains(sn.as_str()) && !cur_svc_names.contains(sn) {
+                        errors.push(format!(
+                            "plugins[{i}].service ('{sn}'): no such service in state or gateway"
+                        ));
+                    }
+                }
+            }
+            "route" => {
+                if p.route.is_none() {
+                    errors.push(format!(
+                        "plugins[{i}]: scope=route requires `route:` (paths joined by ';')"
+                    ));
+                }
+            }
+            other => errors.push(format!("plugins[{i}].scope: unknown scope '{other}'")),
+        }
+    }
+
+    if errors.is_empty() {
+        let svc = state.services.len();
+        let routes = state.routes.len();
+        let plugins = state.plugins.len();
+        println!("{} valid: {svc} service(s), {routes} route(s), {plugins} plugin(s)",
+            green("✓"));
+        Ok(())
+    } else {
+        for e in &errors {
+            println!("{} {}", red("✗"), e);
+        }
+        bail!("{} validation error(s)", errors.len());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Watch — periodic redraw of a list view.
+// ---------------------------------------------------------------------------
+
+fn install_ctrlc_handler() -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let s = stop.clone();
+    // Use tokio's signal facility to avoid pulling ctrlc crate.
+    tokio::spawn(async move {
+        if let Ok(()) = tokio::signal::ctrl_c().await {
+            s.store(true, Ordering::SeqCst);
+        }
+    });
+    stop
+}
+
+async fn cmd_watch(client: &Client, resource: WatchResource, interval: u64, fmt: OutputFormat) -> Result<()> {
+    let stop = install_ctrlc_handler();
+    let tty_out = io::stdout().is_terminal();
+
+    if tty_out {
+        // Hide cursor; we'll restore it on exit.
+        print!("\x1b[?25l");
+        let _ = io::stdout().flush();
+    }
+
+    let result: Result<()> = async {
+        loop {
+            if stop.load(Ordering::SeqCst) { break; }
+            if tty_out {
+                // Clear screen + home cursor.
+                print!("\x1b[H\x1b[2J");
+            }
+            let now = Local::now().format("%Y-%m-%d %H:%M:%S");
+            println!("{} {} every {}s — Ctrl-C to exit",
+                bold(&format!("lynxx watch {:?}", resource).to_lowercase()),
+                dim(&format!("[{now}]")),
+                interval);
+            println!();
+
+            let render = match resource {
+                WatchResource::Services => cmd_services_list(client, fmt).await,
+                WatchResource::Routes => cmd_routes_list(client, fmt).await,
+                WatchResource::Plugins => cmd_plugins_list(client, fmt).await,
+                WatchResource::Health => cmd_health(client, fmt).await,
+            };
+            if let Err(e) = render {
+                println!("{} {:#}", red("✗"), e);
+            }
+            let _ = io::stdout().flush();
+
+            // Sleep in small slices so Ctrl-C is responsive.
+            let total = Duration::from_secs(interval.max(1));
+            let start = Instant::now();
+            while start.elapsed() < total {
+                if stop.load(Ordering::SeqCst) { break; }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        Ok(())
+    }.await;
+
+    if tty_out {
+        // Always restore cursor.
+        print!("\x1b[?25h");
+        let _ = io::stdout().flush();
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Tail — derive request deltas from /metrics each tick.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+struct ReqKey {
+    service: String,
+    route: String,
+    method: String,
+    status: String, // "2xx", "404", etc.
+}
+
+/// Parse Prometheus text format. Returns counters keyed by metric name + sorted-label-tuple.
+/// Captures per-line `metric{label="v",...} value` rows for `lynxx_requests_total` and
+/// any `_seconds_sum` / `_seconds_count` pair if present.
+fn parse_prom(text: &str) -> Vec<(String, Vec<(String, String)>, f64)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        // metric{labels} value [timestamp]
+        let (head, value) = match line.rsplit_once(' ') {
+            Some(v) => v,
+            None => continue,
+        };
+        let value: f64 = match value.parse() { Ok(v) => v, Err(_) => continue };
+        let (name, labels) = if let Some(open) = head.find('{') {
+            let close = match head.rfind('}') { Some(c) => c, None => continue };
+            let name = head[..open].to_string();
+            let labels_str = &head[open + 1..close];
+            let mut labels: Vec<(String, String)> = Vec::new();
+            for kv in labels_str.split(',') {
+                let kv = kv.trim();
+                if kv.is_empty() { continue; }
+                let (k, v) = match kv.split_once('=') { Some(s) => s, None => continue };
+                let v = v.trim().trim_matches('"').to_string();
+                labels.push((k.trim().to_string(), v));
+            }
+            labels.sort();
+            (name, labels)
+        } else {
+            (head.to_string(), Vec::new())
+        };
+        out.push((name, labels, value));
+    }
+    out
+}
+
+fn status_bucket(s: &str) -> String {
+    if let Ok(n) = s.parse::<u16>() {
+        match n {
+            100..=199 => "1xx".into(),
+            200..=299 => "2xx".into(),
+            300..=399 => "3xx".into(),
+            400..=499 => "4xx".into(),
+            500..=599 => "5xx".into(),
+            _ => s.to_string(),
+        }
+    } else { s.to_string() }
+}
+
+async fn cmd_tail(client: &Client, interval: u64) -> Result<()> {
+    let stop = install_ctrlc_handler();
+    println!("{} live request tail (interval {}s) — best-effort, derived from /metrics counters",
+        dim("note:"), interval);
+    println!("{}", dim("press Ctrl-C to exit"));
+
+    let mut prev: HashMap<ReqKey, f64> = HashMap::new();
+    let mut prev_latency: HashMap<ReqKey, (f64, f64)> = HashMap::new(); // (sum, count)
+    let mut first = true;
+
+    loop {
+        if stop.load(Ordering::SeqCst) { break; }
+        let text = match client.get_text("/metrics").await {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("{} {:#}", red("✗"), e);
+                tokio::time::sleep(Duration::from_secs(interval.max(1))).await;
+                continue;
+            }
+        };
+        let metrics = parse_prom(&text);
+
+        // Index counters and latency pairs.
+        let mut current: HashMap<ReqKey, f64> = HashMap::new();
+        let mut current_latency: HashMap<ReqKey, (f64, f64)> = HashMap::new();
+        for (name, labels, value) in &metrics {
+            let lkup = |k: &str| labels.iter().find(|(lk, _)| lk == k).map(|(_, v)| v.clone());
+            let key = || ReqKey {
+                service: lkup("service").unwrap_or_default(),
+                route: lkup("route").unwrap_or_else(|| lkup("path").unwrap_or_default()),
+                method: lkup("method").unwrap_or_default(),
+                status: status_bucket(&lkup("status").unwrap_or_default()),
+            };
+            match name.as_str() {
+                "lynxx_requests_total" => {
+                    let k = key();
+                    *current.entry(k).or_insert(0.0) += value;
+                }
+                "lynxx_request_duration_seconds_sum" => {
+                    let entry = current_latency.entry(key()).or_insert((0.0, 0.0));
+                    entry.0 += value;
+                }
+                "lynxx_request_duration_seconds_count" => {
+                    let entry = current_latency.entry(key()).or_insert((0.0, 0.0));
+                    entry.1 += value;
+                }
+                _ => {}
+            }
+        }
+
+        if !first {
+            // Compute deltas; print one line per non-zero bucket.
+            let mut deltas: Vec<(ReqKey, f64, Option<f64>)> = Vec::new();
+            for (k, &v) in &current {
+                let p = prev.get(k).copied().unwrap_or(0.0);
+                let d = v - p;
+                if d > 0.0 {
+                    let lat = match (current_latency.get(k), prev_latency.get(k)) {
+                        (Some(&(s2, c2)), Some(&(s1, c1))) if c2 > c1 => Some(((s2 - s1) / (c2 - c1)) * 1000.0),
+                        (Some(&(s2, c2)), None) if c2 > 0.0 => Some((s2 / c2) * 1000.0),
+                        _ => None,
+                    };
+                    deltas.push((k.clone(), d, lat));
+                }
+            }
+            deltas.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let ts = Local::now().format("%H:%M:%S");
+            for (k, count, lat) in &deltas {
+                let lat_str = match lat {
+                    Some(ms) => format!("{:.1}ms", ms),
+                    None => "—".into(),
+                };
+                let multiplier = if *count > 1.0 {
+                    dim(&format!(" (× {:.0})", count))
+                } else { String::new() };
+                println!(
+                    "{} {} {} {} {} {}{}",
+                    dim(&ts.to_string()),
+                    pad(&k.service, 18),
+                    pad(&k.method, 6),
+                    pad(&k.route, 24),
+                    pad(&k.status, 4),
+                    lat_str,
+                    multiplier,
+                );
+            }
+        }
+
+        prev = current;
+        prev_latency = current_latency;
+        first = false;
+
+        let total = Duration::from_secs(interval.max(1));
+        let start = Instant::now();
+        while start.elapsed() < total {
+            if stop.load(Ordering::SeqCst) { break; }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    Ok(())
+}
+
+fn pad(s: &str, w: usize) -> String {
+    if s.len() >= w { s.to_string() }
+    else { format!("{}{}", s, " ".repeat(w - s.len())) }
+}
+
+// ---------------------------------------------------------------------------
+// Exec — fire a request through the proxy.
+// ---------------------------------------------------------------------------
+
+fn proxy_url_from_admin(admin: &str) -> Result<String> {
+    let mut u = url::Url::parse(admin).context("parsing --admin URL")?;
+    if let Some(p) = u.port() {
+        let proxy_port = p.checked_sub(1)
+            .ok_or_else(|| anyhow!("admin port {p} cannot be decremented to derive proxy port"))?;
+        u.set_port(Some(proxy_port)).map_err(|_| anyhow!("setting proxy port"))?;
+    } else {
+        // Default convention: admin 9001 → proxy 9000.
+        u.set_port(Some(9000)).map_err(|_| anyhow!("setting proxy port"))?;
+    }
+    u.set_path("");
+    Ok(u.as_str().trim_end_matches('/').to_string())
+}
+
+async fn cmd_exec(
+    admin_url: &str,
+    path: String,
+    method: String,
+    body: Option<String>,
+    headers: Vec<String>,
+    proxy_override: Option<String>,
+    max_body: usize,
+) -> Result<()> {
+    let proxy_base = match proxy_override {
+        Some(p) => p.trim_end_matches('/').to_string(),
+        None => proxy_url_from_admin(admin_url)?,
+    };
+    let url = if path.starts_with('/') {
+        format!("{proxy_base}{path}")
+    } else {
+        format!("{proxy_base}/{path}")
+    };
+
+    let m = method.to_ascii_uppercase();
+    let method_parsed = reqwest::Method::from_bytes(m.as_bytes())
+        .with_context(|| format!("invalid method '{m}'"))?;
+
+    let body_bytes: Option<Vec<u8>> = match body {
+        Some(s) if s.starts_with('@') => {
+            let path = &s[1..];
+            Some(fs::read(path).with_context(|| format!("reading body file '{path}'"))?)
+        }
+        Some(s) => Some(s.into_bytes()),
+        None => None,
+    };
+
+    let http = reqwest::Client::new();
+    let mut req = http.request(method_parsed.clone(), &url);
+    for h in &headers {
+        let (k, v) = h.split_once(':')
+            .ok_or_else(|| anyhow!("header '{h}': expected 'Key: Value'"))?;
+        req = req.header(k.trim(), v.trim());
+    }
+    if let Some(b) = body_bytes {
+        req = req.body(b);
+    }
+
+    let started = Instant::now();
+    let resp = req.send().await.with_context(|| format!("{} {url}", method_parsed))?;
+    let elapsed = started.elapsed();
+    let status = resp.status();
+    let resp_headers = resp.headers().clone();
+    let raw = resp.bytes().await.unwrap_or_default();
+
+    // Status line.
+    let status_color = |s: reqwest::StatusCode| -> String {
+        let n = s.as_u16();
+        let s_str = format!("{} {}", n, s.canonical_reason().unwrap_or(""));
+        match n {
+            200..=299 => green(&s_str),
+            300..=399 => yellow(&s_str),
+            _ => red(&s_str),
+        }
+    };
+    println!("{} {}  {}  {}",
+        bold(&method_parsed.to_string()),
+        url,
+        status_color(status),
+        dim(&format!("({:.1}ms)", elapsed.as_secs_f64() * 1000.0)),
+    );
+
+    // Headers (dim).
+    let mut hk: Vec<_> = resp_headers.iter().collect();
+    hk.sort_by_key(|(k, _)| k.as_str().to_ascii_lowercase());
+    for (k, v) in hk {
+        let v_str = v.to_str().unwrap_or("<binary>");
+        println!("{} {}: {}", dim("│"), dim(k.as_str()), v_str);
+    }
+    println!();
+
+    // Body — pretty-print JSON when content-type matches; truncate.
+    let content_type = resp_headers.get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok()).unwrap_or("");
+    let total_len = raw.len();
+    let display: Vec<u8> = if max_body > 0 && total_len > max_body {
+        raw[..max_body].to_vec()
+    } else {
+        raw.to_vec()
+    };
+
+    if content_type.contains("application/json") {
+        match std::str::from_utf8(&display).ok()
+            .and_then(|s| serde_json::from_str::<Json>(s).ok()) {
+            Some(j) => {
+                let pp = serde_json::to_string_pretty(&j).unwrap_or_default();
+                println!("{pp}");
+            }
+            None => {
+                println!("{}", String::from_utf8_lossy(&display));
+            }
+        }
+    } else {
+        println!("{}", String::from_utf8_lossy(&display));
+    }
+    if max_body > 0 && total_len > max_body {
+        println!("{}", dim(&format!(
+            "(truncated: {} of {} bytes shown — use --max-body 0 for full output)",
+            max_body, total_len
+        )));
+    }
+
+    if !status.is_success() {
+        // Reflect HTTP failure as exit code without re-printing.
+        bail!("HTTP {}", status.as_u16());
     }
     Ok(())
 }
@@ -1226,46 +2138,76 @@ async fn cmd_apply(client: &Client, file: PathBuf, dry_run: bool) -> Result<()> 
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let client = Client::new(&cli.admin);
+
+    // Color resolution: --no-color > NO_COLOR > tty check (deferred to color_enabled()).
+    let no_color_env = std::env::var_os("NO_COLOR").is_some();
+    if cli.no_color || no_color_env {
+        COLOR_OFF.store(true, Ordering::Relaxed);
+    }
+    if cli.full_id { FULL_ID.store(true, Ordering::Relaxed); }
+
+    // Resolve admin URL: --admin > LYNXX_ADMIN > config file > default.
+    let local = load_config();
+    let admin_url = cli.admin.clone()
+        .or_else(|| local.admin.clone())
+        .unwrap_or_else(|| "http://localhost:9001".into());
+
+    // Resolve output format: --output > config file > Table.
+    let output = cli.output.unwrap_or_else(|| {
+        match local.output.as_deref() {
+            Some("json") => OutputFormat::Json,
+            Some("yaml") => OutputFormat::Yaml,
+            _ => OutputFormat::Table,
+        }
+    });
+
+    let client = Client::new(&admin_url);
 
     let result: Result<()> = match cli.command {
         Cmd::Ping => cmd_ping(&client).await,
-        Cmd::Status => cmd_status(&client, cli.output).await,
+        Cmd::Status => cmd_status(&client, output).await,
         Cmd::Services(s) => match s {
-            ServicesCmd::List => cmd_services_list(&client, cli.output).await,
-            ServicesCmd::Get { ident } => cmd_services_get(&client, &ident, cli.output).await,
+            ServicesCmd::List => cmd_services_list(&client, output).await,
+            ServicesCmd::Get { ident } => cmd_services_get(&client, &ident, output).await,
             ServicesCmd::Create { name, url, retries, connect_timeout_ms, lb_strategy } =>
-                cmd_services_create(&client, name, url, retries, connect_timeout_ms, lb_strategy, cli.output).await,
+                cmd_services_create(&client, name, url, retries, connect_timeout_ms, lb_strategy, output).await,
             ServicesCmd::Delete { ident } => cmd_services_delete(&client, &ident).await,
         },
         Cmd::Routes(r) => match r {
-            RoutesCmd::List => cmd_routes_list(&client, cli.output).await,
+            RoutesCmd::List => cmd_routes_list(&client, output).await,
             RoutesCmd::Create { service, paths, methods, strip_path } =>
-                cmd_routes_create(&client, service, paths, methods, strip_path, cli.output).await,
+                cmd_routes_create(&client, service, paths, methods, strip_path, output).await,
             RoutesCmd::Delete { id } => cmd_routes_delete(&client, &id).await,
         },
         Cmd::Plugins(p) => match p {
-            PluginsCmd::List => cmd_plugins_list(&client, cli.output).await,
+            PluginsCmd::List => cmd_plugins_list(&client, output).await,
             PluginsCmd::Install { name, service, route, config } =>
-                cmd_plugins_install(&client, name, service, route, config, cli.output).await,
+                cmd_plugins_install(&client, name, service, route, config, output).await,
             PluginsCmd::Delete { id } => cmd_plugins_delete(&client, &id).await,
         },
         Cmd::Consumers(c) => match c {
-            ConsumersCmd::List => cmd_consumers_list(&client, cli.output).await,
+            ConsumersCmd::List => cmd_consumers_list(&client, output).await,
             ConsumersCmd::Create { username, custom_id } =>
-                cmd_consumers_create(&client, username, custom_id, cli.output).await,
+                cmd_consumers_create(&client, username, custom_id, output).await,
             ConsumersCmd::Delete { ident } => cmd_consumers_delete(&client, &ident).await,
         },
         Cmd::Targets(t) => match t {
-            TargetsCmd::List { service } => cmd_targets_list(&client, service, cli.output).await,
+            TargetsCmd::List { service } => cmd_targets_list(&client, service, output).await,
             TargetsCmd::Add { service, url, weight } =>
-                cmd_targets_add(&client, service, url, weight, cli.output).await,
+                cmd_targets_add(&client, service, url, weight, output).await,
             TargetsCmd::Delete { id } => cmd_targets_delete(&client, &id).await,
         },
-        Cmd::Health => cmd_health(&client, cli.output).await,
+        Cmd::Health => cmd_health(&client, output).await,
         Cmd::Reload => cmd_reload(&client).await,
         Cmd::Dump => cmd_dump(&client).await,
-        Cmd::Apply { file, dry_run } => cmd_apply(&client, file, dry_run).await,
+        Cmd::Apply { file, dry_run, auto_approve } =>
+            cmd_apply(&client, file, dry_run, auto_approve).await,
+        Cmd::Validate { file } => cmd_validate(&client, file).await,
+        Cmd::Watch { resource, interval } => cmd_watch(&client, resource, interval, output).await,
+        Cmd::Tail { interval } => cmd_tail(&client, interval).await,
+        Cmd::Exec { path, method, body, headers, proxy, max_body } =>
+            cmd_exec(&admin_url, path, method, body, headers, proxy, max_body).await,
+        Cmd::Config(c) => cmd_config(c),
         Cmd::Completion { shell } => {
             let mut cmd = Cli::command();
             let bin = cmd.get_name().to_string();
@@ -1277,9 +2219,39 @@ async fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            let prefix = if io::stderr().is_terminal() { "\x1b[1m✗\x1b[0m " } else { "✗ " };
-            let _ = writeln!(io::stderr(), "{prefix}{e:#}");
+            print_error(&e);
             ExitCode::from(1)
+        }
+    }
+}
+
+fn print_error(e: &anyhow::Error) {
+    let stderr_tty = io::stderr().is_terminal();
+    let prefix = if stderr_tty && !COLOR_OFF.load(Ordering::Relaxed) {
+        "\x1b[31m\x1b[1m✗\x1b[0m "
+    } else { "✗ " };
+
+    // Pull the head error as the "summary" line; show the chain (if any) as dim continuation.
+    let head = e.to_string();
+    let mut chain: Vec<String> = Vec::new();
+    let mut src = e.source();
+    while let Some(s) = src {
+        chain.push(s.to_string());
+        src = s.source();
+    }
+
+    // ApiError's Display already includes the parsed envelope message; show that
+    // as the one-liner.
+    let _ = writeln!(io::stderr(), "{prefix}{head}");
+    if !chain.is_empty() {
+        let cont = if stderr_tty && !COLOR_OFF.load(Ordering::Relaxed) {
+            "\x1b[2m└─\x1b[0m"
+        } else { "└─" };
+        for c in &chain {
+            let line = if stderr_tty && !COLOR_OFF.load(Ordering::Relaxed) {
+                format!("\x1b[2m{c}\x1b[0m")
+            } else { c.clone() };
+            let _ = writeln!(io::stderr(), "  {cont} {line}");
         }
     }
 }

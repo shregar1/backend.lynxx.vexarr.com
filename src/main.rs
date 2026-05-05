@@ -87,8 +87,21 @@ fn apply_cli_overrides(config: &mut GatewayConfig, args: &Args) {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Explicit runtime construction. Beats `#[tokio::main]` for high-RPS proxy
+/// workloads because we can size the worker pool to physical cores and name
+/// the threads (helps `perf` / flamegraphs). Kept simple — no thread pinning,
+/// no per-thread stack size — those are deployment-specific tuning knobs.
+fn main() -> anyhow::Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(num_cpus::get())
+        .thread_name("lynxx-worker")
+        .build()?;
+    rt.block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
@@ -134,7 +147,12 @@ async fn main() -> anyhow::Result<()> {
     plugin_exec.rebuild(&repo).await?;
     tracing::info!("plugin executor ready");
 
-    let http_client = reqwest::Client::new();
+    // Streaming hyper-util client used by the proxy hot path (HTTP/1.1 + h2
+    // via ALPN). Separate from the `reqwest::Client` used by the health
+    // checker and out-of-band plugins (oauth2-introspect) — those benefit
+    // from reqwest's higher-level conveniences and aren't latency-critical.
+    let http_client = crate::proxy::http_client::build_http_proxy_client()?;
+    let health_http_client = reqwest::Client::new();
     let grpc_client = crate::proxy::grpc::build_grpc_client();
 
     let health_config = HealthConfig {
@@ -155,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
         health.clone(),
         repo.clone(),
         lb.clone(),
-        http_client.clone(),
+        health_http_client,
         config.gateway.health_check_interval_ms,
     );
 
