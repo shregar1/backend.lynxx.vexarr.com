@@ -257,10 +257,11 @@ struct StatusResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ServiceHealth {
     service_id: Uuid,
-    healthy_targets: u32,
-    unhealthy_targets: u32,
-    circuit_state: String,
-    last_check: Option<DateTime<Utc>>,
+    status: String,
+    circuit: String,
+    consecutive_failures: u32,
+    last_check_at: Option<DateTime<Utc>>,
+    last_error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -832,13 +833,14 @@ async fn cmd_health(client: &Client, fmt: OutputFormat) -> Result<()> {
     let rows: Vec<Vec<String>> = health.iter().map(|h| {
         vec![
             by_id.get(&h.service_id).cloned().unwrap_or_else(|| short_id(&h.service_id)),
-            h.healthy_targets.to_string(),
-            h.unhealthy_targets.to_string(),
-            h.circuit_state.clone(),
-            h.last_check.map(|t| t.to_rfc3339()).unwrap_or_else(|| "—".into()),
+            h.status.clone(),
+            h.circuit.clone(),
+            h.consecutive_failures.to_string(),
+            h.last_check_at.map(|t| t.to_rfc3339()).unwrap_or_else(|| "—".into()),
+            h.last_error.clone().unwrap_or_else(|| "—".into()).chars().take(60).collect(),
         ]
     }).collect();
-    print_table(&["SERVICE", "HEALTHY", "UNHEALTHY", "CIRCUIT", "LAST_CHECK"], &rows);
+    print_table(&["SERVICE", "STATUS", "CIRCUIT", "FAILS", "LAST_CHECK", "LAST_ERROR"], &rows);
     Ok(())
 }
 

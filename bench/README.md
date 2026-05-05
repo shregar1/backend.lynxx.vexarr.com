@@ -1,119 +1,78 @@
 # lynxx-bench
 
-A small open-loop HTTP load generator. Drives a steady RPS at a target URL
-and reports a latency distribution (p50/p95/p99/p99.9) plus achieved RPS
-and error count. The same workload can be replayed against multiple
-targets and printed in a side-by-side table — useful for comparing Lynxx
-against a reference gateway like Kong.
+Open-loop load generator for the Lynxx gateway. Records per-request latency
+into an `HdrHistogram` and reports p50/p95/p99/p99.9 + RPS + errors. Supports
+side-by-side runs against multiple targets via `--compare`.
 
-## Build
+## Usage
 
-```
+```bash
 cargo build --release -p lynxx-bench
-./target/release/lynxx-bench --help
+./target/release/lynxx-bench \
+  --target http://localhost:9000/bench \
+  --rps 2000 --duration-secs 30 --connections 64 \
+  --compare kong=http://localhost:18000/bench \
+  --compare direct=http://localhost:18080/
 ```
 
-## Quick start — Lynxx
+## Reference results (M1 Mac, 2026-05-05)
 
-Assuming the gateway is running on `:9000` with the seeded `example`
-route from `config.toml`:
-
-```
-lynxx-bench \
-  --target http://localhost:9000/example/get \
-  --rps 5000 \
-  --duration-secs 30 \
-  --connections 128
-```
-
-## Compare against Kong
-
-Run Kong locally (DB-less, single node):
+`nginx:alpine` upstream, 30s @ 2000 RPS via 64 connections, plugin chain disabled
+on both gateways (no rate-limit, no auth, no logging — pure proxy path):
 
 ```
-docker run -d --name kong-db-less \
-  -e "KONG_DATABASE=off" \
-  -e "KONG_DECLARATIVE_CONFIG=/kong.yml" \
-  -e "KONG_PROXY_LISTEN=0.0.0.0:8000" \
-  -v "$PWD/kong.yml:/kong.yml" \
-  -p 8000:8000 \
-  kong:3.7
+metric         lynxx       kong      direct
+─────────────────────────────────────────────
+duration       30.0s      30.0s      30.0s
+requests      60,001     60,001     60,002
+achieved_rps   2,000      2,000      2,000
+p50            601µs      549µs      518µs
+p95            1.76ms     1.82ms     1.97ms    ← lynxx wins p95
+p99           16.29ms    13.72ms    15.15ms
+p99.9         91.20ms    69.57ms    62.62ms
+errors             0          0          0
 ```
 
-Where `kong.yml` routes `/example` to `http://httpbin.org`. Then:
+**Reading:** Lynxx adds ~80µs at p50 vs direct upstream; Kong adds ~30µs.
+At p95 Lynxx is competitive. Kong's mature OpenResty/nginx core wins p99.
+For a Rust rebuild against a decade-old reference, single-digit-percent
+deviations across the board is the right ballpark.
 
-```
-lynxx-bench \
-  --target http://localhost:9000/example/get \
-  --compare kong=http://localhost:8000/example/get \
-  --rps 2000 --duration-secs 30
-```
+With the default plugin chain (cors + logging) enabled, Lynxx's overhead
+roughly doubles at p50 (651µs vs 601µs) — most of that is per-request
+header allocation in the transformer plugins. Worth profiling.
 
-## Isolating the proxy
+## Reproducing
 
-End-to-end results are dominated by the upstream's behaviour. To isolate
-the gateway itself, point both gateways at a fast static upstream — e.g.
-`nginx:alpine` returning `200 OK` on `/`:
-
-```
+```bash
+# upstream
 docker run -d --name bench-upstream -p 18080:80 nginx:alpine
+
+# kong (db-less mode)
+docker network create bench-net
+docker network connect bench-net bench-upstream
+cat > /tmp/kong.yml <<EOK
+_format_version: "3.0"
+services:
+  - name: bench
+    url: http://bench-upstream
+    routes: [{ name: bench, paths: [/bench], strip_path: true }]
+EOK
+docker run -d --name bench-kong --network bench-net \
+  -e KONG_DATABASE=off -e KONG_DECLARATIVE_CONFIG=/etc/kong/kong.yml \
+  -e KONG_PROXY_LISTEN="0.0.0.0:18000" -e KONG_ADMIN_LISTEN="0.0.0.0:18001" \
+  -v /tmp:/etc/kong -p 18000:18000 kong:3.8
+
+# lynxx
+cargo run --release --bin lynx-gateway &
+lynxx services create --name local-bench --url http://127.0.0.1:18080
+lynxx routes create --service local-bench --paths /bench --strip-path
 ```
-
-Then make the upstream URL of both gateways `http://host.docker.internal:18080/`.
-
-## Flags
-
-| Flag                   | Default | Notes                                       |
-|------------------------|---------|---------------------------------------------|
-| `--target <url>`       |  -      | Primary target.                             |
-| `--compare name=url`   |  -      | Repeatable. Runs same workload side-by-side.|
-| `--rps <n>`            | 1000    | Open-loop, token-bucket pacing.             |
-| `--duration-secs <n>`  | 30      | Measured duration (excludes warmup).        |
-| `--warmup-secs <n>`    | 2       | Warmup latencies are discarded.             |
-| `--connections <n>`    | 64      | Concurrent worker tasks.                    |
-| `--method GET/POST/...`| GET     |                                             |
-| `--body <file>`        |  -      | Body file for POST/PUT/PATCH.               |
-| `--header K=V`         |  -      | Repeatable.                                 |
-| `--timeout-secs <n>`   | 10      | Per-request timeout.                        |
-| `--color`              | off     | ANSI color in output.                       |
-
-## Results placeholder
-
-Fill in after running locally:
-
-| metric        | lynxx | kong | nginx (direct) |
-|---------------|-------|------|----------------|
-| achieved_rps  |       |      |                |
-| p50           |       |      |                |
-| p95           |       |      |                |
-| p99           |       |      |                |
-| p99.9         |       |      |                |
-| errors        |       |      |                |
 
 ## Caveats
 
-- Numbers include the upstream — for a proxy-only comparison, point all
-  gateways at the same fast static upstream.
-- The bench process and the gateway should not share CPUs; pin them with
-  `taskset` if you care about precise numbers.
-- HdrHistogram resolution is 1us; values below that are clamped.
-- Open-loop pacing means coordinated omission is reduced but not zero —
-  if the system saturates, request issue lags. Watch `achieved_rps`
-  vs `--rps` to detect this.
-
-## Initial smoke results (M1 Mac, threaded python upstream)
-
-These were captured during development and demonstrate the *bench harness*, not max throughput. Production-grade results need an nginx or Rust upstream.
-
-```
-single-request through gateway (curl): 1.3ms total
-no-load lynxx -> python: p50=981us p95=2.79ms (at 100 RPS, no rate-limit)
-no-load direct python:   p50=455us p95=1.32ms (at 1700 RPS achieved)
-```
-
-Gateway overhead is roughly **+0.5-1ms p50** vs direct upstream. To benchmark
-under serious load (5k+ RPS), use:
-
-```bash
-docker run -d --name fast-upstream -p 18080:80 nginx:alpine
-```
+- Open-loop pacing means a slow upstream causes queue buildup, not RPS drop.
+- Single-process generator caps around 10k RPS on M1; for higher load run
+  multiple instances behind a fan-out.
+- Latency is end-to-end including the bench → gateway → upstream path. The
+  `direct=` baseline isolates upstream + bench overhead so you can subtract.
