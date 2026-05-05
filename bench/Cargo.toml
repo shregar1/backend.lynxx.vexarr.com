@@ -3,6 +3,8 @@ name = "lynxx-bench"
 version = "0.1.0"
 edition = "2021"
 description = "Standalone load generator and chaos suite for the Lynxx gateway"
+# Proprietary — see LICENSE. Not published to crates.io.
+license = "Proprietary"
 
 [lib]
 name = "lynxx_bench"

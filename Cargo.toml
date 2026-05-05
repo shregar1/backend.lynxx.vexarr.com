@@ -5,6 +5,8 @@ members = [".", "bench"]
 name = "lynx-gateway"
 version = "0.1.0"
 edition = "2021"
+# Proprietary — see LICENSE. Not published to crates.io.
+license = "Proprietary"
 # Pin MSRV so the resolver picks AWS SDK transitive crates that compile
 # on the host toolchain. Without this, cargo selects the newest aws-smithy-*
 # crates which require rustc 1.91+.
