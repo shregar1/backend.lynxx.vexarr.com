@@ -1,4 +1,5 @@
 pub mod acl;
+pub mod anomaly_detector;
 pub mod auth;
 pub mod aws_lambda;
 pub mod basic_auth;

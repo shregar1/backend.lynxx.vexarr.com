@@ -1,6 +1,7 @@
 use crate::db::Repository;
 use crate::error::GatewayError;
 use crate::plugins::acl::AclPlugin;
+use crate::plugins::anomaly_detector::AnomalyDetectorPlugin;
 use crate::plugins::auth::AuthPlugin;
 use crate::plugins::aws_lambda::AwsLambdaPlugin;
 use crate::plugins::basic_auth::BasicAuthPlugin;
@@ -103,6 +104,7 @@ pub fn build(
         "wasm" => Arc::new(WasmPlugin::from_config(config)?),
         "openapi-drift" => Arc::new(OpenApiDriftPlugin::from_config(config)?),
         "openapi-mock" => Arc::new(OpenApiMockPlugin::from_config(config)?),
+        "anomaly-detector" => Arc::new(AnomalyDetectorPlugin::from_config(config)?),
         other => {
             return Err(GatewayError::BadRequest(format!("unknown plugin: {other}")));
         }
