@@ -38,6 +38,7 @@ pub mod shadow;
 pub mod splunk;
 pub mod statsd;
 pub mod syslog;
+pub mod wasm;
 pub mod websocket_size_limit;
 
 use crate::db::Repository;

@@ -39,6 +39,7 @@ use crate::plugins::shadow::ShadowPlugin;
 use crate::plugins::splunk::SplunkPlugin;
 use crate::plugins::statsd::StatsdPlugin;
 use crate::plugins::syslog::SyslogPlugin;
+use crate::plugins::wasm::WasmPlugin;
 use crate::plugins::websocket_size_limit::WebsocketSizeLimitPlugin;
 use crate::plugins::Plugin;
 use std::sync::Arc;
@@ -93,6 +94,7 @@ pub fn build(
         "shadow" => Arc::new(ShadowPlugin::from_config(config)?),
         "websocket-size-limit" => Arc::new(WebsocketSizeLimitPlugin::from_config(config)?),
         "llm-gateway" => Arc::new(LlmGatewayPlugin::from_config(config)?),
+        "wasm" => Arc::new(WasmPlugin::from_config(config)?),
         other => {
             return Err(GatewayError::BadRequest(format!("unknown plugin: {other}")));
         }
