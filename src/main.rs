@@ -13,17 +13,79 @@ mod proxy;
 mod reload;
 
 use crate::cluster::ChangeEvent;
-use crate::config::{apply_env_overrides, load_config};
+use crate::config::{load_config, GatewayConfig};
 use crate::db::Repository;
 use crate::health::{HealthConfig, HealthRegistry};
 use crate::plugins::PluginExecutor;
 use crate::proxy::handler::{proxy_handler, ProxyState};
 use crate::proxy::loadbalancer::{LbStrategy, LoadBalancerRegistry};
 use crate::proxy::router::{RouteTable, SharedRouteTable};
+use clap::Parser;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+
+/// Command-line arguments for the Lynxx gateway.
+///
+/// Precedence (highest first): clap arg > env var (via clap `env` attr) >
+/// TOML file > built-in default.
+#[derive(Parser, Debug)]
+#[command(version, about = "Lynxx API gateway")]
+struct Args {
+    /// Path to config.toml
+    #[arg(long, env = "LYNXX_CONFIG", default_value = "config.toml")]
+    config: PathBuf,
+
+    /// Override [gateway].proxy_port
+    #[arg(long, env = "LYNXX_PROXY_PORT")]
+    proxy_port: Option<u16>,
+
+    /// Override [gateway].admin_port
+    #[arg(long, env = "LYNXX_ADMIN_PORT")]
+    admin_port: Option<u16>,
+
+    /// Override [gateway].database_url
+    #[arg(long, env = "DATABASE_URL")]
+    database_url: Option<String>,
+
+    /// Disable seed_from_config on first boot
+    #[arg(long)]
+    no_seed: bool,
+
+    /// Override [gateway].health_check_interval_ms
+    #[arg(long, env = "LYNXX_HEALTH_INTERVAL_MS")]
+    health_check_interval_ms: Option<u64>,
+}
+
+/// Apply CLI overrides on top of the loaded TOML config. Each `Some` value
+/// wins over whatever the file specified; absent flags leave the config
+/// untouched. Boolean flags are applied unconditionally when set to true.
+fn apply_cli_overrides(config: &mut GatewayConfig, args: &Args) {
+    if let Some(port) = args.proxy_port {
+        tracing::info!(port, "--proxy-port override applied");
+        config.gateway.proxy_port = port;
+    }
+    if let Some(port) = args.admin_port {
+        tracing::info!(port, "--admin-port override applied");
+        config.gateway.admin_port = port;
+    }
+    if let Some(url) = &args.database_url {
+        if !url.is_empty() {
+            tracing::info!("--database-url override applied");
+            config.gateway.database_url = url.clone();
+        }
+    }
+    if let Some(ms) = args.health_check_interval_ms {
+        tracing::info!(ms, "--health-check-interval-ms override applied");
+        config.gateway.health_check_interval_ms = ms;
+    }
+    if args.no_seed {
+        tracing::info!("--no-seed: disabling seed_from_config");
+        config.gateway.seed_from_config = false;
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -37,9 +99,10 @@ async fn main() -> anyhow::Result<()> {
     let metrics_handle = metrics::install();
     metrics::describe();
 
-    let config_path = std::env::var("LYNXX_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
+    let args = Args::parse();
+    let config_path: String = args.config.to_string_lossy().into_owned();
     let mut config = load_config(&config_path)?;
-    apply_env_overrides(&mut config);
+    apply_cli_overrides(&mut config, &args);
 
     tracing::info!(
         proxy_port = config.gateway.proxy_port,

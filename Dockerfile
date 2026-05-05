@@ -7,7 +7,7 @@
 #   docker build --target gateway -t lynxx-gateway .
 #   docker build --target ingress -t lynxx-ingress .
 
-FROM rust:1.83-slim-bookworm AS builder
+FROM rust:1-slim-bookworm AS builder
 WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libssl-dev ca-certificates \
@@ -16,15 +16,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ---- Cargo dependency cache layer -------------------------------------------
 # Copy only the manifests first and build a stub binary so the dependency
 # graph compiles into a layer that survives source edits.
-COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p src \
-    && echo "fn main(){}" > src/main.rs \
-    && cargo build --release --bin lynx-gateway || true
-
 # ---- Real build -------------------------------------------------------------
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY bench ./bench
 COPY migrations ./migrations
-RUN cargo build --release --bin lynx-gateway --bin lynxx-ingress
+COPY tests ./tests
+RUN cargo build --release --bin lynx-gateway --bin lynxx-ingress --bin lynxx
 
 # ---- Shared runtime base ----------------------------------------------------
 FROM debian:bookworm-slim AS runtime-base
@@ -47,3 +45,9 @@ FROM runtime-base AS ingress
 COPY --from=builder /build/target/release/lynxx-ingress /usr/local/bin/
 USER lynxx
 ENTRYPOINT ["/usr/local/bin/lynxx-ingress"]
+
+# ---- CLI image --------------------------------------------------------------
+FROM runtime-base AS cli
+COPY --from=builder /build/target/release/lynxx /usr/local/bin/
+USER lynxx
+ENTRYPOINT ["/usr/local/bin/lynxx"]
