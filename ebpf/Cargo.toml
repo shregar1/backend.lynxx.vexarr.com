@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = ["lynxx-ebpf-userspace", "lynxx-ebpf-program"]
+
+# These two crates need different toolchains and targets:
+#   - lynxx-ebpf-program is no_std and targets bpfel-unknown-none on nightly,
+#     with bpf-linker as the linker. It will not build on the host target.
+#   - lynxx-ebpf-userspace is a normal tokio binary that builds on stable
+#     for the host target (Linux for runtime; macOS for `cargo check` only).
+#
+# We deliberately do NOT compile both via a top-level `cargo build`. The
+# README documents the per-crate invocations. This `[workspace]` block is
+# present so that the two crates share a `Cargo.lock` and `target/` dir,
+# not so that they're built together.
+#
+# This workspace is also intentionally NOT a member of the main
+# backend.lynxx.dev workspace at ../Cargo.toml. The eBPF program crate
+# pulls aya-ebpf, which requires nightly + bpfel-unknown-none and would
+# break `cargo check --workspace` on the gateway tree.
+
+# Profiles applied when building the BPF program crate. The verifier
+# rejects programs that contain panics, unwinding, or bloated codegen,
+# so we force panic=abort + LTO + a single codegen unit. These live at
+# the workspace root because cargo only honours [profile.*] there.
+[profile.dev]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = "fat"
+panic = "abort"
+codegen-units = 1
+rpath = false
+
+[profile.release]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = "fat"
+panic = "abort"
+codegen-units = 1
+rpath = false

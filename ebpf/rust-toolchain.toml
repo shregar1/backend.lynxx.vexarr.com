@@ -1,0 +1,17 @@
+[toolchain]
+# Pinned nightly required by the eBPF program crate (aya-ebpf relies on
+# unstable features and the bpfel-unknown-none target). The userspace
+# crate compiles on stable too, but pinning here gives a single,
+# reproducible toolchain for the whole sidecar tree.
+#
+# NOTE: `targets = ["bpfel-unknown-none"]` is intentionally NOT set
+# here, because that target's `rust-std` component is not published
+# for some hosts (notably aarch64-apple-darwin) and rustup will refuse
+# to install the toolchain. Operators on Linux should run:
+#
+#     rustup target add bpfel-unknown-none --toolchain nightly-2024-12-15
+#
+# before building lynxx-ebpf-program. We rely on `-Z build-std=core` at
+# build time so a precompiled std isn't actually required.
+channel = "nightly-2025-09-01"
+components = ["rust-src", "rustfmt", "clippy"]

@@ -1,0 +1,32 @@
+[package]
+name = "lynxx-ebpf-program"
+version = "0.1.0"
+edition = "2021"
+license = "Proprietary"
+description = "Kernel-side eBPF programs for the lynxx-ebpf observability sidecar"
+publish = false
+
+# This crate is `no_std` and targets `bpfel-unknown-none`. It will NOT
+# build on the host (macOS/Linux x86_64). Build with:
+#
+#     cargo +nightly-2024-12-15 build --release \
+#         --package lynxx-ebpf-program \
+#         --target=bpfel-unknown-none \
+#         -Z build-std=core
+#
+# The resulting `.o` (ELF) is consumed at build time by
+# lynxx-ebpf-userspace's `build.rs` and embedded into the userspace
+# binary via aya's `include_bytes_aligned!`.
+
+[dependencies]
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+
+[[bin]]
+name = "lynxx-ebpf-program"
+path = "src/main.rs"
+
+# NOTE: build profiles for the BPF program (panic=abort, lto=fat,
+# codegen-units=1, no debug-assertions) live in the parent workspace
+# `ebpf/Cargo.toml` because cargo only honours profiles at the workspace
+# root.

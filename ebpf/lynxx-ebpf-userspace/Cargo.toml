@@ -1,0 +1,53 @@
+[package]
+name = "lynxx-ebpf"
+version = "0.1.0"
+edition = "2021"
+license = "Proprietary"
+description = "Userspace loader for the lynxx eBPF observability sidecar"
+publish = false
+
+# Binary name matches the package name so operators can run
+# `sudo ./target/release/lynxx-ebpf`.
+[[bin]]
+name = "lynxx-ebpf"
+path = "src/main.rs"
+
+[dependencies]
+# CLI + async runtime
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+
+# Metrics — Prometheus exposition.
+metrics = "0.23"
+metrics-exporter-prometheus = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Address formatting for retransmit metric labels.
+# (We intentionally avoid pulling `ipnet` here; the std `Ipv4Addr` is plenty.)
+
+# aya (userspace BPF loader) is Linux-only at the type level — it uses
+# kernel-private libc constants (SYS_bpf, CLOCK_BOOTTIME, netlink) that
+# don't exist on macOS or BSDs. Gating it to Linux keeps `cargo check`
+# usable on a macOS dev box for type-checking the platform-neutral
+# parts of this crate (CLI, metrics wiring, signal handling).
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = "0.13"
+aya-log = "0.2"
+
+[build-dependencies]
+# `which` lets the build script detect whether `bpf-linker` is on PATH
+# and emit a clear error pointing operators at the install command.
+which = "6"
+
+[features]
+default = []
+# When building with `--features embed-bpf-object`, the build script
+# will compile lynxx-ebpf-program and embed the resulting ELF. Without
+# this feature, the build still works (handy for `cargo check` on
+# macOS) and the loader will refuse to start at runtime with a clear
+# error message.
+embed-bpf-object = []
