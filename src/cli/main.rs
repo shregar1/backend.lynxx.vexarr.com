@@ -84,6 +84,9 @@ enum Cmd {
     /// Manage plugins
     #[command(subcommand)]
     Plugins(PluginsCmd),
+    /// Install / list / remove WASM plugins from a `.wasm` file
+    #[command(subcommand)]
+    Wasm(WasmCmd),
     /// Manage consumers
     #[command(subcommand)]
     Consumers(ConsumersCmd),
@@ -227,6 +230,43 @@ enum PluginsCmd {
         config: String,
     },
     Delete { id: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum WasmCmd {
+    /// Install a `.wasm` plugin module
+    Install {
+        /// Path to the `.wasm` file
+        path: PathBuf,
+        /// Plugin instance name (default: file stem)
+        #[arg(long)]
+        name: Option<String>,
+        /// JSON config blob forwarded to the guest via `lynxx_get_config`
+        #[arg(long)]
+        config: Option<String>,
+        /// Scope to a service by name
+        #[arg(long)]
+        service: Option<String>,
+        /// Scope to a route by id
+        #[arg(long)]
+        route: Option<String>,
+        /// wasmtime fuel budget per request
+        #[arg(long, default_value_t = 10_000_000)]
+        fuel: u64,
+        /// Linear memory cap in kilobytes
+        #[arg(long = "memory-kb", default_value_t = 16_384)]
+        memory_kb: u32,
+        /// Wall-clock budget per request, milliseconds
+        #[arg(long = "wall-ms", default_value_t = 50)]
+        wall_ms: u64,
+    },
+    /// List installed plugins whose backing impl is `wasm`
+    List,
+    /// Remove a wasm plugin instance by id (alias of `plugins delete`)
+    Remove {
+        /// Plugin instance id
+        id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1011,6 +1051,139 @@ async fn cmd_plugins_delete(client: &Client, id: &str) -> Result<()> {
     client.delete(&format!("/plugins/{uuid}")).await?;
     println!("{} deleted plugin {}", green("✓"), fmt_id(&uuid));
     Ok(())
+}
+
+// ── lynxx wasm ────────────────────────────────────────────────────────────
+//
+// Convenience wrapper over the existing `/plugins` endpoints for the
+// "I have a .wasm and I want it on the gateway" flow. Reads the file,
+// base64-encodes, packs the runtime knobs (fuel / memory / wall-time)
+// and the optional user config into the `wasm` plugin's config schema,
+// and POSTs.
+
+const WASM_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+async fn cmd_wasm_install(
+    client: &Client,
+    path: PathBuf,
+    name: Option<String>,
+    config: Option<String>,
+    service: Option<String>,
+    route: Option<String>,
+    fuel: u64,
+    memory_kb: u32,
+    wall_ms: u64,
+    fmt: OutputFormat,
+) -> Result<()> {
+    use base64::Engine as _;
+
+    let meta = fs::metadata(&path)
+        .with_context(|| format!("read {}", path.display()))?;
+    if meta.len() > WASM_MAX_BYTES {
+        bail!(
+            "wasm module is {} bytes; gateway hard-limit is {} (5MB)",
+            meta.len(),
+            WASM_MAX_BYTES
+        );
+    }
+    let bytes = fs::read(&path)
+        .with_context(|| format!("read {}", path.display()))?;
+    if !bytes.starts_with(b"\0asm") {
+        bail!("{} is not a WebAssembly module (missing \\0asm magic)", path.display());
+    }
+
+    let display_name = name.unwrap_or_else(|| {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("wasm-plugin")
+            .to_string()
+    });
+
+    let user_config: Option<Json> = match config {
+        Some(s) => Some(
+            serde_json::from_str(&s).context("--config must be valid JSON")?,
+        ),
+        None => None,
+    };
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let mut wasm_config = serde_json::json!({
+        "module_b64": b64,
+        "fuel_per_request": fuel,
+        "memory_max_kb": memory_kb,
+        "wall_timeout_ms": wall_ms,
+    });
+    if let Some(uc) = user_config {
+        wasm_config["user_config"] = uc;
+    }
+
+    let service_id = if let Some(s) = service {
+        Some(resolve_service(client, &s).await?.id)
+    } else {
+        None
+    };
+    let route_id = match route {
+        Some(r) => Some(Uuid::parse_str(&r).context("--route must be a UUID")?),
+        None => None,
+    };
+
+    let body = serde_json::json!({
+        "name": "wasm",
+        "service_id": service_id,
+        "route_id": route_id,
+        "enabled": true,
+        "config": wasm_config,
+    });
+    let plugin: PluginInstance = client.post("/plugins", &body).await?;
+    if fmt == OutputFormat::Table {
+        println!(
+            "{} installed wasm plugin {} ({}, {} bytes from {})",
+            green("✓"),
+            display_name,
+            fmt_id(&plugin.id),
+            bytes.len(),
+            path.display(),
+        );
+    } else {
+        emit(&plugin, fmt)?;
+    }
+    Ok(())
+}
+
+async fn cmd_wasm_list(client: &Client, fmt: OutputFormat) -> Result<()> {
+    let plugins: Vec<PluginInstance> = client.get("/plugins").await?;
+    let wasm_only: Vec<PluginInstance> =
+        plugins.into_iter().filter(|p| p.name == "wasm").collect();
+    if fmt != OutputFormat::Table {
+        return emit(&wasm_only, fmt);
+    }
+    let services: Vec<Service> = client.get("/services").await.unwrap_or_default();
+    let by_id: HashMap<Uuid, String> =
+        services.iter().map(|s| (s.id, s.name.clone())).collect();
+    let rows: Vec<Vec<String>> = wasm_only
+        .iter()
+        .map(|p| {
+            let scope = match (p.service_id, p.route_id) {
+                (Some(s), _) => format!(
+                    "service:{}",
+                    by_id.get(&s).cloned().unwrap_or_else(|| fmt_id(&s))
+                ),
+                (_, Some(r)) => format!("route:{}", fmt_id(&r)),
+                _ => "global".into(),
+            };
+            vec![
+                fmt_id(&p.id),
+                scope,
+                if p.enabled { "yes".into() } else { "no".into() },
+            ]
+        })
+        .collect();
+    print_table(&["ID", "SCOPE", "ENABLED"], &rows);
+    Ok(())
+}
+
+async fn cmd_wasm_remove(client: &Client, id: &str) -> Result<()> {
+    cmd_plugins_delete(client, id).await
 }
 
 async fn cmd_consumers_list(client: &Client, fmt: OutputFormat) -> Result<()> {
@@ -2184,6 +2357,12 @@ async fn main() -> ExitCode {
             PluginsCmd::Install { name, service, route, config } =>
                 cmd_plugins_install(&client, name, service, route, config, output).await,
             PluginsCmd::Delete { id } => cmd_plugins_delete(&client, &id).await,
+        },
+        Cmd::Wasm(w) => match w {
+            WasmCmd::Install { path, name, config, service, route, fuel, memory_kb, wall_ms } =>
+                cmd_wasm_install(&client, path, name, config, service, route, fuel, memory_kb, wall_ms, output).await,
+            WasmCmd::List => cmd_wasm_list(&client, output).await,
+            WasmCmd::Remove { id } => cmd_wasm_remove(&client, &id).await,
         },
         Cmd::Consumers(c) => match c {
             ConsumersCmd::List => cmd_consumers_list(&client, output).await,

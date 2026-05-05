@@ -350,6 +350,36 @@ mod tests {
         assert!(s.contains("fuel") || s.contains("wall"), "got: {s}");
     }
 
+    /// End-to-end test against a real Rust-compiled WASM module from
+    /// `packages.lynxx.dev/wasm/examples/header-injector`. Catches drift
+    /// between the host ABI here and the SDK wrappers there: if either
+    /// side rotates a function signature, this test breaks.
+    ///
+    /// The fixture is a precompiled `.wasm` checked in alongside the
+    /// example source so this test doesn't need cargo + wasm32 in CI.
+    /// Rebuild via `cargo build --release --target wasm32-unknown-unknown`
+    /// in the example dir if you change the source.
+    #[tokio::test]
+    async fn precompiled_rust_plugin_injects_headers() {
+        const HEADER_INJECTOR_WASM: &[u8] =
+            include_bytes!("../../../tests/fixtures/header-injector.wasm");
+        let b64 = Base64Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            HEADER_INJECTOR_WASM,
+        );
+        let plugin =
+            WasmPlugin::from_config(&json!({ "module_b64": b64 })).expect("plugin builds");
+        let mut req = Request::builder().uri("/x").body(Body::empty()).unwrap();
+        plugin.on_request(&mut req).await.unwrap();
+        assert_eq!(
+            req.headers()
+                .get("X-Lynxx-Hello")
+                .and_then(|v| v.to_str().ok()),
+            Some("world"),
+            "header-injector should stamp X-Lynxx-Hello on the request",
+        );
+    }
+
     #[test]
     fn rejects_module_missing_required_exports() {
         let bytes = wat::parse_str(r#"(module (func (export "noop")))"#).unwrap();
