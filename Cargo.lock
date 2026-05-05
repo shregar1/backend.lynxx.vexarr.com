@@ -2646,10 +2646,19 @@ name = "lynxx-bench"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
+ "futures-util",
  "hdrhistogram",
+ "rand 0.8.6",
  "reqwest",
+ "serde",
+ "serde_json",
  "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

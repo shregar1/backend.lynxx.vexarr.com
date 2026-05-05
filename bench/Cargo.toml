@@ -2,15 +2,36 @@
 name = "lynxx-bench"
 version = "0.1.0"
 edition = "2021"
-description = "Standalone load generator for the Lynxx gateway"
+description = "Standalone load generator and chaos suite for the Lynxx gateway"
+
+[lib]
+name = "lynxx_bench"
+path = "src/lib.rs"
 
 [[bin]]
 name = "lynxx-bench"
 path = "src/main.rs"
 
+[[bin]]
+name = "lynxx-chaos"
+path = "src/bin/lynxx-chaos.rs"
+
+[[bin]]
+name = "lynxx-mock-upstream"
+path = "src/bin/lynxx-mock-upstream.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 hdrhistogram = "7"
 anyhow = "1"
+axum = { version = "0.7", features = ["macros", "ws"] }
+tokio-tungstenite = "0.24"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+futures-util = "0.3"

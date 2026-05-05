@@ -78,3 +78,102 @@ lynxx routes create --service local-bench --paths /bench --strip-path
   multiple instances behind a fan-out.
 - Latency is end-to-end including the bench → gateway → upstream path. The
   `direct=` baseline isolates upstream + bench overhead so you can subtract.
+
+## Chaos / Soak Tests
+
+`lynxx-bench` is the steady-state benchmark — the chaos suite is the
+"will it survive a bad day" suite. Two extra binaries ship with the same
+crate:
+
+- `lynxx-mock-upstream` — a controllable HTTP server. Substitutes for nginx
+  when a scenario needs to inject latency, status codes, or echo the request
+  back as JSON.
+- `lynxx-chaos` — the orchestrator. Each subcommand is one scenario; `all`
+  runs every scenario sequentially with shorter defaults.
+
+```bash
+cargo build --release -p lynxx-bench
+# in one terminal:
+./target/release/lynxx-mock-upstream --port 19090 --status-distribution 80,15,5
+
+# in another terminal (gateway must already be running):
+./target/release/lynxx-chaos --proxy http://127.0.0.1:9000 \
+    --admin http://127.0.0.1:9001 --admin-token "$LYNXX_ADMIN_TOKEN" \
+    --mock-upstream http://127.0.0.1:19090 \
+    all
+```
+
+### Mock upstream flags
+
+```
+--port <n>                       listen on 127.0.0.1:<n> (default 19090)
+--status-distribution 2xx,4xx,5xx  e.g. 80,15,5; 4xx picks 400/401/404,
+                                 5xx picks 500/502/503
+--latency 1ms,5ms,20ms           round-robin (or 50/40/10 weighted with 3 vals)
+--echo                           reflect method/path/headers/body as JSON
+```
+
+### The 10 scenarios
+
+| Subcommand     | What it proves                                                   |
+|----------------|------------------------------------------------------------------|
+| `mixed-bodies` | 70/20/9/1 GET / 1KB / 100KB / 5MB body mix at 1k RPS for 5 min   |
+| `slowloris`    | 100 byte-per-300ms slow clients don't starve fast traffic        |
+| `methods`      | Mixed methods + status distribution match upstream within ±2pp   |
+| `burst`        | 200→2000→200 RPS spike: steady p99<5ms, burst p99<50ms, recover  |
+| `churn`        | Service create/use/delete every 5s under 500 RPS background      |
+| `plugin-chain` | jwt + rate-limit + cors + logging + request-transformer combined |
+| `ws-flood`     | 500 WS connections at 100 msg/sec each, no drops                 |
+| `memory`       | 10-min @ 1k RPS RSS growth < 50 MB                               |
+| `pg-restart`   | Cached config keeps serving while Postgres restarts mid-traffic  |
+| `malformed`    | 1000 raw hostile probes; gateway responds 4xx/closes; no leak    |
+
+### Running individual scenarios
+
+```bash
+lynxx-chaos mixed-bodies --rps 1000 --duration-secs 300
+lynxx-chaos slowloris
+lynxx-chaos methods --rps 500 --duration-secs 180
+lynxx-chaos burst                              # owns its own 70s timeline
+lynxx-chaos churn --duration-secs 120
+lynxx-chaos plugin-chain --rps 1000 --duration-secs 60
+lynxx-chaos ws-flood --duration-secs 60
+lynxx-chaos memory --rps 1000 --duration-secs 600
+lynxx-chaos pg-restart --pg-container lynx-postgres
+lynxx-chaos malformed
+lynxx-chaos all                                # short-default all 10 in <15min
+```
+
+Global flags (`--proxy`, `--admin`, `--admin-token`, `--mock-upstream`,
+`--pg-container`, `--duration-secs`, `--rps`, `--quiet`) work on every
+subcommand and on `all`.
+
+### Output format
+
+Each scenario reports a one-line verdict. `all` aggregates them:
+
+```
+==== chaos suite summary ====
+✓ mixed-bodies   180,000 reqs · 0 errs · p99=12.3ms
+✓ slowloris      100/100 fast ok · p50=2.1ms during slow
+✓ burst          steady p99=4.2ms · burst p99=38.1ms · recovery p99=4.7ms
+✗ memory         180,000 reqs · RSS 142.0 -> 209.0 MB (+67.0 MB)
+    budget 50 MB; observed +67.0 MB over 600s
+9/10 scenarios passed
+```
+
+Exit code is non-zero if any scenario failed, so the suite plugs straight
+into CI.
+
+### Notes
+
+- `memory` and `malformed` sample the gateway's RSS via
+  `pgrep -f lynx-gateway` + `ps -o rss=`. They will fail (cleanly) if no
+  matching process is found.
+- `pg-restart` requires `--pg-container <name>` and a working `docker` CLI
+  in PATH. Without it the scenario reports "skipped" and `all` carries on.
+- `ws-flood` runs its own embedded WS echo server on an ephemeral port, so
+  no separate WS upstream is needed.
+- Scenarios clean up the services/routes/plugins they create. If a run is
+  killed mid-flight, leftovers are named `chaos-*` and easy to spot in the
+  admin API.
