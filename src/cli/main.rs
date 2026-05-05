@@ -191,6 +191,9 @@ enum Cmd {
         #[arg(long, default_value_t = 4096)]
         max_body: usize,
     },
+    /// Browse + replay captured request/response pairs (Time-Travel Debug)
+    #[command(subcommand)]
+    Record(RecordCmd),
     /// Manage local CLI config (~/.config/lynxx/config.toml)
     #[command(subcommand)]
     Config(ConfigCmd),
@@ -332,6 +335,40 @@ enum TargetsCmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum RecordCmd {
+    /// List recent recordings (most recent first)
+    List {
+        /// Filter to recordings newer than this. Accepts relative
+        /// (`30m`, `2h`, `1d`, `7d`) or absolute RFC 3339 timestamps.
+        #[arg(long)]
+        since: Option<String>,
+        /// Filter by HTTP method (case-insensitive)
+        #[arg(long)]
+        method: Option<String>,
+        /// Filter by request path prefix
+        #[arg(long = "path-prefix")]
+        path_prefix: Option<String>,
+        /// Filter by response status code
+        #[arg(long)]
+        status: Option<u16>,
+        /// Cap on returned rows (defaults to 100; max 1000)
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Show the full recording payload (request + response, headers, body)
+    Show { id: String },
+    /// Replay a recording and diff the response
+    Replay {
+        id: String,
+        /// Replay against this URL. Defaults to the gateway proxy port.
+        #[arg(long)]
+        against: Option<String>,
+    },
+    /// Delete a recording (both the on-disk file and the index row)
+    Delete { id: String },
+}
+
+#[derive(Subcommand, Debug)]
 enum ConfigCmd {
     /// Set a config key (e.g. `lynxx config set admin http://host:9001`)
     Set { key: String, value: String },
@@ -404,6 +441,96 @@ struct Target {
     enabled: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+// ── recording wire types ─────────────────────────────────────────────────
+//
+// Mirrors of `crate::recording::*` shapes — kept here so the CLI binary
+// doesn't drag in the gateway crate.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RecordingIndexRow {
+    id: String,
+    ts: DateTime<Utc>,
+    method: String,
+    path: String,
+    status: u16,
+    duration_ms: u64,
+    #[serde(default)]
+    service_id: Option<Uuid>,
+    #[serde(default)]
+    route_id: Option<Uuid>,
+    #[serde(default)]
+    consumer: Option<String>,
+    bytes_request: u64,
+    bytes_response: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RecordedRequest {
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    body_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RecordedResponse {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body_b64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Recording {
+    id: String,
+    ts: DateTime<Utc>,
+    #[serde(default)]
+    service_id: Option<Uuid>,
+    #[serde(default)]
+    route_id: Option<Uuid>,
+    #[serde(default)]
+    consumer: Option<String>,
+    request: RecordedRequest,
+    response: RecordedResponse,
+    upstream_url: String,
+    duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReplayResult {
+    original: Recording,
+    new_response: RecordedResponse,
+    diff: ResponseDiff,
+    elapsed_ms: u64,
+    target_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ResponseDiff {
+    #[serde(default)]
+    status_changed: Option<(u16, u16)>,
+    #[serde(default)]
+    headers_added: Vec<(String, String)>,
+    #[serde(default)]
+    headers_removed: Vec<(String, String)>,
+    #[serde(default)]
+    headers_changed: Vec<(String, String, String)>,
+    #[serde(default)]
+    body_diff: BodyDiff,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum BodyDiff {
+    Identical,
+    BinaryDiff { before_bytes: usize, after_bytes: usize },
+    JsonDiff { added: Json, removed: Json, changed: Json },
+    TextDiff { lines_changed: u32 },
+}
+
+impl Default for BodyDiff {
+    fn default() -> Self { BodyDiff::Identical }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1217,6 +1344,319 @@ async fn cmd_wasm_list(client: &Client, fmt: OutputFormat) -> Result<()> {
 
 async fn cmd_wasm_remove(client: &Client, id: &str) -> Result<()> {
     cmd_plugins_delete(client, id).await
+}
+
+// ── lynxx record ──────────────────────────────────────────────────────────
+//
+// Browse/replay/delete request recordings via the admin API. The diff
+// rendering for `replay` mirrors the BodyDiff variants returned by the
+// gateway: Identical → tick, JsonDiff → +/-/~ tree, TextDiff → line count,
+// BinaryDiff → byte-size pair.
+
+/// Parse a `--since` value: relative shorthand (`30m`, `2h`, `1d`, `7d`)
+/// or absolute RFC 3339. Empty → None.
+fn parse_since(raw: &str) -> Result<DateTime<Utc>> {
+    let s = raw.trim();
+    if s.is_empty() {
+        bail!("--since: empty string");
+    }
+    // Try RFC 3339 first.
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+    // Relative: integer + unit.
+    let (num_part, unit_part) = s.split_at(
+        s.find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(s.len()),
+    );
+    let n: i64 = num_part
+        .parse()
+        .with_context(|| format!("--since: not a number: '{num_part}'"))?;
+    let dur = match unit_part {
+        "s" | "sec" | "secs" => chrono::Duration::seconds(n),
+        "m" | "min" | "mins" => chrono::Duration::minutes(n),
+        "h" | "hr" | "hrs" => chrono::Duration::hours(n),
+        "d" | "day" | "days" => chrono::Duration::days(n),
+        other => bail!("--since: unknown unit '{other}' (use s/m/h/d or RFC 3339)"),
+    };
+    Ok(Utc::now() - dur)
+}
+
+fn humanize_relative(dt: DateTime<Utc>) -> String {
+    let delta = Utc::now().signed_duration_since(dt);
+    let secs = delta.num_seconds();
+    if secs < 0 {
+        return "in future".into();
+    }
+    if secs < 60 { format!("{secs}s ago") }
+    else if secs < 3600 { format!("{}m ago", secs / 60) }
+    else if secs < 86_400 { format!("{}h ago", secs / 3600) }
+    else { format!("{}d ago", secs / 86_400) }
+}
+
+fn rec_short_id(id: &str) -> String {
+    if FULL_ID.load(Ordering::Relaxed) {
+        id.to_string()
+    } else {
+        id.chars().take(8).collect()
+    }
+}
+
+async fn cmd_record_list(
+    client: &Client,
+    since: Option<String>,
+    method: Option<String>,
+    path_prefix: Option<String>,
+    status: Option<u16>,
+    limit: Option<usize>,
+    fmt: OutputFormat,
+) -> Result<()> {
+    let mut qs: Vec<String> = Vec::new();
+    if let Some(s) = since.as_deref() {
+        let dt = parse_since(s)?;
+        // Encode as RFC 3339 — what the admin API expects.
+        qs.push(format!("since={}", urlencode(&dt.to_rfc3339())));
+    }
+    if let Some(m) = method.as_deref() {
+        qs.push(format!("method={}", urlencode(m)));
+    }
+    if let Some(p) = path_prefix.as_deref() {
+        qs.push(format!("path_prefix={}", urlencode(p)));
+    }
+    if let Some(s) = status {
+        qs.push(format!("status={s}"));
+    }
+    if let Some(l) = limit {
+        qs.push(format!("limit={l}"));
+    }
+    let path = if qs.is_empty() {
+        "/recordings".to_string()
+    } else {
+        format!("/recordings?{}", qs.join("&"))
+    };
+    let rows: Vec<RecordingIndexRow> = client.get(&path).await?;
+    if fmt != OutputFormat::Table {
+        return emit(&rows, fmt);
+    }
+    let table_rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| {
+            vec![
+                rec_short_id(&r.id),
+                humanize_relative(r.ts),
+                r.method.clone(),
+                r.path.clone(),
+                r.status.to_string(),
+                format!("{}ms", r.duration_ms),
+            ]
+        })
+        .collect();
+    print_table(&["ID", "TS", "METHOD", "PATH", "STATUS", "DURATION"], &table_rows);
+    Ok(())
+}
+
+async fn cmd_record_show(client: &Client, id: &str, fmt: OutputFormat) -> Result<()> {
+    let rec: Recording = client.get(&format!("/recordings/{id}")).await?;
+    if fmt != OutputFormat::Table {
+        return emit(&rec, fmt);
+    }
+
+    println!(
+        "{} {} ({})",
+        bold(&rec.request.method),
+        rec.request.path,
+        dim(&rec.id)
+    );
+    println!(
+        "  {} {} → status {} ({}ms)",
+        dim("upstream"),
+        if rec.upstream_url.is_empty() { "<unknown>" } else { rec.upstream_url.as_str() },
+        rec.response.status,
+        rec.duration_ms
+    );
+    if let Some(c) = rec.consumer.as_deref() {
+        println!("  {} {}", dim("consumer"), c);
+    }
+    if let Some(s) = rec.service_id {
+        println!("  {} {}", dim("service"), s);
+    }
+    if let Some(r) = rec.route_id {
+        println!("  {} {}", dim("route"), r);
+    }
+
+    println!("\n{}", bold("Request headers"));
+    for (k, v) in &rec.request.headers {
+        println!("  {}: {}", dim(k), v);
+    }
+    if !rec.request.body_b64.is_empty() {
+        println!("\n{}", bold("Request body"));
+        print_decoded_body(&rec.request.body_b64);
+    }
+
+    println!("\n{}", bold("Response headers"));
+    for (k, v) in &rec.response.headers {
+        println!("  {}: {}", dim(k), v);
+    }
+    if !rec.response.body_b64.is_empty() {
+        println!("\n{}", bold("Response body"));
+        print_decoded_body(&rec.response.body_b64);
+    }
+    Ok(())
+}
+
+fn print_decoded_body(b64: &str) {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    match STANDARD.decode(b64) {
+        Ok(bytes) => match std::str::from_utf8(&bytes) {
+            Ok(s) => match serde_json::from_str::<Json>(s) {
+                Ok(j) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&j).unwrap_or_else(|_| s.to_string())
+                    );
+                }
+                Err(_) => {
+                    println!("{s}");
+                }
+            },
+            Err(_) => {
+                println!("{}", dim(&format!("(binary, {} bytes)", bytes.len())));
+            }
+        },
+        Err(e) => {
+            println!("{}", dim(&format!("(undecodable: {e})")));
+        }
+    }
+}
+
+async fn cmd_record_replay(
+    client: &Client,
+    id: &str,
+    against: Option<String>,
+    fmt: OutputFormat,
+) -> Result<()> {
+    let body = serde_json::json!({ "target_url": against });
+    let result: ReplayResult = client
+        .post(&format!("/recordings/{id}/replay"), &body)
+        .await?;
+    if fmt != OutputFormat::Table {
+        return emit(&result, fmt);
+    }
+    render_replay_diff(&result);
+    Ok(())
+}
+
+fn render_replay_diff(r: &ReplayResult) {
+    println!(
+        "{} replay {} against {} ({}ms)",
+        bold("→"),
+        rec_short_id(&r.original.id),
+        r.target_url,
+        r.elapsed_ms
+    );
+    match r.diff.status_changed {
+        Some((before, after)) => {
+            let line = format!("status: {before} → {after}");
+            println!("  {}", red(&line));
+        }
+        None => {
+            println!("  {} status: {}", green("✓"), r.new_response.status);
+        }
+    }
+    for (k, v) in &r.diff.headers_added {
+        println!("  {} {}: {}", green("+"), k, truncate_for_diff(v));
+    }
+    for (k, v) in &r.diff.headers_removed {
+        println!("  {} {}: {}", red("-"), k, truncate_for_diff(v));
+    }
+    for (k, before, after) in &r.diff.headers_changed {
+        println!(
+            "  {} {}: {} → {}",
+            yellow("~"),
+            k,
+            truncate_for_diff(before),
+            truncate_for_diff(after)
+        );
+    }
+    match &r.diff.body_diff {
+        BodyDiff::Identical => {
+            println!("  {} body identical", green("✓"));
+        }
+        BodyDiff::JsonDiff { added, removed, changed } => {
+            println!("  {}", bold("body (JSON):"));
+            if let Some(obj) = added.as_object() {
+                for (k, v) in obj {
+                    println!(
+                        "    {} {}: {}",
+                        green("+"),
+                        k,
+                        truncate_for_diff(&v.to_string())
+                    );
+                }
+            }
+            if let Some(obj) = removed.as_object() {
+                for (k, v) in obj {
+                    println!(
+                        "    {} {}: {}",
+                        red("-"),
+                        k,
+                        truncate_for_diff(&v.to_string())
+                    );
+                }
+            }
+            if let Some(obj) = changed.as_object() {
+                for (k, v) in obj {
+                    let before = v.get("before").map(|x| x.to_string()).unwrap_or_default();
+                    let after = v.get("after").map(|x| x.to_string()).unwrap_or_default();
+                    println!(
+                        "    {} {}: {} → {}",
+                        yellow("~"),
+                        k,
+                        truncate_for_diff(&before),
+                        truncate_for_diff(&after)
+                    );
+                }
+            }
+        }
+        BodyDiff::TextDiff { lines_changed } => {
+            println!("  {} body diff: {lines_changed} lines changed", yellow("~"));
+        }
+        BodyDiff::BinaryDiff { before_bytes, after_bytes } => {
+            println!(
+                "  {} binary body: {before_bytes} → {after_bytes} bytes",
+                yellow("~")
+            );
+        }
+    }
+}
+
+fn truncate_for_diff(s: &str) -> String {
+    if s.len() > 80 {
+        format!("{}…", &s[..80])
+    } else {
+        s.to_string()
+    }
+}
+
+async fn cmd_record_delete(client: &Client, id: &str) -> Result<()> {
+    client.delete(&format!("/recordings/{id}")).await?;
+    println!("{} deleted recording {}", green("✓"), rec_short_id(id));
+    Ok(())
+}
+
+/// Tiny URL-encoder for query-string values. Avoids pulling in `url` just
+/// for this; we only need to escape a handful of bytes.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }
 
 async fn cmd_consumers_list(client: &Client, fmt: OutputFormat) -> Result<()> {
@@ -2824,6 +3264,14 @@ async fn main() -> ExitCode {
         Cmd::Tail { interval } => cmd_tail(&client, interval).await,
         Cmd::Exec { path, method, body, headers, proxy, max_body } =>
             cmd_exec(&admin_url, path, method, body, headers, proxy, max_body).await,
+        Cmd::Record(r) => match r {
+            RecordCmd::List { since, method, path_prefix, status, limit } =>
+                cmd_record_list(&client, since, method, path_prefix, status, limit, output).await,
+            RecordCmd::Show { id } => cmd_record_show(&client, &id, output).await,
+            RecordCmd::Replay { id, against } =>
+                cmd_record_replay(&client, &id, against, output).await,
+            RecordCmd::Delete { id } => cmd_record_delete(&client, &id).await,
+        },
         Cmd::Config(c) => cmd_config(c),
         Cmd::Completion { shell } => {
             let mut cmd = Cli::command();

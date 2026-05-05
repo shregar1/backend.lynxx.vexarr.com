@@ -13,6 +13,18 @@ use axum::http::{HeaderName, Request, Response, Uri};
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Context attached to the request after the proxy matches a service+route
+/// but before the plugin chain runs. Plugins (notably `request-recorder`)
+/// pull this out of the request extensions to enrich their own captures
+/// without re-doing the routing work.
+#[derive(Clone, Debug)]
+pub struct MatchContext {
+    pub service_id: uuid::Uuid,
+    pub route_id: uuid::Uuid,
+    pub upstream_url: String,
+    pub consumer_username: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct ProxyState {
     pub route_table: SharedRouteTable,
@@ -140,25 +152,42 @@ pub async fn proxy_handler(
         None => (service.url.clone(), "-".to_string(), None),
     };
 
+    // Compute upstream_url up-front so we can attach it to the MatchContext
+    // before plugins run; the recorder needs it to populate `Recording.upstream_url`.
+    let upstream_path = state.route_table.resolve_upstream_path(&route, &path);
+    let query = req.uri().query().map(|q| q.to_string());
+    let trimmed_base = upstream_base.trim_end_matches('/');
+    let mut upstream_url = String::with_capacity(
+        trimmed_base.len()
+            + upstream_path.len()
+            + query.as_ref().map(|q| q.len() + 1).unwrap_or(0),
+    );
+    upstream_url.push_str(trimmed_base);
+    upstream_url.push_str(&upstream_path);
+    if let Some(q) = &query {
+        upstream_url.push('?');
+        upstream_url.push_str(q);
+    }
+
+    // Stash routing context on the request so plugins (e.g. request-recorder)
+    // can read service_id / route_id / upstream_url without re-matching.
+    let consumer_username = req
+        .headers()
+        .get("x-consumer-username")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    req.extensions_mut().insert(MatchContext {
+        service_id: service.id,
+        route_id: route.id,
+        upstream_url: upstream_url.clone(),
+        consumer_username,
+    });
+
     state
         .plugins
         .run_request(&mut req, Some(service.id), Some(route.id))
         .await
         .map_err(GatewayError::PluginError)?;
-
-    let upstream_path = state.route_table.resolve_upstream_path(&route, &path);
-    let query = req.uri().query();
-    // Avoid format! allocation churn on the hot path: pre-size and push.
-    let trimmed_base = upstream_base.trim_end_matches('/');
-    let mut upstream_url = String::with_capacity(
-        trimmed_base.len() + upstream_path.len() + query.map(|q| q.len() + 1).unwrap_or(0),
-    );
-    upstream_url.push_str(trimmed_base);
-    upstream_url.push_str(&upstream_path);
-    if let Some(q) = query {
-        upstream_url.push('?');
-        upstream_url.push_str(q);
-    }
 
     // Dispatch on protocol. WebSocket and gRPC need streaming flows that the
     // reqwest-based path below cannot provide.

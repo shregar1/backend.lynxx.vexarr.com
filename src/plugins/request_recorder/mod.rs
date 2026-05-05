@@ -54,6 +54,12 @@ struct PendingCapture {
     cfg_min_status: u16,
     cfg_max_status: u16,
     cfg_max_body_bytes: usize,
+    /// Match context fields plumbed in by the proxy handler. `None` if the
+    /// request didn't go through the proxy match path (e.g. unit tests).
+    service_id: Option<uuid::Uuid>,
+    route_id: Option<uuid::Uuid>,
+    upstream_url: String,
+    consumer: Option<String>,
 }
 
 struct RecordingJob {
@@ -101,6 +107,14 @@ impl Plugin for RequestRecorderPlugin {
             return Ok(());
         }
 
+        // Pull match context out of extensions before we rip the request
+        // apart. The proxy inserts this just before the plugin chain runs;
+        // for non-proxy paths (e.g. unit tests) it'll just be absent.
+        let match_ctx = req
+            .extensions()
+            .get::<crate::proxy::handler::MatchContext>()
+            .cloned();
+
         // Drain the request body so we can both record it and rebuild the
         // request for downstream consumers.
         let (parts, body) =
@@ -138,6 +152,24 @@ impl Plugin for RequestRecorderPlugin {
                 Err(_) => truncated.clone(),
             };
 
+        // Prefer the consumer the proxy already resolved (from the
+        // X-Consumer-Username request header at match time); fall back to
+        // whatever the auth plugins wrote on the way through.
+        let consumer_from_header = parts
+            .headers
+            .get("x-consumer-username")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let (mc_service, mc_route, mc_upstream, mc_consumer) = match match_ctx {
+            Some(c) => (
+                Some(c.service_id),
+                Some(c.route_id),
+                c.upstream_url,
+                c.consumer_username.or(consumer_from_header),
+            ),
+            None => (None, None, String::new(), consumer_from_header),
+        };
+
         let pending_capture = PendingCapture {
             method: parts.method.as_str().to_string(),
             path: parts.uri.path().to_string(),
@@ -148,6 +180,10 @@ impl Plugin for RequestRecorderPlugin {
             cfg_min_status: self.cfg.min_status_to_record,
             cfg_max_status: self.cfg.max_status_to_record,
             cfg_max_body_bytes: self.cfg.max_body_bytes,
+            service_id: mc_service,
+            route_id: mc_route,
+            upstream_url: mc_upstream,
+            consumer: mc_consumer,
         };
 
         // Mint an id, stash the capture, and thread the id forward via a
@@ -225,9 +261,9 @@ impl Plugin for RequestRecorderPlugin {
         let mut recording = Recording {
             id: String::new(),
             ts: pending_capture.started_utc,
-            service_id: None,
-            route_id: None,
-            consumer: None,
+            service_id: pending_capture.service_id,
+            route_id: pending_capture.route_id,
+            consumer: pending_capture.consumer.clone(),
             request: RecordedRequest {
                 method: pending_capture.method.clone(),
                 path: pending_capture.path.clone(),
@@ -239,7 +275,7 @@ impl Plugin for RequestRecorderPlugin {
                 headers: resp_headers,
                 body_b64: STANDARD.encode(&truncated),
             },
-            upstream_url: String::new(),
+            upstream_url: pending_capture.upstream_url.clone(),
             duration_ms,
         };
         let id = recording.compute_id();
@@ -252,9 +288,9 @@ impl Plugin for RequestRecorderPlugin {
             path: pending_capture.path,
             status,
             duration_ms,
-            service_id: None,
-            route_id: None,
-            consumer: None,
+            service_id: pending_capture.service_id,
+            route_id: pending_capture.route_id,
+            consumer: pending_capture.consumer,
             bytes_request: pending_capture.body.len() as u64,
             bytes_response: truncated.len() as u64,
         };

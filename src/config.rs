@@ -54,6 +54,13 @@ pub struct GatewaySettings {
     /// soon as any token exists.
     #[serde(default)]
     pub auth_required: bool,
+
+    /// Filesystem root for the request-recorder content-addressed store
+    /// and the place the admin recording API loads recordings from. When
+    /// `None`, the runtime resolves to `~/.lynxx/recordings` (or
+    /// `/var/lib/lynxx/recordings` if no home dir is available).
+    #[serde(default)]
+    pub recordings_directory: Option<String>,
 }
 
 /// Inbound TLS termination knobs. When `enabled = false` (the default)
@@ -158,6 +165,7 @@ fn default_gateway() -> GatewaySettings {
         prewarm_interval_secs: default_prewarm_interval(),
         prewarm_concurrency: default_prewarm_concurrency(),
         auth_required: false,
+        recordings_directory: None,
     }
 }
 

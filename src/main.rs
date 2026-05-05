@@ -289,6 +289,28 @@ async fn async_main() -> anyhow::Result<()> {
     );
     reload::install_sighup_handler(reload_handle.clone());
 
+    // Recording store + replay HTTP client. Both are owned by AdminState
+    // for the recording API; the request-recorder plugin builds its own
+    // store independently from its plugin config so the two don't share
+    // a singleton.
+    let recording_dir = config
+        .gateway
+        .recordings_directory
+        .clone()
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .map(|h| h.join(".lynxx").join("recordings"))
+                .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/lynxx/recordings"))
+                .to_string_lossy()
+                .into_owned()
+        });
+    let recording_store =
+        Arc::new(crate::recording::ContentAddressedStore::new(recording_dir));
+    let admin_http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("reqwest client builds");
+
     let admin_app = admin::admin_router(
         route_table,
         repo,
@@ -301,6 +323,9 @@ async fn async_main() -> anyhow::Result<()> {
         node_id,
         config.gateway.auth_required,
         client_pool.clone(),
+        recording_store,
+        admin_http_client,
+        config.gateway.proxy_port,
     );
 
     let proxy_addr = format!("0.0.0.0:{}", config.gateway.proxy_port);

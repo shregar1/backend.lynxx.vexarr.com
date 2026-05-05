@@ -35,6 +35,9 @@ pub fn admin_router(
     node_id: Uuid,
     auth_required: bool,
     client_pool: Arc<ProxyClientPool>,
+    recording_store: Arc<crate::recording::ContentAddressedStore>,
+    http_client: reqwest::Client,
+    proxy_port: u16,
 ) -> Router {
     let audit = AuditLog::new(repo.clone());
     let state = AdminState {
@@ -51,6 +54,9 @@ pub fn admin_router(
         audit,
         auth_required,
         client_pool,
+        recording_store,
+        http_client,
+        proxy_port,
     };
 
     // Routes that mutate live state require Operator or higher; token
@@ -103,6 +109,13 @@ pub fn admin_router(
         // audit read access lives here — operator+ may inspect, viewers may not.
         .route("/audit", get(routes::list_audit))
         .route("/audit/verify", get(routes::verify_audit))
+        // recordings (Time-Travel Debug A3)
+        .route("/recordings", get(routes::list_recordings))
+        .route(
+            "/recordings/:id",
+            get(routes::get_recording).delete(routes::delete_recording_handler),
+        )
+        .route("/recordings/:id/replay", post(routes::replay_recording))
         .route_layer(middleware::from_fn(operator));
 
     // ---- token management (admin) ----

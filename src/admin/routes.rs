@@ -43,6 +43,18 @@ pub struct AdminState {
     /// here invalidates the corresponding cached entry so the next
     /// request rebuilds with fresh certs.
     pub client_pool: Arc<ProxyClientPool>,
+    /// Content-addressed store for full Recording payloads. Used by the
+    /// /recordings/:id and /recordings/:id/replay endpoints; the index
+    /// (list / delete) lives in the repository.
+    pub recording_store: Arc<crate::recording::ContentAddressedStore>,
+    /// Reqwest client used by the replay endpoint when firing the
+    /// recorded request at a target URL. Separate from the proxy hot-path
+    /// client because replays go out-of-band, can be slow, and don't need
+    /// the per-service TLS cache.
+    pub http_client: reqwest::Client,
+    /// Local proxy port. Used to default the replay target URL to "this
+    /// gateway" when the operator doesn't pass `target_url` explicitly.
+    pub proxy_port: u16,
 }
 
 /// Convenience: extract the optional actor from request extensions.
@@ -1027,6 +1039,80 @@ pub async fn verify_audit(
 const _USE_ROLE: fn() -> Role = || Role::Admin;
 #[allow(dead_code)]
 const _USE_FROMSTR: fn(&str) -> Result<Role, String> = Role::from_str;
+
+// ---------- recordings (Time-Travel Debug A3) ----------
+
+#[derive(Deserialize)]
+pub struct ListRecordingsQuery {
+    pub since: Option<DateTime<Utc>>,
+    pub method: Option<String>,
+    pub path_prefix: Option<String>,
+    pub status: Option<u16>,
+    pub service_id: Option<Uuid>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct ReplayBody {
+    /// Optional override. When `None`, replays go through the local proxy.
+    pub target_url: Option<String>,
+}
+
+pub async fn list_recordings(
+    State(state): State<AdminState>,
+    Query(q): Query<ListRecordingsQuery>,
+) -> Result<Json<Vec<crate::recording::RecordingIndexRow>>, GatewayError> {
+    let filter = crate::recording::RecordingFilter {
+        since: q.since,
+        method: q.method,
+        path_prefix: q.path_prefix,
+        status: q.status,
+        service_id: q.service_id,
+        limit: q.limit.unwrap_or(0),
+    };
+    let rows = state.repo.list_recordings(&filter).await?;
+    Ok(Json(rows))
+}
+
+pub async fn get_recording(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::recording::Recording>, GatewayError> {
+    match state.recording_store.get(&id).await? {
+        Some(rec) => Ok(Json(rec)),
+        None => Err(GatewayError::NotFound(format!("recording {id}"))),
+    }
+}
+
+pub async fn delete_recording_handler(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, GatewayError> {
+    let store_deleted = state.recording_store.delete(&id).await?;
+    let index_deleted = state.repo.delete_recording(&id).await?;
+    if store_deleted || index_deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(GatewayError::NotFound(format!("recording {id}")))
+    }
+}
+
+pub async fn replay_recording(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+    Json(body): Json<ReplayBody>,
+) -> Result<Json<crate::recording::ReplayResult>, GatewayError> {
+    let rec = state
+        .recording_store
+        .get(&id)
+        .await?
+        .ok_or_else(|| GatewayError::NotFound(format!("recording {id}")))?;
+    let target_url = body
+        .target_url
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", state.proxy_port));
+    let result = crate::recording::replay(&rec, &target_url, &state.http_client).await?;
+    Ok(Json(result))
+}
 
 pub async fn gateway_status(
     State(state): State<AdminState>,
