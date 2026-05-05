@@ -7,6 +7,7 @@ use crate::db::sqlite::seed_from_config_generic;
 use crate::db::{AdminTokenPatch, NewAdminToken, Repository};
 use crate::error::GatewayError;
 use crate::models::{Consumer, PluginInstance, Route, Service, Target};
+use crate::recording::{RecordingFilter, RecordingIndexRow};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgPool, PgPoolOptions};
@@ -632,6 +633,118 @@ impl Repository for PostgresRepository {
                 .await?;
         Ok(v)
     }
+
+    // ---------- recordings ----------
+
+    async fn append_recording(&self, row: &RecordingIndexRow) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO recordings (id, ts, method, path, status, duration_ms, service_id, route_id, consumer, bytes_request, bytes_response) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(&row.id)
+        .bind(row.ts)
+        .bind(&row.method)
+        .bind(&row.path)
+        .bind(row.status as i16)
+        .bind(row.duration_ms as i64)
+        .bind(row.service_id)
+        .bind(row.route_id)
+        .bind(row.consumer.as_deref())
+        .bind(row.bytes_request as i64)
+        .bind(row.bytes_response as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_recordings(
+        &self,
+        filter: &RecordingFilter,
+    ) -> Result<Vec<RecordingIndexRow>, GatewayError> {
+        let limit = filter.effective_limit() as i64;
+        let mut sql = String::from(
+            "SELECT id, ts, method, path, status, duration_ms, service_id, route_id, consumer, bytes_request, bytes_response \
+             FROM recordings WHERE TRUE",
+        );
+        let mut idx = 1;
+        if filter.since.is_some() {
+            sql.push_str(&format!(" AND ts >= ${}", idx));
+            idx += 1;
+        }
+        if filter.method.is_some() {
+            sql.push_str(&format!(" AND method = ${}", idx));
+            idx += 1;
+        }
+        if filter.path_prefix.is_some() {
+            sql.push_str(&format!(" AND path LIKE ${}", idx));
+            idx += 1;
+        }
+        if filter.status.is_some() {
+            sql.push_str(&format!(" AND status = ${}", idx));
+            idx += 1;
+        }
+        if filter.service_id.is_some() {
+            sql.push_str(&format!(" AND service_id = ${}", idx));
+            idx += 1;
+        }
+        sql.push_str(&format!(" ORDER BY ts DESC LIMIT ${}", idx));
+
+        let mut q = sqlx::query(&sql);
+        if let Some(since) = filter.since {
+            q = q.bind(since);
+        }
+        if let Some(m) = &filter.method {
+            q = q.bind(m);
+        }
+        let path_like;
+        if let Some(p) = &filter.path_prefix {
+            path_like = format!("{}%", p);
+            q = q.bind(path_like);
+        }
+        if let Some(st) = filter.status {
+            q = q.bind(st as i16);
+        }
+        if let Some(sid) = filter.service_id {
+            q = q.bind(sid);
+        }
+        q = q.bind(limit);
+
+        let rows = q.fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_recording_index).collect()
+    }
+
+    async fn get_recording_index(
+        &self,
+        id: &str,
+    ) -> Result<Option<RecordingIndexRow>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, ts, method, path, status, duration_ms, service_id, route_id, consumer, bytes_request, bytes_response \
+             FROM recordings WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_recording_index).transpose()
+    }
+
+    async fn delete_recording(&self, id: &str) -> Result<bool, GatewayError> {
+        let result = sqlx::query("DELETE FROM recordings WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn delete_recordings_before(
+        &self,
+        ts: DateTime<Utc>,
+    ) -> Result<u64, GatewayError> {
+        let result = sqlx::query("DELETE FROM recordings WHERE ts < $1")
+            .bind(ts)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
 }
 
 // ---------- row mappers ----------
@@ -773,6 +886,34 @@ fn row_to_audit(row: sqlx::postgres::PgRow) -> Result<AuditEntry, GatewayError> 
         diff,
         hash: row.try_get("hash")?,
         prev_hash: row.try_get("prev_hash").ok(),
+    })
+}
+
+fn row_to_recording_index(
+    row: sqlx::postgres::PgRow,
+) -> Result<RecordingIndexRow, GatewayError> {
+    let id: String = row.try_get("id")?;
+    let ts: DateTime<Utc> = row.try_get("ts")?;
+    let status: i16 = row.try_get("status")?;
+    let duration_ms: i64 = row.try_get("duration_ms")?;
+    let service_id: Option<Uuid> = row.try_get("service_id")?;
+    let route_id: Option<Uuid> = row.try_get("route_id")?;
+    let consumer: Option<String> = row.try_get("consumer")?;
+    let bytes_request: i64 = row.try_get("bytes_request")?;
+    let bytes_response: i64 = row.try_get("bytes_response")?;
+
+    Ok(RecordingIndexRow {
+        id,
+        ts,
+        method: row.try_get("method")?,
+        path: row.try_get("path")?,
+        status: status as u16,
+        duration_ms: duration_ms as u64,
+        service_id,
+        route_id,
+        consumer,
+        bytes_request: bytes_request as u64,
+        bytes_response: bytes_response as u64,
     })
 }
 

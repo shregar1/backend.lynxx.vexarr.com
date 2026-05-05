@@ -7,6 +7,7 @@ use crate::cluster::ClusterBus;
 use crate::config::GatewayConfig;
 use crate::error::GatewayError;
 use crate::models::{Consumer, PluginInstance, Route, Service, Target};
+use crate::recording::{RecordingFilter, RecordingIndexRow};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
@@ -104,6 +105,38 @@ pub trait Repository: Send + Sync {
     /// Return a cluster bus for fan-out of admin mutations across nodes.
     /// Postgres uses LISTEN/NOTIFY; SQLite polls a `_sync_log` table.
     fn cluster_bus(&self) -> Arc<dyn ClusterBus>;
+
+    // ---------- recordings (Time-Travel Debug) ----------
+
+    /// Append a single index row. The corresponding payload should already
+    /// have been written to the content-addressed store. Best-effort: the
+    /// caller (the request-recorder plugin) logs and drops on failure
+    /// rather than failing the request.
+    async fn append_recording(&self, row: &RecordingIndexRow) -> Result<(), GatewayError>;
+
+    /// List recordings matching `filter`, newest first, capped by
+    /// `filter.effective_limit()`.
+    async fn list_recordings(
+        &self,
+        filter: &RecordingFilter,
+    ) -> Result<Vec<RecordingIndexRow>, GatewayError>;
+
+    /// Look up a single recording's index row by sha256 id.
+    async fn get_recording_index(
+        &self,
+        id: &str,
+    ) -> Result<Option<RecordingIndexRow>, GatewayError>;
+
+    /// Delete a single recording row. Returns true if a row was removed.
+    /// Does NOT touch the on-disk JSON; the admin handler owns that.
+    async fn delete_recording(&self, id: &str) -> Result<bool, GatewayError>;
+
+    /// Delete every recording row with `ts < cutoff`. Returns the number
+    /// of rows removed. Used by the retention sweeper.
+    async fn delete_recordings_before(
+        &self,
+        ts: DateTime<Utc>,
+    ) -> Result<u64, GatewayError>;
 }
 
 /// Build the appropriate repository implementation from the configured URL.

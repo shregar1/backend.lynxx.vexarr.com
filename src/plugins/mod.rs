@@ -29,6 +29,7 @@ pub mod rate_limit;
 pub mod redis_rate_limit;
 pub mod request_cleaner;
 pub mod request_id;
+pub mod request_recorder;
 pub mod request_size_limit;
 pub mod request_termination;
 pub mod request_transformer;

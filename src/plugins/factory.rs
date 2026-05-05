@@ -30,6 +30,7 @@ use crate::plugins::rate_limit::RateLimitPlugin;
 use crate::plugins::redis_rate_limit::RedisRateLimitPlugin;
 use crate::plugins::request_cleaner::RequestCleanerPlugin;
 use crate::plugins::request_id::RequestIdPlugin;
+use crate::plugins::request_recorder::RequestRecorderPlugin;
 use crate::plugins::request_size_limit::RequestSizeLimitPlugin;
 use crate::plugins::request_termination::RequestTerminationPlugin;
 use crate::plugins::request_transformer::RequestTransformerPlugin;
@@ -85,6 +86,7 @@ pub fn build(
         "aws-lambda" => Arc::new(AwsLambdaPlugin::from_config(config)?),
         "prometheus-per-consumer" => Arc::new(PrometheusPerConsumerPlugin::from_config(config)?),
         "request-id" => Arc::new(RequestIdPlugin::from_config(config)?),
+        "request-recorder" => Arc::new(RequestRecorderPlugin::from_config(config, repo)?),
         "correlation-id" => Arc::new(CorrelationIdPlugin::from_config(config)?),
         "splunk" => Arc::new(SplunkPlugin::from_config(config)?),
         "honeycomb" => Arc::new(HoneycombPlugin::from_config(config)?),
