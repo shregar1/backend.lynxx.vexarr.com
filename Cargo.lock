@@ -1868,6 +1868,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "graphql-parser"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a818c0d883d7c0801df27be910917750932be279c7bc82dc541b8769425f409"
+dependencies = [
+ "combine",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "h2"
 version = "0.3.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2919,6 +2929,7 @@ dependencies = [
  "dashmap",
  "dirs",
  "futures-util",
+ "graphql-parser",
  "hickory-resolver",
  "hmac",
  "http-body-util",
@@ -4059,7 +4070,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

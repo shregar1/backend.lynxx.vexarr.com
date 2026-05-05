@@ -9,6 +9,7 @@ pub mod correlation_id;
 pub mod datadog;
 pub mod factory;
 pub mod file_log;
+pub mod graphql_guard;
 pub mod grpc_web;
 pub mod hmac_auth;
 pub mod honeycomb;

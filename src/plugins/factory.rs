@@ -10,6 +10,7 @@ use crate::plugins::correlation_id::CorrelationIdPlugin;
 use crate::plugins::cors::CorsPlugin;
 use crate::plugins::datadog::DatadogPlugin;
 use crate::plugins::file_log::FileLogPlugin;
+use crate::plugins::graphql_guard::GraphqlGuardPlugin;
 use crate::plugins::grpc_web::GrpcWebPlugin;
 use crate::plugins::hmac_auth::HmacAuthPlugin;
 use crate::plugins::honeycomb::HoneycombPlugin;
@@ -94,6 +95,7 @@ pub fn build(
         "shadow" => Arc::new(ShadowPlugin::from_config(config)?),
         "websocket-size-limit" => Arc::new(WebsocketSizeLimitPlugin::from_config(config)?),
         "llm-gateway" => Arc::new(LlmGatewayPlugin::from_config(config)?),
+        "graphql-guard" => Arc::new(GraphqlGuardPlugin::from_config(config)?),
         "wasm" => Arc::new(WasmPlugin::from_config(config)?),
         other => {
             return Err(GatewayError::BadRequest(format!("unknown plugin: {other}")));

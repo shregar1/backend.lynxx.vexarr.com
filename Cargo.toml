@@ -84,11 +84,20 @@ aws-sdk-lambda = "=1.40.0"
 tiktoken-rs = "0.6"
 regex = "1"
 
+# graphql-guard plugin: parse GraphQL queries for depth, complexity, alias
+# count, persisted-query lookup, per-field rate limits. Pure-sync parser, no
+# async runtime. Document AST only — we never execute queries here.
+graphql-parser = "0.4"
+
 # WebAssembly plugin runtime. Wraps cranelift + a small interpreter for
 # untrusted module execution. Default features include cranelift, parallel
 # compilation, and the cache; we don't enable wasi to keep the host
 # surface limited to the explicit `lynxx_*` ABI in src/plugins/wasm/host.rs.
 wasmtime = "27"
+
+[lib]
+name = "lynx_gateway"
+path = "src/lib.rs"
 
 [[bin]]
 name = "lynx-gateway"
