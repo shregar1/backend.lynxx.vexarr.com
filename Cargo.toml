@@ -108,6 +108,11 @@ openapiv3 = "2"
 # key against the licence server on startup, with a local 7-day cache
 # for offline restarts. See src/license/mod.rs.
 
+# Password hashing for the billing service (lynxx-billing binary).
+# argon2id is the OWASP-recommended algorithm in 2026.
+argon2 = "0.5"
+hex = "0.4"
+
 [lib]
 name = "lynx_gateway"
 path = "src/lib.rs"
@@ -123,6 +128,10 @@ path = "src/ingress/main.rs"
 [[bin]]
 name = "lynxx"
 path = "src/cli/main.rs"
+
+[[bin]]
+name = "lynxx-billing"
+path = "src/billing/main.rs"
 
 [dev-dependencies]
 tempfile = "3"
