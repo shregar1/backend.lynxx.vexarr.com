@@ -16,7 +16,14 @@ spec:
       labels:
         {{- include "lynxx.labels" . | nindent 8 }}
         app.kubernetes.io/component: gateway
+      {{- with .Values.gateway.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
+      {{- if .Values.gateway.serviceAccountName }}
+      serviceAccountName: {{ .Values.gateway.serviceAccountName }}
+      {{- end }}
       containers:
         - name: gateway
           image: "{{ .Values.image.gateway }}:{{ .Values.image.tag }}"
@@ -34,6 +41,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "lynxx.secretName" . }}
                   key: DATABASE_URL
+            - name: RUST_LOG
+              value: {{ .Values.gateway.logLevel | default "info" }}
+            {{- with .Values.gateway.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/lynxx/config.toml
@@ -52,7 +64,13 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.gateway.resources | nindent 12 }}
+        {{- with .Values.gateway.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       volumes:
         - name: config
           configMap:
             name: {{ include "lynxx.configMapName" . }}
+        {{- with .Values.gateway.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

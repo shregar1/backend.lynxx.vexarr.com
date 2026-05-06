@@ -7,6 +7,7 @@ use crate::proxy::http_client::{HttpProxyClient, ProxyClientPool};
 use crate::proxy::loadbalancer::{InFlightGuard, LoadBalancerRegistry};
 use crate::proxy::router::SharedRouteTable;
 use crate::proxy::websocket::handle_websocket;
+use crate::quota::QuotaTracker;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderName, Request, Response, Uri};
@@ -43,6 +44,7 @@ pub struct ProxyState {
     pub grpc_client: GrpcClient,
     pub health: Arc<HealthRegistry>,
     pub lb: Arc<LoadBalancerRegistry>,
+    pub quota: Arc<QuotaTracker>,
 }
 
 /// Hop-by-hop headers that must not be forwarded to the upstream. RFC 7230 §6.1.
@@ -139,6 +141,21 @@ pub async fn proxy_handler(
             "service {} circuit breaker open",
             service.name
         )));
+    }
+
+    // Quota check — counts the call and rejects with 429 if the monthly limit
+    // is exhausted. Unlimited plans (Business, Enterprise) always pass.
+    if !state.quota.check_and_count() {
+        metrics::counter!(
+            "lynxx_requests_total",
+            "service" => svc_name.clone(),
+            "route" => route_id.clone(),
+            "method" => method.clone(),
+            "status" => "quota_exceeded",
+            "target" => "-",
+        )
+        .increment(1);
+        return Err(GatewayError::QuotaExceeded);
     }
 
     // Pick a target via load balancer if one is configured for this service.

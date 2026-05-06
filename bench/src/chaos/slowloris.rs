@@ -22,6 +22,8 @@ const SCENARIO: &str = "slowloris";
 pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     let duration = args.duration_or(Duration::from_secs(30));
 
+    let rl_ids = admin.disable_global_ratelimit().await;
+
     // Need a real route for the fast clients. Reuse mock upstream.
     let svc_id = admin
         .create_service("chaos-slowloris", &args.mock_upstream_url, 0, 5_000)
@@ -94,6 +96,7 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
 
     let _ = admin.delete_route(route_id).await;
     let _ = admin.delete_service(svc_id).await;
+    admin.restore_plugins(&rl_ids).await;
 
     let okc = ok.load(Ordering::Relaxed);
     let errc = err.load(Ordering::Relaxed);

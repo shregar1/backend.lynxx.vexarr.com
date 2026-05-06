@@ -1,0 +1,80 @@
+# Helm values override for GCP / GKE Autopilot deployment.
+# Apply with:
+#   helm upgrade --install lynxx ./deploy/helm/lynxx \
+#     -f deploy/gcp/values.yaml \
+#     --set image.tag=$IMAGE_TAG \
+#     --set image.gateway=$REGISTRY/lynxx-gateway \
+#     --set image.controller=$REGISTRY/lynxx-ingress \
+#     -n lynxx-system --create-namespace
+
+image:
+  # Filled by CI via --set image.tag=GIT_SHA
+  gateway:    "REGION-docker.pkg.dev/PROJECT_ID/lynxx/lynxx-gateway"
+  controller: "REGION-docker.pkg.dev/PROJECT_ID/lynxx/lynxx-ingress"
+  tag:        "latest"
+  pullPolicy: Always
+
+gateway:
+  replicas: 2
+  logLevel: info
+
+  # K8s ServiceAccount that carries the Workload Identity annotation.
+  # The account itself is created in the k8s-setup job (see deploy-gcp.yml).
+  serviceAccountName: lynxx-gateway
+
+  resources:
+    requests:
+      cpu:    "250m"
+      memory: "256Mi"
+    limits:
+      cpu:    "1"
+      memory: "512Mi"
+
+  service:
+    type: ClusterIP   # Exposed via the GCP HTTPS LB + NEG, not a K8s LoadBalancer
+
+  # Cloud SQL Auth Proxy sidecar — authenticates via Workload Identity,
+  # listens on 127.0.0.1:5432. DATABASE_URL points to localhost.
+  extraContainers:
+    - name: cloud-sql-proxy
+      image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2
+      args:
+        - --structured-logs
+        - --port=5432
+        # Replace PROJECT_ID:REGION:INSTANCE_NAME with the value from:
+        #   terraform output sql_connection_name
+        - "PROJECT_ID:REGION:INSTANCE_NAME"
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+      resources:
+        requests:
+          cpu:    "50m"
+          memory: "64Mi"
+        limits:
+          cpu:    "200m"
+          memory: "128Mi"
+
+  # Annotate pods so GCP LB NEG health checks are routed correctly.
+  podAnnotations:
+    cloud.google.com/neg: '{"exposed_ports": {"9000": {}}}'
+
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu:    "100m"
+      memory: "128Mi"
+    limits:
+      cpu:    "500m"
+      memory: "256Mi"
+
+# Disable the in-cluster Postgres — Cloud SQL is used instead.
+postgres:
+  enabled: false
+
+config:
+  proxyPort: 9000
+  adminPort: 9001
+  healthCheckIntervalMs: 10000
+  seedFromConfig: false

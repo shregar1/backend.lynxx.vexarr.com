@@ -61,6 +61,12 @@ pub struct GatewaySettings {
     /// `/var/lib/lynxx/recordings` if no home dir is available).
     #[serde(default)]
     pub recordings_directory: Option<String>,
+
+    /// Licence tier that determines the monthly API call quota.
+    /// Accepted values: `"free"` (1 M), `"pro"` (10 M), `"business"` (∞),
+    /// `"enterprise"` (∞). Defaults to `"free"` when not set.
+    #[serde(default = "default_plan_tier")]
+    pub plan_tier: String,
 }
 
 /// Inbound TLS termination knobs. When `enabled = false` (the default)
@@ -166,6 +172,7 @@ fn default_gateway() -> GatewaySettings {
         prewarm_concurrency: default_prewarm_concurrency(),
         auth_required: false,
         recordings_directory: None,
+        plan_tier: default_plan_tier(),
     }
 }
 
@@ -193,6 +200,10 @@ fn default_hc_success_threshold() -> u32 {
 
 fn default_hc_open_duration() -> u64 {
     30_000
+}
+
+fn default_plan_tier() -> String {
+    "free".to_string()
 }
 
 fn default_database_url() -> String {

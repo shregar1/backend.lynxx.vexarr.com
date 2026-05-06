@@ -30,6 +30,7 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
         }
     };
 
+    let rl_ids = admin.disable_global_ratelimit().await;
     let svc_id = admin
         .create_service("chaos-memory", &args.mock_upstream_url, 0, 5_000)
         .await?;
@@ -128,6 +129,7 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
 
     let _ = admin.delete_route(route_id).await;
     let _ = admin.delete_service(svc_id).await;
+    admin.restore_plugins(&rl_ids).await;
 
     let final_rss = samples.last().map(|(_, r)| *r).unwrap_or(baseline);
     let growth_kb = final_rss.saturating_sub(baseline);

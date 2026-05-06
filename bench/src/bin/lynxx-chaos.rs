@@ -13,8 +13,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use lynxx_bench::chaos::{
-    burst, churn, malformed, memory, methods, mixed_bodies, pg_restart, plugin_chain, slowloris,
-    ws_flood, AdminClient, Args as ChaosArgs, Report,
+    burst, churn, extreme, malformed, memory, methods, mixed_bodies, pg_restart, plugin_chain,
+    slowloris, ws_flood, AdminClient, Args as ChaosArgs, Report,
 };
 
 #[derive(Parser, Debug)]
@@ -78,6 +78,8 @@ enum Cmd {
     PgRestart,
     /// 1000 raw malformed TCP requests.
     Malformed,
+    /// Heavy 9-plugin + 4-target weighted LB, 500→5000 RPS, Kong comparison.
+    Extreme,
     /// Run all 10 scenarios sequentially with short defaults.
     All,
 }
@@ -119,6 +121,7 @@ async fn main() -> Result<()> {
         Cmd::Memory => vec![memory::run(&admin, &args).await?],
         Cmd::PgRestart => vec![pg_restart::run(&admin, &args).await?],
         Cmd::Malformed => vec![malformed::run(&admin, &args).await?],
+        Cmd::Extreme => vec![extreme::run(&admin, &args).await?],
         Cmd::All => run_all(&admin, &args).await,
     };
 

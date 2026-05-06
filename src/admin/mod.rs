@@ -10,6 +10,7 @@ use crate::plugins::PluginExecutor;
 use crate::proxy::http_client::ProxyClientPool;
 use crate::proxy::loadbalancer::LoadBalancerRegistry;
 use crate::proxy::router::SharedRouteTable;
+use crate::quota::QuotaTracker;
 use crate::reload::ReloadHandle;
 use axum::http::Method;
 use axum::middleware;
@@ -38,6 +39,7 @@ pub fn admin_router(
     recording_store: Arc<crate::recording::ContentAddressedStore>,
     http_client: reqwest::Client,
     proxy_port: u16,
+    quota: Arc<QuotaTracker>,
 ) -> Router {
     let audit = AuditLog::new(repo.clone());
     let state = AdminState {
@@ -57,6 +59,7 @@ pub fn admin_router(
         recording_store,
         http_client,
         proxy_port,
+        quota,
     };
 
     // Routes that mutate live state require Operator or higher; token
@@ -80,6 +83,7 @@ pub fn admin_router(
         .route("/health/:service_id", get(routes::get_health))
         .route("/status", get(routes::gateway_status))
         .route("/metrics", get(routes::metrics))
+        .route("/quota", get(routes::quota_snapshot))
         .route_layer(middleware::from_fn(viewer));
 
     // ---- mutations (operator) ----

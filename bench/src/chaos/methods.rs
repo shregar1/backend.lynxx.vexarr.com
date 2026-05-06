@@ -19,13 +19,53 @@ use tokio::time::{sleep_until, Instant as TokioInstant};
 use crate::chaos::{fmt_count, AdminClient, Args, Report};
 
 const SCENARIO: &str = "methods";
+const DIST_PORT: u16 = 19099; // 19090-19098 reserved for multi-upstream tests
+
+/// Start the mock upstream binary on DIST_PORT with 80/15/5 status distribution.
+/// Locates the binary relative to the current executable.
+fn start_dist_upstream() -> Option<std::process::Child> {
+    // Find the mock upstream binary alongside this binary.
+    let exe = std::env::current_exe().ok()?;
+    let bin_dir = exe.parent()?;
+    let mock = bin_dir.join("lynxx-mock-upstream");
+    // Distribution: 95% 2xx / 5% 4xx / 0% 5xx.
+    // We deliberately exclude 5xx responses because the gateway's circuit
+    // breaker (failure_threshold=3) would open on consecutive 5xx and
+    // cascade them into 503s, making the distribution unverifiable. Testing
+    // that the gateway faithfully forwards 2xx and 4xx (without mangling
+    // status codes) is the primary goal of this scenario.
+    std::process::Command::new(mock)
+        .args([
+            "--port",
+            &DIST_PORT.to_string(),
+            "--status-distribution",
+            "95,5,0",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()
+}
 
 pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     let duration = args.duration_or(Duration::from_secs(180));
     let rps = args.rps_or(500);
 
+    let rl_ids = admin.disable_global_ratelimit().await;
+
+    // Start a dedicated mock upstream with the right status distribution.
+    let mut dist_proc = start_dist_upstream();
+    let upstream_url = if dist_proc.is_some() {
+        // Give the server time to bind.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        format!("http://127.0.0.1:{DIST_PORT}")
+    } else {
+        tracing::warn!("could not start distribution upstream; falling back to shared mock");
+        args.mock_upstream_url.clone()
+    };
+
     let svc_id = admin
-        .create_service("chaos-methods", &args.mock_upstream_url, 0, 5_000)
+        .create_service("chaos-methods", &upstream_url, 0, 5_000)
         .await?;
     let route_id = admin
         .create_route(svc_id, &["/chaos-methods"], &[], true)
@@ -92,6 +132,10 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
 
     let _ = admin.delete_route(route_id).await;
     let _ = admin.delete_service(svc_id).await;
+    admin.restore_plugins(&rl_ids).await;
+    if let Some(ref mut proc) = dist_proc {
+        let _ = proc.kill();
+    }
 
     let counts = Arc::try_unwrap(counts).map(|m| m.into_inner()).unwrap_or_default();
     let total: u64 = counts.values().sum();
@@ -106,13 +150,13 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     let p4 = pct(c4xx);
     let p5 = pct(c5xx);
 
-    let target = (80.0_f64, 15.0_f64, 5.0_f64);
+    let target = (95.0_f64, 5.0_f64, 0.0_f64);
     let within = |observed: f64, target: f64| (observed - target).abs() <= 2.0;
     let passed = total > 0
         && net_err.load(Ordering::Relaxed) == 0
         && within(p2, target.0)
         && within(p4, target.1)
-        && within(p5, target.2);
+        && p5 < 1.0; // no 5xx expected; tolerate <1% from network noise
 
     let summary = format!(
         "{} reqs · 2xx={:.1}% 4xx={:.1}% 5xx={:.1}%",
@@ -126,5 +170,5 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     } else {
         Report::fail(SCENARIO, summary)
     };
-    Ok(r.detail("upstream configured 80/15/5; tolerance ±2pp"))
+    Ok(r.detail("upstream configured 95/5/0; tolerance ±2pp (no 5xx to avoid CB cascade)"))
 }

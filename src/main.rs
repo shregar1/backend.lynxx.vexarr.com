@@ -19,6 +19,7 @@ mod metrics;
 mod models;
 mod plugins;
 mod proxy;
+mod quota;
 mod recording;
 mod reload;
 
@@ -30,6 +31,7 @@ use crate::plugins::PluginExecutor;
 use crate::proxy::handler::{proxy_handler, ProxyState};
 use crate::proxy::loadbalancer::{LbStrategy, LoadBalancerRegistry};
 use crate::proxy::router::{RouteTable, SharedRouteTable};
+use axum::extract::DefaultBodyLimit;
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -233,6 +235,12 @@ async fn async_main() -> anyhow::Result<()> {
         crate::proxy::http_client::ProxyClientPool::new(http_client.clone())
             .expect("init proxy client pool"),
     );
+
+    // Quota tracker — load persisted monthly counters, start background flush.
+    let plan_tier = crate::quota::PlanTier::from_str(&config.gateway.plan_tier);
+    let quota = crate::quota::QuotaTracker::load(plan_tier, repo.clone()).await?;
+    crate::quota::spawn_quota_flusher(quota.clone());
+
     let proxy_state = ProxyState {
         route_table: route_table.clone(),
         plugins: plugin_exec.clone(),
@@ -241,6 +249,7 @@ async fn async_main() -> anyhow::Result<()> {
         grpc_client,
         health: health.clone(),
         lb: lb.clone(),
+        quota: quota.clone(),
     };
 
     // Background connection pre-warmer. Keeps the upstream pool hot so
@@ -255,8 +264,12 @@ async fn async_main() -> anyhow::Result<()> {
         config.gateway.prewarm_concurrency,
     );
 
+    // Raise axum's default 2 MB body limit to 64 MB so the gateway can
+    // forward large request bodies (file uploads, 5 MB+ API payloads, etc.)
+    // without returning 413. Kong defaults to 64 MB; we match it.
     let proxy_app = axum::Router::new()
         .fallback(proxy_handler)
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(proxy_state);
 
     metrics::spawn_metrics_collector(route_table.clone(), repo.clone(), health.clone(), 5_000);
@@ -326,6 +339,7 @@ async fn async_main() -> anyhow::Result<()> {
         recording_store,
         admin_http_client,
         config.gateway.proxy_port,
+        quota.clone(),
     );
 
     let proxy_addr = format!("0.0.0.0:{}", config.gateway.proxy_port);

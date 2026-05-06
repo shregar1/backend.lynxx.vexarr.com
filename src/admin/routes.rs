@@ -10,6 +10,7 @@ use crate::plugins::PluginExecutor;
 use crate::proxy::http_client::ProxyClientPool;
 use crate::proxy::loadbalancer::{LbStrategy, LoadBalancerRegistry};
 use crate::proxy::router::SharedRouteTable;
+use crate::quota::QuotaTracker;
 use crate::reload::{ReloadHandle, ReloadResult};
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
@@ -55,6 +56,9 @@ pub struct AdminState {
     /// Local proxy port. Used to default the replay target URL to "this
     /// gateway" when the operator doesn't pass `target_url` explicitly.
     pub proxy_port: u16,
+    /// Monthly quota tracker. Shared with the proxy handler; the admin API
+    /// exposes a read-only snapshot at GET /quota.
+    pub quota: Arc<QuotaTracker>,
 }
 
 /// Convenience: extract the optional actor from request extensions.
@@ -1133,4 +1137,16 @@ pub async fn gateway_status(
         plugins_count,
         consumers_count,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// GET /quota
+// ---------------------------------------------------------------------------
+
+/// Return the current period's quota snapshot: plan tier, calls allowed,
+/// calls remaining, calls rejected. Useful for dashboards and billing UIs.
+pub async fn quota_snapshot(
+    State(state): State<AdminState>,
+) -> Result<impl IntoResponse, GatewayError> {
+    Ok(Json(state.quota.snapshot()))
 }

@@ -5,11 +5,16 @@
 //! whole chain executed in order). Verifying every response would dominate
 //! the test runtime; sampling a few is enough for chain correctness.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use axum::extract::Request as AxumRequest;
+use axum::response::IntoResponse;
+use axum::routing::any;
+use axum::Router;
 use serde_json::json;
 use tokio::sync::Mutex;
 use tokio::time::{sleep_until, Instant as TokioInstant};
@@ -17,19 +22,59 @@ use tokio::time::{sleep_until, Instant as TokioInstant};
 use crate::chaos::{fmt_count, AdminClient, Args, Report};
 
 const SCENARIO: &str = "plugin-chain";
-
-// HS256 token signed with the secret below; sub=chaos, iss=lynxx-chaos.
-// Generated once and embedded so the test is hermetic. If the JWT plugin
-// validation rules change, regenerate this with `cargo run -p lynxx-bench
-// --bin lynxx-chaos -- ...` after updating the constant.
 const JWT_SECRET: &str = "chaos-test-secret-please-do-not-use-in-prod";
+
+/// Run a minimal inline echo server on an **ephemeral port** (bind 0) in its own
+/// OS thread + Tokio runtime so it doesn't compete with load-generator tasks for
+/// CPU time and never conflicts with other services.
+/// Returns (bound_addr, thread_handle).
+fn start_echo_server() -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+    // Bind synchronously so we know the port before handing it back.
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind echo");
+    std_listener.set_nonblocking(true).expect("nonblocking");
+    let addr = std_listener.local_addr().expect("local_addr");
+
+    let handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("echo rt");
+        rt.block_on(async {
+            let app = Router::new().fallback(any(|req: AxumRequest| async move {
+                let mut hdrs: HashMap<String, String> = HashMap::new();
+                for (k, v) in req.headers() {
+                    hdrs.insert(
+                        k.as_str().to_string(),
+                        v.to_str().unwrap_or("").to_string(),
+                    );
+                }
+                let body = json!({ "headers": hdrs });
+                axum::Json(body).into_response()
+            }));
+            let listener = tokio::net::TcpListener::from_std(std_listener)
+                .expect("convert listener");
+            axum::serve(listener, app).await.ok();
+        });
+    });
+
+    (addr, handle)
+}
 
 pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     let duration = args.duration_or(Duration::from_secs(60));
     let rps = args.rps_or(1000);
 
+    // Disable global rate-limit; plugin-chain installs its own at 10k RPS.
+    let rl_ids = admin.disable_global_ratelimit().await;
+
+    // Inline echo upstream on an ephemeral port — never conflicts with external services.
+    let (echo_addr, _echo_handle) = start_echo_server();
+    let echo_url = format!("http://{echo_addr}");
+    // Give the server a moment to be ready.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
     let svc_id = admin
-        .create_service("chaos-plugin-chain", &args.mock_upstream_url, 0, 5_000)
+        .create_service("chaos-plugin-chain", &echo_url, 0, 5_000)
         .await?;
     let route_id = admin
         .create_route(svc_id, &["/chaos-pchain"], &[], true)
@@ -52,7 +97,7 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
         admin
             .install_plugin(
                 "rate-limit",
-                json!({ "rps": 10_000, "burst": 20_000 }),
+                json!({ "requests_per_second": 10_000 }),
                 None,
                 Some(route_id),
             )
@@ -108,6 +153,8 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
 
     if !sample_status.is_success() {
         cleanup(admin, route_id, svc_id, &plugin_ids).await;
+        // echo thread runs until process exit
+        admin.restore_plugins(&rl_ids).await;
         return Ok(Report::fail(
             SCENARIO,
             format!("sample request failed: {sample_status}"),
@@ -170,6 +217,8 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     }
 
     cleanup(admin, route_id, svc_id, &plugin_ids).await;
+    // echo thread runs until process exit
+    admin.restore_plugins(&rl_ids).await;
 
     let okc = ok.load(Ordering::Relaxed);
     let errc = err.load(Ordering::Relaxed);

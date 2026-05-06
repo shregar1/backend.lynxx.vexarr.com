@@ -11,6 +11,7 @@
 
 pub mod burst;
 pub mod churn;
+pub mod extreme;
 pub mod malformed;
 pub mod memory;
 pub mod methods;
@@ -123,6 +124,13 @@ pub struct RouteView {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginView {
     pub id: Uuid,
+    #[serde(default)]
+    pub name: String,
+    pub service_id: Option<Uuid>,
+    pub route_id: Option<Uuid>,
+    pub enabled: bool,
+    #[serde(default)]
+    pub config: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -172,11 +180,24 @@ impl AdminClient {
         retries: u32,
         timeout_ms: u64,
     ) -> Result<Uuid> {
+        self.create_service_lb(name, url, retries, timeout_ms, "round-robin").await
+    }
+
+    /// Like `create_service` but lets you specify the LB strategy explicitly.
+    pub async fn create_service_lb(
+        &self,
+        name: &str,
+        url: &str,
+        retries: u32,
+        timeout_ms: u64,
+        lb_strategy: &str,
+    ) -> Result<Uuid> {
         let body = serde_json::json!({
             "name": name,
             "url": url,
             "retries": retries,
             "connect_timeout_ms": timeout_ms,
+            "lb_strategy": lb_strategy,
         });
         let resp = self
             .req(reqwest::Method::POST, "/services")
@@ -190,6 +211,32 @@ impl AdminClient {
         }
         let svc: ServiceView = resp.json().await?;
         Ok(svc.id)
+    }
+
+    /// Add a weighted upstream target to a service.
+    pub async fn create_target(&self, service_id: Uuid, url: &str, weight: u32) -> Result<Uuid> {
+        #[derive(Deserialize)]
+        struct TargetView { id: Uuid }
+        let body = serde_json::json!({ "url": url, "weight": weight, "enabled": true });
+        let resp = self
+            .req(reqwest::Method::POST, &format!("/services/{service_id}/targets"))
+            .json(&body)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let txt = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("create_target {url} -> {status}: {txt}"));
+        }
+        let t: TargetView = resp.json().await?;
+        Ok(t.id)
+    }
+
+    /// Convenience: attach a plugin to a service, silently skip on failure.
+    pub async fn create_plugin_for_service(&self, service_id: Uuid, name: &str, config: serde_json::Value) {
+        if let Err(e) = self.install_plugin(name, config, Some(service_id), None).await {
+            tracing::warn!(plugin = name, error = %e, "install_plugin failed (continuing)");
+        }
     }
 
     pub async fn create_route(
@@ -273,6 +320,42 @@ impl AdminClient {
         Ok(())
     }
 
+    pub async fn list_plugins(&self) -> Result<Vec<PluginView>> {
+        let resp = self.req(reqwest::Method::GET, "/plugins").send().await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("/plugins -> {}", resp.status()));
+        }
+        Ok(resp.json().await?)
+    }
+
+    pub async fn set_plugin_enabled(&self, id: Uuid, enabled: bool) -> Result<()> {
+        // GET the current state, then PUT back with only enabled changed.
+        let get_resp = self.req(reqwest::Method::GET, &format!("/plugins/{id}")).send().await?;
+        if !get_resp.status().is_success() {
+            return Err(anyhow!("get plugin {id} -> {}", get_resp.status()));
+        }
+        let mut p: PluginView = get_resp.json().await?;
+        p.enabled = enabled;
+        let body = serde_json::json!({
+            "name": p.name,
+            "enabled": p.enabled,
+            "config": p.config,
+            "service_id": p.service_id,
+            "route_id": p.route_id,
+        });
+        let resp = self
+            .req(reqwest::Method::PUT, &format!("/plugins/{id}"))
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let txt = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("set_plugin_enabled {id} -> {status}: {txt}"));
+        }
+        Ok(())
+    }
+
     pub async fn delete_plugin(&self, id: Uuid) -> Result<()> {
         let resp = self
             .req(reqwest::Method::DELETE, &format!("/plugins/{id}"))
@@ -282,6 +365,44 @@ impl AdminClient {
             return Err(anyhow!("delete_plugin {id} -> {}", resp.status()));
         }
         Ok(())
+    }
+
+    /// Disable all global (no service/route scope) rate-limit plugins and
+    /// return their IDs. Call `restore_plugins` with the returned IDs when done.
+    /// Used by high-RPS chaos scenarios to avoid false 429 failures.
+    pub async fn disable_global_ratelimit(&self) -> Vec<Uuid> {
+        let ids: Vec<Uuid> = self
+            .list_plugins()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| {
+                p.name == "rate-limit"
+                    && p.service_id.is_none()
+                    && p.route_id.is_none()
+                    && p.enabled
+            })
+            .map(|p| p.id)
+            .collect();
+        for &id in &ids {
+            if let Err(e) = self.set_plugin_enabled(id, false).await {
+                tracing::warn!(%id, error = %e, "failed to disable global rate-limit plugin");
+            } else {
+                tracing::info!(%id, "disabled global rate-limit plugin");
+            }
+        }
+        ids
+    }
+
+    /// Re-enable plugins disabled by `disable_global_ratelimit`.
+    pub async fn restore_plugins(&self, ids: &[Uuid]) {
+        for &id in ids {
+            if let Err(e) = self.set_plugin_enabled(id, true).await {
+                tracing::warn!(%id, error = %e, "failed to re-enable plugin");
+            } else {
+                tracing::info!(%id, "re-enabled plugin");
+            }
+        }
     }
 
     pub async fn health(&self) -> Result<Vec<HealthEntry>> {

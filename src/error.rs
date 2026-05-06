@@ -16,6 +16,9 @@ pub enum GatewayError {
     #[error("circuit open: {0}")]
     CircuitOpen(String),
 
+    #[error("monthly quota exceeded — upgrade your plan to continue")]
+    QuotaExceeded,
+
     #[error("plugin error: {0}")]
     PluginError(PluginError),
 
@@ -99,6 +102,9 @@ impl IntoResponse for GatewayError {
             GatewayError::CircuitOpen(_) => {
                 circuit_open = true;
                 (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
+            }
+            GatewayError::QuotaExceeded => {
+                (StatusCode::TOO_MANY_REQUESTS, self.to_string())
             }
             GatewayError::PluginError(e) => match e {
                 PluginError::RateLimited => {

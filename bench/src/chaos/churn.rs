@@ -8,12 +8,14 @@
 //!   - admin/data-plane priority inversion (background traffic shouldn't
 //!     stutter while admin writes land).
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use tokio::time::{sleep_until, Instant as TokioInstant};
+use uuid::Uuid;
 
 use crate::chaos::{fmt_count, AdminClient, Args, Report};
 
@@ -21,6 +23,39 @@ const SCENARIO: &str = "churn";
 
 pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     let duration = args.duration_or(Duration::from_secs(120));
+    let bg_rps = args.rps_or(500);
+
+    // Disable any global rate-limit plugins for the duration. They cap
+    // throughput below our background RPS, causing false 429 errors that
+    // look like upstream failures. We restore enabled state on exit.
+    let global_ratelimit_ids: Vec<Uuid> = admin
+        .list_plugins()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| {
+            p.name == "rate-limit"
+                && p.service_id.is_none()
+                && p.route_id.is_none()
+                && p.enabled
+        })
+        .map(|p| p.id)
+        .collect();
+    for &id in &global_ratelimit_ids {
+        let _ = admin.set_plugin_enabled(id, false).await;
+        tracing::info!(%id, "disabled global rate-limit plugin for churn test");
+    }
+
+    // Record circuits already open before we start so we don't count them
+    // as leaked at the end.
+    let pre_existing_open: HashSet<Uuid> = admin
+        .health()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.circuit == "Open")
+        .map(|e| e.service_id)
+        .collect();
 
     // Stable background route.
     let bg_svc = admin
@@ -45,7 +80,7 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
                 .timeout(Duration::from_secs(5))
                 .build()
                 .unwrap();
-            let rps = 500u64;
+            let rps = bg_rps;
             let interval = Duration::from_nanos(1_000_000_000 / rps);
             let start = TokioInstant::now();
             let mut i: u32 = 0;
@@ -143,11 +178,15 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     let total_err = bg_err_n + churn_err_n;
     let err_rate = if total == 0 { 0.0 } else { 100.0 * total_err as f64 / total as f64 };
 
-    // Leaked open circuits?
+    // Leaked open circuits? Skip bg_svc (may have transient blips) and any
+    // circuits that were already open before this scenario ran.
     let mut leaked = 0u64;
     if let Ok(entries) = admin.health().await {
         for e in entries {
             if e.service_id == bg_svc {
+                continue;
+            }
+            if pre_existing_open.contains(&e.service_id) {
                 continue;
             }
             if e.circuit == "Open" {
@@ -158,6 +197,12 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
 
     let _ = admin.delete_route(bg_route).await;
     let _ = admin.delete_service(bg_svc).await;
+
+    // Restore rate-limit plugins we disabled at the start.
+    for &id in &global_ratelimit_ids {
+        let _ = admin.set_plugin_enabled(id, true).await;
+        tracing::info!(%id, "re-enabled global rate-limit plugin");
+    }
 
     let pass = err_rate < 0.1 && leaked == 0;
     let summary = format!(
@@ -172,6 +217,6 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
         Report::fail(SCENARIO, summary)
     };
     Ok(r.detail(format!(
-        "bg ok={bg_ok_n} bg err={bg_err_n} churn err={churn_err_n}"
+        "bg ok={bg_ok_n} bg err={bg_err_n} churn err={churn_err_n} rps={bg_rps}"
     )))
 }

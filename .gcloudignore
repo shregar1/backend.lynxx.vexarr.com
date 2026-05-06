@@ -1,0 +1,19 @@
+# Files to exclude from gcloud builds / Cloud Build source uploads.
+# Mirrors .gitignore but is evaluated by gcloud CLI, not git.
+
+.git
+.gitignore
+target/
+bench/
+tests/
+ebpf/
+*.db
+*.db-shm
+*.db-wal
+infra/terraform/.terraform/
+infra/terraform/terraform.tfstate*
+infra/terraform/terraform.tfvars
+infra/terraform/.terraform.lock.hcl
+.env
+.env.*
+**/*.rs.bk
