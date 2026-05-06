@@ -38,6 +38,11 @@ output "dashboard_url" {
   value       = google_cloud_run_v2_service.dashboard.uri
 }
 
+output "billing_url" {
+  description = "Cloud Run URL for the licence/billing service. Set this as VITE_BILLING_API_URL on the website (or point api.lynxx.dev at it via DNS)."
+  value       = google_cloud_run_v2_service.billing.uri
+}
+
 output "wif_provider" {
   description = "Workload Identity Federation provider resource name — set as GitHub variable WIF_PROVIDER."
   value       = google_iam_workload_identity_pool_provider.github.name

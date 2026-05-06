@@ -76,3 +76,15 @@ variable "plan_tier" {
   type        = string
   default     = "pro"
 }
+
+variable "stripe_price_pro" {
+  description = "Stripe Price ID for the Pro tier subscription. Set after creating products in the Stripe dashboard."
+  type        = string
+  default     = ""
+}
+
+variable "stripe_price_business" {
+  description = "Stripe Price ID for the Business tier subscription."
+  type        = string
+  default     = ""
+}

@@ -35,10 +35,51 @@ resource "google_secret_manager_secret" "stripe_secret_key" {
   depends_on = [google_project_service.apis]
 }
 
+# Empty placeholder so Cloud Run's `versions/latest` reference resolves
+# even before you've added the real Stripe key. The binary tolerates an
+# empty STRIPE_SECRET_KEY (paid checkout disabled, signups go to free).
+# Replace via:
+#   gcloud secrets versions add lynxx-stripe-secret-key --data-file=<(echo -n "sk_live_...")
+resource "google_secret_manager_secret_version" "stripe_secret_key_placeholder" {
+  secret      = google_secret_manager_secret.stripe_secret_key.id
+  secret_data = "PLACEHOLDER_NOT_CONFIGURED"
+  lifecycle {
+    ignore_changes = [secret_data, enabled]
+  }
+}
+
 resource "google_secret_manager_secret" "stripe_webhook_secret" {
   secret_id = "lynxx-stripe-webhook-secret"
   replication {
     auto {}
   }
   depends_on = [google_project_service.apis]
+}
+
+resource "google_secret_manager_secret_version" "stripe_webhook_secret_placeholder" {
+  secret      = google_secret_manager_secret.stripe_webhook_secret.id
+  secret_data = "PLACEHOLDER_NOT_CONFIGURED"
+  lifecycle {
+    ignore_changes = [secret_data, enabled]
+  }
+}
+
+# Session-signing key for the billing service. Auto-populated with 64
+# random bytes on first apply; never rotate while sessions are valid.
+resource "random_password" "session_secret" {
+  length  = 64
+  special = false
+}
+
+resource "google_secret_manager_secret" "session_secret" {
+  secret_id = "lynxx-session-secret"
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_secret_manager_secret_version" "session_secret" {
+  secret      = google_secret_manager_secret.session_secret.id
+  secret_data = random_password.session_secret.result
 }

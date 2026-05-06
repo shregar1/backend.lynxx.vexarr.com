@@ -22,13 +22,22 @@ COPY src ./src
 COPY bench ./bench
 COPY migrations ./migrations
 COPY tests ./tests
-RUN cargo build --release --bin lynx-gateway --bin lynxx-ingress --bin lynxx
+RUN cargo build --release --bin lynx-gateway --bin lynxx-ingress --bin lynxx --bin lynxx-billing
 
 # ---- Shared runtime base ----------------------------------------------------
 FROM debian:bookworm-slim AS runtime-base
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd -r -u 10001 -m lynxx
+
+# ---- Billing service image -------------------------------------------------
+FROM runtime-base AS billing
+COPY --from=builder /build/target/release/lynxx-billing /usr/local/bin/
+COPY --from=builder /build/migrations /etc/lynxx/migrations
+USER lynxx
+WORKDIR /etc/lynxx
+EXPOSE 9100
+ENTRYPOINT ["/usr/local/bin/lynxx-billing"]
 
 # ---- Gateway image ----------------------------------------------------------
 FROM runtime-base AS gateway

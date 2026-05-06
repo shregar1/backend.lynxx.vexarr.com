@@ -83,6 +83,27 @@ jobs:
           cache-to:   type=registry,ref=${{ env.REGISTRY }}/lynxx-ingress:buildcache,mode=max
           platforms: linux/amd64,linux/arm64
 
+      - name: Build & push billing service
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          target: billing
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/lynxx-billing:${{ steps.meta.outputs.tag }}
+            ${{ env.REGISTRY }}/lynxx-billing:latest
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/lynxx-billing:buildcache
+          cache-to:   type=registry,ref=${{ env.REGISTRY }}/lynxx-billing:buildcache,mode=max
+          platforms: linux/amd64
+
+      - name: Deploy billing to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: lynxx-billing
+          region:  ${{ env.REGION }}
+          image:   ${{ env.REGISTRY }}/lynxx-billing:${{ steps.meta.outputs.tag }}
+
   # -------------------------------------------------------------------------
   # 2. Build and deploy website + dashboard to Cloud Run
   # -------------------------------------------------------------------------
@@ -133,7 +154,7 @@ jobs:
             VITE_STRIPE_PUBLISHABLE_KEY=${{ secrets.VITE_STRIPE_PUBLISHABLE_KEY }}
             VITE_STRIPE_PRO_PRICE_ID=${{ secrets.VITE_STRIPE_PRO_PRICE_ID }}
             VITE_STRIPE_BUSINESS_PRICE_ID=${{ secrets.VITE_STRIPE_BUSINESS_PRICE_ID }}
-            VITE_BILLING_API_URL=${{ vars.VITE_BILLING_API_URL || '/api/billing' }}
+            VITE_BILLING_API_URL=${{ vars.VITE_BILLING_API_URL }}
 
       - name: Build & push dashboard
         uses: docker/build-push-action@v5
