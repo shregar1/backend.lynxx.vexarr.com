@@ -21,5 +21,5 @@ infra/terraform/terraform.tfstate.*.backup
 infra/terraform/terraform.tfvars
 infra/terraform/tfplan
 
-# Lynxx license signing private key — NEVER commit
-license_private_key.hex
+# Lynxx licence cache (local offline-grace cache, never commit)
+.lynxx/license.cache.json

@@ -19,8 +19,10 @@ pub struct GatewayConfig {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct LicenseSettings {
+    /// API key issued by the licence server (e.g. `lnx_live_…`). May
+    /// also be set via `LYNXX_API_KEY` env var, which wins on conflict.
     #[serde(default)]
-    pub token: String,
+    pub api_key: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]

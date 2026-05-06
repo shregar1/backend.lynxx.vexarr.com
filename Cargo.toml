@@ -104,12 +104,9 @@ wasmtime = "27"
 # requestBody schemas, and response examples — are compatible.
 openapiv3 = "2"
 
-# License gating — Ed25519 verification of subscription tokens.
-# Public key is embedded in the binary; private key lives only on the
-# license server. Without a valid signed token, the gateway refuses to
-# proxy traffic. See src/license/mod.rs.
-ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
-hex = "0.4"
+# License gating — uses the existing reqwest client to verify an API
+# key against the licence server on startup, with a local 7-day cache
+# for offline restarts. See src/license/mod.rs.
 
 [lib]
 name = "lynx_gateway"
@@ -126,10 +123,6 @@ path = "src/ingress/main.rs"
 [[bin]]
 name = "lynxx"
 path = "src/cli/main.rs"
-
-[[bin]]
-name = "lynxx-license-issue"
-path = "src/license/issuer.rs"
 
 [dev-dependencies]
 tempfile = "3"

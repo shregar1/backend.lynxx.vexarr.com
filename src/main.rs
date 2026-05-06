@@ -141,17 +141,16 @@ async fn async_main() -> anyhow::Result<()> {
     apply_cli_overrides(&mut config, &args);
 
     // ---------- licence gate ----------
-    // Verify the subscription token before doing any other startup work.
-    // Refuses to start without a valid signed token; the embedded pubkey
-    // (src/license/mod.rs) must match the issuer's private key on the
-    // licence server. The token's tier overrides config.gateway.plan_tier.
-    let license = match crate::license::License::load(Some(&config.license.token)) {
+    // Verify the subscription API key before doing any other startup
+    // work. Calls the licence server; on success the result is cached
+    // locally so later restarts work offline for up to 7 days. The
+    // server-reported tier overrides config.gateway.plan_tier.
+    let license = match crate::license::License::load(Some(&config.license.api_key)).await {
         Ok(lic) => {
             tracing::info!(
                 customer_id = %lic.customer_id,
                 tier = %lic.tier.as_str(),
-                expires_at = %lic.expires_at,
-                days_remaining = lic.days_remaining(),
+                from_cache = lic.from_cache,
                 "licence verified"
             );
             config.gateway.plan_tier = lic.tier.as_str().to_string();
@@ -160,8 +159,8 @@ async fn async_main() -> anyhow::Result<()> {
         Err(err) => {
             eprintln!("licence verification failed: {err}");
             eprintln!("This Lynxx binary requires an active subscription.");
-            eprintln!("Set LYNXX_LICENSE=<token> or [license].token in config.toml.");
-            eprintln!("Get a token at https://lynxx.dev/account/license");
+            eprintln!("Set LYNXX_API_KEY=<key> or [license].api_key in config.toml.");
+            eprintln!("Get a key at https://lynxx.dev/account/api-keys");
             return Err(anyhow::anyhow!("licence required: {err}"));
         }
     };
