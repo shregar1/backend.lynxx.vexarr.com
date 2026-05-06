@@ -3,7 +3,7 @@
 -- metadata convention: internal id + external urn + created_at + updated_at + is_deleted.
 
 CREATE TABLE IF NOT EXISTS customers (
-  id                   TEXT PRIMARY KEY,
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
   urn                  TEXT NOT NULL UNIQUE DEFAULT (
     lower(hex(randomblob(4))) || '-' ||
     lower(hex(randomblob(2))) || '-4' ||
@@ -39,7 +39,7 @@ CREATE INDEX IF NOT EXISTS idx_customers_subscription_status ON customers(subscr
 CREATE INDEX IF NOT EXISTS idx_customers_subscription_type ON customers(subscription_type_id);
 
 CREATE TABLE IF NOT EXISTS api_keys (
-  id           TEXT PRIMARY KEY,
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
   urn          TEXT NOT NULL UNIQUE DEFAULT (
     lower(hex(randomblob(4))) || '-' ||
     lower(hex(randomblob(2))) || '-4' ||
@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     substr(lower(hex(randomblob(2))),2) || '-' ||
     lower(hex(randomblob(6)))
   ),
-  customer_id       TEXT NOT NULL,
+  customer_id       INTEGER NOT NULL,
   name              TEXT NOT NULL,
   key_hash          TEXT NOT NULL UNIQUE,
   key_prefix        TEXT NOT NULL,

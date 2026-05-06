@@ -6,7 +6,7 @@
 -- and are NOT NULL so every row resolves cleanly via JOIN.
 
 CREATE TABLE IF NOT EXISTS customers (
-  id                     TEXT PRIMARY KEY,
+  id                     BIGSERIAL PRIMARY KEY,
   urn                    TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
   email                  TEXT NOT NULL UNIQUE,
   password_hash          TEXT NOT NULL,
@@ -23,8 +23,8 @@ CREATE TABLE IF NOT EXISTS customers (
   -- 1 = free in subscription_type_lk (free-forever; no billing relationship).
   subscription_type_id   INTEGER NOT NULL DEFAULT 1 REFERENCES subscription_type_lk(id),
   is_deleted             BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at             TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
-  updated_at             TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_customers_stripe_customer ON customers(stripe_customer_id);
@@ -35,20 +35,20 @@ CREATE INDEX IF NOT EXISTS idx_customers_subscription_status ON customers(subscr
 CREATE INDEX IF NOT EXISTS idx_customers_subscription_type ON customers(subscription_type_id);
 
 CREATE TABLE IF NOT EXISTS api_keys (
-  id                TEXT PRIMARY KEY,
+  id                BIGSERIAL PRIMARY KEY,
   urn               TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
-  customer_id       TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  customer_id       BIGINT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
   name              TEXT NOT NULL,
   key_hash          TEXT NOT NULL UNIQUE,
   key_prefix        TEXT NOT NULL,
   status            TEXT NOT NULL DEFAULT 'active',
   -- 1 = active in api_key_status_lk.
   api_key_status_id INTEGER NOT NULL DEFAULT 1 REFERENCES api_key_status_lk(id),
-  expires_at        TEXT,
+  expires_at        TIMESTAMPTZ,
   is_deleted        BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at        TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
-  updated_at        TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
-  last_used_at      TEXT
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_used_at      TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_customer ON api_keys(customer_id);

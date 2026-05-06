@@ -158,7 +158,7 @@ INSERT OR IGNORE INTO lb_strategy_lk (code, label, description) VALUES
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS services (
-  id TEXT PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   urn TEXT NOT NULL UNIQUE DEFAULT (
     lower(hex(randomblob(4))) || '-' ||
     lower(hex(randomblob(2))) || '-4' ||
@@ -180,7 +180,7 @@ CREATE TABLE IF NOT EXISTS services (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS routes (
-  id TEXT PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   urn TEXT NOT NULL UNIQUE DEFAULT (
     lower(hex(randomblob(4))) || '-' ||
     lower(hex(randomblob(2))) || '-4' ||
@@ -189,7 +189,7 @@ CREATE TABLE IF NOT EXISTS routes (
     substr(lower(hex(randomblob(2))),2) || '-' ||
     lower(hex(randomblob(6)))
   ),
-  service_id TEXT NOT NULL,
+  service_id INTEGER NOT NULL,
   paths TEXT NOT NULL,
   methods TEXT NOT NULL,
   hosts TEXT NOT NULL,
@@ -201,7 +201,7 @@ CREATE TABLE IF NOT EXISTS routes (
   FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS plugins (
-  id TEXT PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   urn TEXT NOT NULL UNIQUE DEFAULT (
     lower(hex(randomblob(4))) || '-' ||
     lower(hex(randomblob(2))) || '-4' ||
@@ -211,8 +211,8 @@ CREATE TABLE IF NOT EXISTS plugins (
     lower(hex(randomblob(6)))
   ),
   name TEXT NOT NULL,
-  service_id TEXT,
-  route_id TEXT,
+  service_id INTEGER,
+  route_id INTEGER,
   enabled INTEGER NOT NULL DEFAULT 1,
   config TEXT NOT NULL,
   is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -222,7 +222,7 @@ CREATE TABLE IF NOT EXISTS plugins (
   FOREIGN KEY (route_id) REFERENCES routes(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS consumers (
-  id TEXT PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   urn TEXT NOT NULL UNIQUE DEFAULT (
     lower(hex(randomblob(4))) || '-' ||
     lower(hex(randomblob(2))) || '-4' ||

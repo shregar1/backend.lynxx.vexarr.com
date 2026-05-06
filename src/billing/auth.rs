@@ -10,7 +10,6 @@ use base64::Engine;
 use chrono::{Duration, Utc};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use uuid::Uuid;
 
 const SESSION_VALID_DAYS: i64 = 30;
 type HmacSha256 = Hmac<Sha256>;
@@ -34,10 +33,9 @@ pub fn verify_password(plain: &str, hash: &str) -> bool {
         .is_ok()
 }
 
-/// Issue a session token for the given customer. The token is a string
-/// of the form `<base64url(payload)>.<base64url(hmac)>` where payload =
-/// `<customer_id>|<expires_at_unix>`.
-pub fn issue_session(customer_id: Uuid, secret: &[u8]) -> String {
+/// Issue a session token for the given customer. Payload format:
+/// `<customer_id_i64>|<expires_at_unix>`, signed with HMAC-SHA256.
+pub fn issue_session(customer_id: i64, secret: &[u8]) -> String {
     let exp = (Utc::now() + Duration::days(SESSION_VALID_DAYS)).timestamp();
     let payload = format!("{}|{}", customer_id, exp);
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
@@ -50,7 +48,7 @@ pub fn issue_session(customer_id: Uuid, secret: &[u8]) -> String {
     )
 }
 
-pub fn verify_session(token: &str, secret: &[u8]) -> Option<Uuid> {
+pub fn verify_session(token: &str, secret: &[u8]) -> Option<i64> {
     let (payload_b64, sig_b64) = token.split_once('.')?;
     let payload = URL_SAFE_NO_PAD.decode(payload_b64.as_bytes()).ok()?;
     let sig = URL_SAFE_NO_PAD.decode(sig_b64.as_bytes()).ok()?;
@@ -65,7 +63,7 @@ pub fn verify_session(token: &str, secret: &[u8]) -> Option<Uuid> {
     if Utc::now().timestamp() > exp {
         return None;
     }
-    Uuid::parse_str(id_str).ok()
+    id_str.parse::<i64>().ok()
 }
 
 #[cfg(test)]
@@ -82,7 +80,7 @@ mod tests {
     #[test]
     fn session_round_trip() {
         let secret = b"test-secret-32-bytes-long-padding";
-        let id = Uuid::new_v4();
+        let id: i64 = 42;
         let token = issue_session(id, secret);
         assert_eq!(verify_session(&token, secret), Some(id));
     }
@@ -90,7 +88,7 @@ mod tests {
     #[test]
     fn session_rejects_tampered() {
         let secret = b"test-secret-32-bytes-long-padding";
-        let id = Uuid::new_v4();
+        let id: i64 = 42;
         let token = issue_session(id, secret);
         let bad = format!("{}x", token);
         assert_eq!(verify_session(&bad, secret), None);
@@ -98,7 +96,7 @@ mod tests {
 
     #[test]
     fn session_rejects_wrong_secret() {
-        let id = Uuid::new_v4();
+        let id: i64 = 42;
         let token = issue_session(id, b"secret-a");
         assert_eq!(verify_session(&token, b"secret-b"), None);
     }

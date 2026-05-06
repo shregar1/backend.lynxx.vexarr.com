@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS admin_tokens (
-  id TEXT PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   urn TEXT NOT NULL UNIQUE DEFAULT (
     lower(hex(randomblob(4))) || '-' ||
     lower(hex(randomblob(2))) || '-4' ||
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     lower(hex(randomblob(6)))
   ),
   ts TEXT NOT NULL,
-  actor_id TEXT,
+  actor_id INTEGER,
   actor_name TEXT,
   actor_role TEXT,
   action TEXT NOT NULL,

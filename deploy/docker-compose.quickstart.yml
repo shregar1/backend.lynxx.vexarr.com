@@ -1,0 +1,43 @@
+# Quickstart: single-node Lynxx with SQLite and built-in ACME.
+#
+# Zero external dependencies. Just run:
+#
+#   docker compose -f docker-compose.quickstart.yml up -d
+#
+# The gateway boots on :80/:443, provisions a Let's Encrypt cert via
+# the built-in ACME challenge responder, and stores everything in a
+# SQLite file on a named volume.
+#
+# For production multi-replica stacks, see docker-compose.production.yml.
+
+name: lynxx
+
+services:
+  gateway:
+    image: ghcr.io/lynxx/lynxx-gateway:${LYNXX_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      LYNXX_CONFIG: /etc/lynxx/config.toml
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - lynxx-data:/var/lib/lynxx
+      - ./quickstart-config.toml:/etc/lynxx/config.toml:ro
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/lynx-gateway", "healthcheck", "--addr", "127.0.0.1:9001"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "${GATEWAY_CPU_LIMIT:-1}"
+          memory: "${GATEWAY_MEM_LIMIT:-256M}"
+
+volumes:
+  lynxx-data:

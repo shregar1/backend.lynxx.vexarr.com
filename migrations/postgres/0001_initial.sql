@@ -27,8 +27,8 @@ CREATE TABLE IF NOT EXISTS user_type_lk (
   label       TEXT NOT NULL,
   description TEXT NOT NULL,
   is_deleted  BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at  TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
-  updated_at  TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO user_type_lk (code, label, description) VALUES
   ('admin',    'Admin',    'Full control over the gateway, including token management.'),
@@ -45,8 +45,8 @@ CREATE TABLE IF NOT EXISTS billing_tier_lk (
   description        TEXT NOT NULL,
   monthly_call_limit BIGINT,                       -- NULL = unlimited
   is_deleted         BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at         TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
-  updated_at         TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO billing_tier_lk (code, label, description, monthly_call_limit) VALUES
   ('free',       'Free',       '1M calls/month · self-host · API key included.',                  1000000),
@@ -62,8 +62,8 @@ CREATE TABLE IF NOT EXISTS subscription_status_lk (
   label       TEXT NOT NULL,
   description TEXT NOT NULL,
   is_deleted  BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at  TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
-  updated_at  TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO subscription_status_lk (code, label, description) VALUES
   ('active',   'Active',   'Subscription is in good standing.'),
@@ -82,8 +82,8 @@ CREATE TABLE IF NOT EXISTS subscription_type_lk (
   label       TEXT NOT NULL,
   description TEXT NOT NULL,
   is_deleted  BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at  TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
-  updated_at  TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO subscription_type_lk (code, label, description) VALUES
   ('free',     'Free',     'Free-forever tier; no billing relationship.'),
@@ -100,8 +100,8 @@ CREATE TABLE IF NOT EXISTS api_key_status_lk (
   label       TEXT NOT NULL,
   description TEXT NOT NULL,
   is_deleted  BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at  TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
-  updated_at  TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO api_key_status_lk (code, label, description) VALUES
   ('active',  'Active',  'Key is live and verifies successfully.'),
@@ -116,8 +116,8 @@ CREATE TABLE IF NOT EXISTS lb_strategy_lk (
   label       TEXT NOT NULL,
   description TEXT NOT NULL,
   is_deleted  BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at  TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
-  updated_at  TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO lb_strategy_lk (code, label, description) VALUES
   ('round-robin',       'Round Robin',       'Cycle through targets in order.'),
@@ -131,7 +131,7 @@ ON CONFLICT (code) DO NOTHING;
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS services (
-  id TEXT PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   urn TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
   name TEXT NOT NULL UNIQUE,
   url TEXT NOT NULL,
@@ -142,54 +142,54 @@ CREATE TABLE IF NOT EXISTS services (
   -- 1 = round-robin (the first row inserted into lb_strategy_lk above).
   lb_strategy_id INTEGER NOT NULL DEFAULT 1 REFERENCES lb_strategy_lk(id),
   is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
-  updated_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS routes (
-  id TEXT PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   urn TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
-  service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  service_id BIGINT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
   paths JSONB NOT NULL,
   methods JSONB NOT NULL,
   hosts JSONB NOT NULL DEFAULT '[]'::jsonb,
   strip_path BOOLEAN NOT NULL DEFAULT TRUE,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
-  updated_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS plugins (
-  id TEXT PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   urn TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
   name TEXT NOT NULL,
-  service_id TEXT REFERENCES services(id) ON DELETE CASCADE,
-  route_id TEXT REFERENCES routes(id) ON DELETE CASCADE,
+  service_id BIGINT REFERENCES services(id) ON DELETE CASCADE,
+  route_id BIGINT REFERENCES routes(id) ON DELETE CASCADE,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   config JSONB NOT NULL,
   is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
-  updated_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS consumers (
-  id TEXT PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   urn TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
   username TEXT NOT NULL UNIQUE,
   custom_id TEXT,
   api_key TEXT UNIQUE,
   is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
-  updated_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS targets (
-  id TEXT PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   urn TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
-  service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  service_id BIGINT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
   url TEXT NOT NULL,
   weight BIGINT NOT NULL DEFAULT 1,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
-  updated_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_routes_service ON routes(service_id);
 CREATE INDEX IF NOT EXISTS idx_plugins_service ON plugins(service_id);

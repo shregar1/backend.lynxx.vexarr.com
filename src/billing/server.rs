@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use super::auth::{hash_password, issue_session, verify_password, verify_session};
 use super::keys::{generate as gen_key, hash_key};
-use super::models::{ApiKeyRecord, Customer};
+use super::models::{Customer, NewApiKey, NewCustomer};
 use super::stripe;
 use super::AppState;
 
@@ -249,10 +249,9 @@ async fn signup(
     }
 
     let hash = hash_password(&req.password)?;
-    let now = Utc::now();
-    let customer = Customer {
-        id: Uuid::new_v4(),
-        urn: Uuid::new_v4(),
+    let urn = Uuid::new_v4();
+    let new_customer = NewCustomer {
+        urn,
         email: email.clone(),
         password_hash: hash,
         name: req.name.filter(|s| !s.is_empty()),
@@ -261,22 +260,19 @@ async fn signup(
         stripe_customer_id: None,
         stripe_subscription_id: None,
         subscription_status: "active".into(),
-        is_deleted: false,
-        created_at: now,
-        updated_at: now,
     };
-    state.repo.create_customer(&customer).await?;
-    let session_token = issue_session(customer.id, &state.session_secret);
+    let customer_id = state.repo.create_customer(&new_customer).await?;
+    let session_token = issue_session(customer_id, &state.session_secret);
 
     let mut resp = SignupResp {
-        customer_urn: customer.urn.to_string(),
+        customer_urn: urn.to_string(),
         session_token,
         api_key: None,
         checkout_url: None,
     };
 
     if tier == "free" {
-        let key = mint_key(&state, customer.id, "Default").await?;
+        let key = mint_key(&state, customer_id, "Default").await?;
         resp.api_key = Some(key);
     } else if let Some(price_id) = state.stripe.price_for_tier(&tier) {
         match stripe::create_checkout_session(
@@ -286,32 +282,30 @@ async fn signup(
             // Stripe `client_reference_id` carries the customer urn back
             // through checkout.session.completed so the webhook handler
             // can resolve it without exposing the internal id.
-            &customer.urn.to_string(),
+            &urn.to_string(),
         )
         .await
         {
             Ok(sess) => resp.checkout_url = sess.url,
             Err(e) => {
                 warn!(error=%e, "stripe checkout failed; account created on free tier");
-                let key = mint_key(&state, customer.id, "Default").await?;
+                let key = mint_key(&state, customer_id, "Default").await?;
                 resp.api_key = Some(key);
             }
         }
     } else {
         warn!(tier=%tier, "stripe price unset; signing up as free tier");
-        let key = mint_key(&state, customer.id, "Default").await?;
+        let key = mint_key(&state, customer_id, "Default").await?;
         resp.api_key = Some(key);
     }
 
-    info!(customer_urn=%customer.urn, tier=%tier, "customer created");
+    info!(customer_urn=%urn, tier=%tier, "customer created");
     Ok(Json(resp))
 }
 
-async fn mint_key(state: &AppState, customer_id: Uuid, name: &str) -> Result<String, ApiError> {
+async fn mint_key(state: &AppState, customer_id: i64, name: &str) -> Result<String, ApiError> {
     let g = gen_key(false);
-    let now = Utc::now();
-    let rec = ApiKeyRecord {
-        id: Uuid::new_v4(),
+    let new_key = NewApiKey {
         urn: Uuid::new_v4(),
         customer_id,
         name: name.to_string(),
@@ -319,12 +313,8 @@ async fn mint_key(state: &AppState, customer_id: Uuid, name: &str) -> Result<Str
         key_prefix: g.prefix,
         status: "active".into(),
         expires_at: None,
-        is_deleted: false,
-        created_at: now,
-        updated_at: now,
-        last_used_at: None,
     };
-    state.repo.insert_api_key(&rec).await?;
+    state.repo.insert_api_key(&new_key).await?;
     Ok(g.raw)
 }
 
@@ -557,51 +547,34 @@ async fn admin_create_internal(
     }
 
     let hash = hash_password(&req.password)?;
-    let now = Utc::now();
-    let customer = Customer {
-        id: Uuid::new_v4(),
-        urn: Uuid::new_v4(),
+    let urn = Uuid::new_v4();
+    let new_customer = NewCustomer {
+        urn,
         email: email.clone(),
         password_hash: hash,
         name: req.name.filter(|s| !s.is_empty()),
         company: req.company.filter(|s| !s.is_empty()),
-        // tier text column kept for backward compatibility; FK columns
-        // get their NOT NULL DEFAULTs from the schema.
-        // For internal devs we want enterprise-tier scope plus the
-        // subscription_type = 'internal' classification — both flow
-        // from the FK columns which the SQL schema defaults to (free,
-        // active, free) and are then UPDATEd here. Doing the bind as
-        // text columns + relying on FK defaults keeps the existing
-        // create_customer query unchanged.
         tier: "enterprise".to_string(),
         stripe_customer_id: None,
         stripe_subscription_id: None,
         subscription_status: "active".into(),
-        is_deleted: false,
-        created_at: now,
-        updated_at: now,
     };
-    state.repo.create_customer(&customer).await?;
+    let customer_id = state.repo.create_customer(&new_customer).await?;
 
-    // Promote the FK lookups to internal/enterprise. update_customer_stripe
-    // also updates `tier` text — pass enterprise to keep the columns
-    // aligned. Stripe ids stay NULL for internal accounts.
+    // Lookup-table FK defaults are 1=free / 1=active / 1=free; promote to
+    // enterprise+active here. A dedicated `set_billing_tier` /
+    // `set_subscription_type` would be cleaner — TODO when the FK
+    // columns are made authoritative.
     state
         .repo
-        .update_customer_stripe(customer.id, None, None, "enterprise", "active")
+        .update_customer_stripe(customer_id, None, None, "enterprise", "active")
         .await?;
-    // TODO: a dedicated `update_customer_subscription_type/billing_tier`
-    // method would be cleaner; for now the SQL DEFAULTs (free / active /
-    // free) cover the FK columns and the text `tier` column is what the
-    // licence endpoint reads. Internal devs flagged via the email-suffix
-    // convention or an explicit follow-up migration when the FK columns
-    // are made authoritative.
 
-    let raw = mint_key(&state, customer.id, "Internal Default").await?;
+    let raw = mint_key(&state, customer_id, "Internal Default").await?;
 
-    info!(customer_urn=%customer.urn, "admin provisioned internal customer");
+    info!(customer_urn=%urn, "admin provisioned internal customer");
     Ok(Json(AdminCreateInternalResp {
-        customer_urn: customer.urn.to_string(),
+        customer_urn: urn.to_string(),
         api_key: raw,
         tier: "enterprise".into(),
         subscription_type: "internal".into(),
@@ -704,9 +677,7 @@ async fn handle_checkout_completed(state: &AppState, obj: &Value) -> Result<(), 
     let existing = state.repo.list_api_keys(customer.id).await?;
     if !existing.iter().any(|k| k.status == "active") {
         let g = gen_key(false);
-        let now = Utc::now();
-        let rec = ApiKeyRecord {
-            id: Uuid::new_v4(),
+        let new_key = NewApiKey {
             urn: Uuid::new_v4(),
             customer_id: customer.id,
             name: "Default".to_string(),
@@ -714,12 +685,8 @@ async fn handle_checkout_completed(state: &AppState, obj: &Value) -> Result<(), 
             key_prefix: g.prefix,
             status: "active".into(),
             expires_at: None,
-            is_deleted: false,
-            created_at: now,
-            updated_at: now,
-            last_used_at: None,
         };
-        state.repo.insert_api_key(&rec).await?;
+        state.repo.insert_api_key(&new_key).await?;
         info!(customer_urn=%customer.urn, tier=%tier, "minted key after checkout");
     } else {
         info!(customer_urn=%customer.urn, tier=%tier, "subscription activated; existing key kept");

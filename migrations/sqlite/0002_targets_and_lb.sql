@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS targets (
-  id TEXT PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   urn TEXT NOT NULL UNIQUE DEFAULT (
     lower(hex(randomblob(4))) || '-' ||
     lower(hex(randomblob(2))) || '-4' ||
@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS targets (
     substr(lower(hex(randomblob(2))),2) || '-' ||
     lower(hex(randomblob(6)))
   ),
-  service_id TEXT NOT NULL,
+  service_id INTEGER NOT NULL,
   url TEXT NOT NULL,
   weight INTEGER NOT NULL DEFAULT 1,
   enabled INTEGER NOT NULL DEFAULT 1,

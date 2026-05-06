@@ -130,6 +130,16 @@ pub struct AcmeConfig {
     /// `false`.
     #[serde(default)]
     pub self_signed: bool,
+    /// When ACME is enabled, also bind a plain HTTP listener on this port
+    /// for HTTP-01 challenges and HTTP→HTTPS redirects. Defaults to `80`.
+    /// Set to `0` to disable the HTTP listener.
+    #[serde(default = "default_acme_http_port")]
+    pub http_port: u16,
+    /// The external HTTPS port visible to clients, used in HTTP→HTTPS
+    /// redirects. Defaults to `443`. Set this when the gateway runs
+    /// behind Docker port mapping (e.g. host 443 → container 8443).
+    #[serde(default = "default_acme_external_port")]
+    pub external_https_port: u16,
 }
 
 impl Default for AcmeConfig {
@@ -141,8 +151,18 @@ impl Default for AcmeConfig {
             directory_url: default_acme_directory_url(),
             storage_dir: String::new(),
             self_signed: false,
+            http_port: default_acme_http_port(),
+            external_https_port: default_acme_external_port(),
         }
     }
+}
+
+fn default_acme_http_port() -> u16 {
+    80
+}
+
+fn default_acme_external_port() -> u16 {
+    443
 }
 
 fn default_acme_directory_url() -> String {

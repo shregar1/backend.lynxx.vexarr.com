@@ -485,6 +485,84 @@ async fn async_main() -> anyhow::Result<()> {
         let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(server_config);
         let serve = axum_server::bind_rustls(proxy_addr_socket, rustls_cfg)
             .serve(proxy_app.into_make_service());
+
+        // Spawn a plain-HTTP listener for ACME HTTP-01 challenges and
+        // HTTP→HTTPS redirects. Only when acme.http_port > 0.
+        let http_port = config.gateway.acme.http_port;
+        let https_port = config.gateway.acme.external_https_port;
+        let acme_http_handle = if http_port > 0 {
+            let acme_mgr = Arc::clone(mgr);
+            Some(tokio::spawn(async move {
+                let addr = format!("0.0.0.0:{http_port}");
+                let listener = match TcpListener::bind(&addr).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::error!("ACME HTTP listener bind {addr}: {e}");
+                        return;
+                    }
+                };
+                tracing::info!("ACME HTTP listener on {addr} (challenges + redirect)");
+
+                let app = axum::Router::new()
+                    .route(
+                        "/.well-known/acme-challenge/{token}",
+                        axum::routing::get({
+                            let mgr = acme_mgr;
+                            move |axum::extract::Path(token): axum::extract::Path<String>| {
+                                let mgr = Arc::clone(&mgr);
+                                async move {
+                                    let full = format!("/.well-known/acme-challenge/{token}");
+                                    match mgr.handle_challenge(&full) {
+                                        Some(auth) => (
+                                            axum::http::StatusCode::OK,
+                                            [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                                            auth,
+                                        )
+                                            .into_response(),
+                                        None => (axum::http::StatusCode::NOT_FOUND, "not found")
+                                            .into_response(),
+                                    }
+                                }
+                            }
+                        }),
+                    )
+                    .fallback(
+                        move |req: axum::http::Request<axum::body::Body>| async move {
+                            // Redirect everything else to HTTPS.
+                            let host = req
+                                .headers()
+                                .get(axum::http::header::HOST)
+                                .and_then(|v| v.to_str().ok())
+                                .map(|h| h.split(':').next().unwrap_or(h))
+                                .unwrap_or("localhost");
+                            let path = req
+                                .uri()
+                                .path_and_query()
+                                .map(|p| p.as_str())
+                                .unwrap_or("/");
+                            let port_suffix = if https_port == 443 {
+                                String::new()
+                            } else {
+                                format!(":{https_port}")
+                            };
+                            let location = format!("https://{host}{port_suffix}{path}");
+                            (
+                                axum::http::StatusCode::MOVED_PERMANENTLY,
+                                [(axum::http::header::LOCATION, location)],
+                                "",
+                            )
+                                .into_response()
+                        },
+                    );
+
+                if let Err(e) = axum::serve(listener, app).await {
+                    tracing::error!("ACME HTTP listener error: {e}");
+                }
+            }))
+        } else {
+            None
+        };
+
         tokio::select! {
             result = serve => {
                 if let Err(e) = result {
@@ -496,6 +574,10 @@ async fn async_main() -> anyhow::Result<()> {
                     tracing::error!("admin server error: {e}");
                 }
             }
+        }
+        // Clean up the HTTP listener if the main server exits.
+        if let Some(h) = acme_http_handle {
+            h.abort();
         }
     } else if config.gateway.tls.enabled {
         // Static TLS — cert/key paths from [gateway.tls].

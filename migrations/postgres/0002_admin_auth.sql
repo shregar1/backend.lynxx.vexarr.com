@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS admin_tokens (
-  id TEXT PRIMARY KEY,
+  id BIGSERIAL PRIMARY KEY,
   urn TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
   name TEXT NOT NULL,
   token_hash TEXT NOT NULL UNIQUE,
@@ -8,10 +8,10 @@ CREATE TABLE IF NOT EXISTS admin_tokens (
   -- elevated tokens must set user_type_id explicitly.
   user_type_id INTEGER NOT NULL DEFAULT 3 REFERENCES user_type_lk(id),
   is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
-  updated_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
-  expires_at TEXT,
-  last_used_at TEXT
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ,
+  last_used_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_admin_tokens_hash ON admin_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_admin_tokens_user_type ON admin_tokens(user_type_id);
@@ -21,8 +21,8 @@ CREATE INDEX IF NOT EXISTS idx_admin_tokens_user_type ON admin_tokens(user_type_
 CREATE TABLE IF NOT EXISTS audit_log (
   id BIGSERIAL PRIMARY KEY,
   urn TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
-  ts TEXT NOT NULL,
-  actor_id TEXT,
+  ts TIMESTAMPTZ NOT NULL,
+  actor_id BIGINT,
   actor_name TEXT,
   actor_role TEXT,
   action TEXT NOT NULL,
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   diff JSONB,
   hash TEXT NOT NULL,
   prev_hash TEXT,
-  created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
 CREATE INDEX IF NOT EXISTS idx_audit_resource ON audit_log(resource_type, resource_id);
