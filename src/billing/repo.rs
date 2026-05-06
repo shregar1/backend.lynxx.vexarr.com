@@ -73,16 +73,38 @@ fn parse_dt(s: &str) -> Result<chrono::DateTime<chrono::Utc>> {
         .with_timezone(&chrono::Utc))
 }
 
+// sqlx::Any does NOT rewrite `?` placeholders to `$1`/`$2` for postgres
+// (https://github.com/launchbadge/sqlx/issues/2773). Queries are written
+// with `?` for sqlite parity and rewritten on the way out for postgres.
+fn ph(query: &str, is_postgres: bool) -> String {
+    if !is_postgres {
+        return query.to_string();
+    }
+    let mut out = String::with_capacity(query.len() + 16);
+    let mut idx = 0;
+    for ch in query.chars() {
+        if ch == '?' {
+            idx += 1;
+            out.push('$');
+            out.push_str(&idx.to_string());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 #[async_trait]
 impl BillingRepo for SqlBillingRepo {
     async fn create_customer(&self, c: &Customer) -> Result<()> {
-        sqlx::query(
+        sqlx::query(&ph(
             "INSERT INTO customers \
              (id, urn, email, password_hash, name, company, tier, \
               stripe_customer_id, stripe_subscription_id, subscription_status, \
               is_deleted, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
+            self.is_postgres,
+        ))
         .bind(c.id.to_string())
         .bind(c.urn.to_string())
         .bind(&c.email)
@@ -102,39 +124,50 @@ impl BillingRepo for SqlBillingRepo {
     }
 
     async fn find_customer_by_email(&self, email: &str) -> Result<Option<Customer>> {
-        let row = sqlx::query("SELECT * FROM customers WHERE email = ? AND is_deleted = ?")
-            .bind(email)
-            .bind(false_for(self.is_postgres))
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query(&ph(
+            "SELECT * FROM customers WHERE email = ? AND is_deleted = ?",
+            self.is_postgres,
+        ))
+        .bind(email)
+        .bind(false_for(self.is_postgres))
+        .fetch_optional(&self.pool)
+        .await?;
         row.map(row_to_customer).transpose()
     }
 
     async fn find_customer(&self, id: Uuid) -> Result<Option<Customer>> {
-        let row = sqlx::query("SELECT * FROM customers WHERE id = ? AND is_deleted = ?")
-            .bind(id.to_string())
-            .bind(false_for(self.is_postgres))
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query(&ph(
+            "SELECT * FROM customers WHERE id = ? AND is_deleted = ?",
+            self.is_postgres,
+        ))
+        .bind(id.to_string())
+        .bind(false_for(self.is_postgres))
+        .fetch_optional(&self.pool)
+        .await?;
         row.map(row_to_customer).transpose()
     }
 
     async fn find_customer_by_urn(&self, urn: Uuid) -> Result<Option<Customer>> {
-        let row = sqlx::query("SELECT * FROM customers WHERE urn = ? AND is_deleted = ?")
-            .bind(urn.to_string())
-            .bind(false_for(self.is_postgres))
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query(&ph(
+            "SELECT * FROM customers WHERE urn = ? AND is_deleted = ?",
+            self.is_postgres,
+        ))
+        .bind(urn.to_string())
+        .bind(false_for(self.is_postgres))
+        .fetch_optional(&self.pool)
+        .await?;
         row.map(row_to_customer).transpose()
     }
 
     async fn find_customer_by_stripe(&self, stripe_customer_id: &str) -> Result<Option<Customer>> {
-        let row =
-            sqlx::query("SELECT * FROM customers WHERE stripe_customer_id = ? AND is_deleted = ?")
-                .bind(stripe_customer_id)
-                .bind(false_for(self.is_postgres))
-                .fetch_optional(&self.pool)
-                .await?;
+        let row = sqlx::query(&ph(
+            "SELECT * FROM customers WHERE stripe_customer_id = ? AND is_deleted = ?",
+            self.is_postgres,
+        ))
+        .bind(stripe_customer_id)
+        .bind(false_for(self.is_postgres))
+        .fetch_optional(&self.pool)
+        .await?;
         row.map(row_to_customer).transpose()
     }
 
@@ -146,11 +179,12 @@ impl BillingRepo for SqlBillingRepo {
         tier: &str,
         status: &str,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query(&ph(
             "UPDATE customers SET stripe_customer_id = COALESCE(?, stripe_customer_id), \
              stripe_subscription_id = ?, tier = ?, subscription_status = ?, updated_at = ? \
              WHERE id = ?",
-        )
+            self.is_postgres,
+        ))
         .bind(stripe_customer_id)
         .bind(stripe_subscription_id)
         .bind(tier)
@@ -163,12 +197,13 @@ impl BillingRepo for SqlBillingRepo {
     }
 
     async fn insert_api_key(&self, k: &ApiKeyRecord) -> Result<()> {
-        sqlx::query(
+        sqlx::query(&ph(
             "INSERT INTO api_keys \
              (id, urn, customer_id, name, key_hash, key_prefix, status, \
               expires_at, is_deleted, created_at, updated_at, last_used_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
+            self.is_postgres,
+        ))
         .bind(k.id.to_string())
         .bind(k.urn.to_string())
         .bind(k.customer_id.to_string())
@@ -187,10 +222,11 @@ impl BillingRepo for SqlBillingRepo {
     }
 
     async fn list_api_keys(&self, customer_id: Uuid) -> Result<Vec<ApiKeyRecord>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query(&ph(
             "SELECT * FROM api_keys WHERE customer_id = ? AND is_deleted = ? \
              ORDER BY created_at DESC",
-        )
+            self.is_postgres,
+        ))
         .bind(customer_id.to_string())
         .bind(false_for(self.is_postgres))
         .fetch_all(&self.pool)
@@ -199,11 +235,14 @@ impl BillingRepo for SqlBillingRepo {
     }
 
     async fn find_api_key_by_hash(&self, hash: &str) -> Result<Option<ApiKeyRecord>> {
-        let row = sqlx::query("SELECT * FROM api_keys WHERE key_hash = ? AND is_deleted = ?")
-            .bind(hash)
-            .bind(false_for(self.is_postgres))
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query(&ph(
+            "SELECT * FROM api_keys WHERE key_hash = ? AND is_deleted = ?",
+            self.is_postgres,
+        ))
+        .bind(hash)
+        .bind(false_for(self.is_postgres))
+        .fetch_optional(&self.pool)
+        .await?;
         row.map(row_to_api_key).transpose()
     }
 
@@ -211,10 +250,11 @@ impl BillingRepo for SqlBillingRepo {
         // Soft-delete: flip is_deleted AND status='revoked'. revoked-but-
         // not-deleted is unreachable in this codebase but the dual flag
         // lets the verify endpoint reject precisely.
-        let res = sqlx::query(
+        let res = sqlx::query(&ph(
             "UPDATE api_keys SET status = 'revoked', is_deleted = ?, updated_at = ? \
              WHERE urn = ? AND customer_id = ?",
-        )
+            self.is_postgres,
+        ))
         .bind(true_for(self.is_postgres))
         .bind(Utc::now().to_rfc3339())
         .bind(urn.to_string())
@@ -225,10 +265,11 @@ impl BillingRepo for SqlBillingRepo {
     }
 
     async fn revoke_all_for_customer(&self, customer_id: Uuid) -> Result<()> {
-        sqlx::query(
+        sqlx::query(&ph(
             "UPDATE api_keys SET status = 'revoked', is_deleted = ?, updated_at = ? \
              WHERE customer_id = ?",
-        )
+            self.is_postgres,
+        ))
         .bind(true_for(self.is_postgres))
         .bind(Utc::now().to_rfc3339())
         .bind(customer_id.to_string())
