@@ -6,8 +6,8 @@
 --   is_deleted  soft-delete flag; reads filter by `is_deleted = false`
 
 CREATE TABLE IF NOT EXISTS services (
-  id UUID PRIMARY KEY,
-  urn UUID NOT NULL UNIQUE DEFAULT gen_random_uuid(),
+  id TEXT PRIMARY KEY,
+  urn TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
   name TEXT NOT NULL UNIQUE,
   url TEXT NOT NULL,
   retries BIGINT NOT NULL DEFAULT 3,
@@ -19,9 +19,9 @@ CREATE TABLE IF NOT EXISTS services (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS routes (
-  id UUID PRIMARY KEY,
-  urn UUID NOT NULL UNIQUE DEFAULT gen_random_uuid(),
-  service_id UUID NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  id TEXT PRIMARY KEY,
+  urn TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
+  service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
   paths JSONB NOT NULL,
   methods JSONB NOT NULL,
   hosts JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -32,11 +32,11 @@ CREATE TABLE IF NOT EXISTS routes (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS plugins (
-  id UUID PRIMARY KEY,
-  urn UUID NOT NULL UNIQUE DEFAULT gen_random_uuid(),
+  id TEXT PRIMARY KEY,
+  urn TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
   name TEXT NOT NULL,
-  service_id UUID REFERENCES services(id) ON DELETE CASCADE,
-  route_id UUID REFERENCES routes(id) ON DELETE CASCADE,
+  service_id TEXT REFERENCES services(id) ON DELETE CASCADE,
+  route_id TEXT REFERENCES routes(id) ON DELETE CASCADE,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   config JSONB NOT NULL,
   is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
@@ -44,8 +44,8 @@ CREATE TABLE IF NOT EXISTS plugins (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS consumers (
-  id UUID PRIMARY KEY,
-  urn UUID NOT NULL UNIQUE DEFAULT gen_random_uuid(),
+  id TEXT PRIMARY KEY,
+  urn TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
   username TEXT NOT NULL UNIQUE,
   custom_id TEXT,
   api_key TEXT UNIQUE,
@@ -54,9 +54,9 @@ CREATE TABLE IF NOT EXISTS consumers (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS targets (
-  id UUID PRIMARY KEY,
-  urn UUID NOT NULL UNIQUE DEFAULT gen_random_uuid(),
-  service_id UUID NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  id TEXT PRIMARY KEY,
+  urn TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
+  service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
   url TEXT NOT NULL,
   weight BIGINT NOT NULL DEFAULT 1,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,

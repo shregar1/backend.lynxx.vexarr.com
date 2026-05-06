@@ -3,8 +3,8 @@
 -- external urn + created_at + updated_at + is_deleted.
 
 CREATE TABLE IF NOT EXISTS customers (
-  id                     UUID PRIMARY KEY,
-  urn                    UUID NOT NULL UNIQUE DEFAULT gen_random_uuid(),
+  id                     TEXT PRIMARY KEY,
+  urn                    TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
   email                  TEXT NOT NULL UNIQUE,
   password_hash          TEXT NOT NULL,
   name                   TEXT,
@@ -23,9 +23,9 @@ CREATE INDEX IF NOT EXISTS idx_customers_stripe_subscription ON customers(stripe
 CREATE INDEX IF NOT EXISTS idx_customers_urn ON customers(urn);
 
 CREATE TABLE IF NOT EXISTS api_keys (
-  id            UUID PRIMARY KEY,
-  urn           UUID NOT NULL UNIQUE DEFAULT gen_random_uuid(),
-  customer_id   UUID NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  id            TEXT PRIMARY KEY,
+  urn           TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
+  customer_id   TEXT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
   name          TEXT NOT NULL,
   key_hash      TEXT NOT NULL UNIQUE,
   key_prefix    TEXT NOT NULL,

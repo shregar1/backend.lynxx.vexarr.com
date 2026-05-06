@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS admin_tokens (
-  id UUID PRIMARY KEY,
-  urn UUID NOT NULL UNIQUE DEFAULT gen_random_uuid(),
+  id TEXT PRIMARY KEY,
+  urn TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
   name TEXT NOT NULL,
   token_hash TEXT NOT NULL UNIQUE,
   role TEXT NOT NULL,
@@ -16,9 +16,9 @@ CREATE INDEX IF NOT EXISTS idx_admin_tokens_hash ON admin_tokens(token_hash);
 -- can't be soft-deleted without invalidating downstream chain hashes).
 CREATE TABLE IF NOT EXISTS audit_log (
   id BIGSERIAL PRIMARY KEY,
-  urn UUID NOT NULL UNIQUE DEFAULT gen_random_uuid(),
+  urn TEXT NOT NULL UNIQUE DEFAULT (gen_random_uuid()::text),
   ts TIMESTAMPTZ NOT NULL,
-  actor_id UUID,
+  actor_id TEXT,
   actor_name TEXT,
   actor_role TEXT,
   action TEXT NOT NULL,
