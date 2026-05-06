@@ -279,14 +279,14 @@ impl BillingRepo for SqlBillingRepo {
     }
 }
 
-// sqlx::Any binds booleans as integers for sqlite and as bool for
-// postgres. Use the right Rust type per backend so we don't trigger
-// "type mismatch" errors at runtime.
-fn false_for(_is_postgres: bool) -> i32 {
-    0
+// sqlx::Any maps Rust `bool` to BOOLEAN on postgres and INTEGER 0/1 on
+// sqlite. Always bind `bool` — never `i32` — for is_deleted parameters
+// or postgres rejects with "operator does not exist: boolean = integer".
+fn false_for(_is_postgres: bool) -> bool {
+    false
 }
-fn true_for(_is_postgres: bool) -> i32 {
-    1
+fn true_for(_is_postgres: bool) -> bool {
+    true
 }
 
 fn parse_uuid(s: &str) -> Result<Uuid> {
@@ -315,7 +315,12 @@ fn row_to_customer(row: sqlx::any::AnyRow) -> Result<Customer> {
             .ok()
             .flatten(),
         subscription_status: row.try_get("subscription_status")?,
-        is_deleted: row.try_get::<i32, _>("is_deleted").unwrap_or(0) != 0,
+        // is_deleted is BOOLEAN on postgres and INTEGER 0/1 on sqlite.
+        // Try bool first, fall back to int — covers both.
+        is_deleted: row
+            .try_get::<bool, _>("is_deleted")
+            .or_else(|_| row.try_get::<i32, _>("is_deleted").map(|v| v != 0))
+            .unwrap_or(false),
         created_at: parse_dt(&created_at)?,
         updated_at: parse_dt(&updated_at)?,
     })
@@ -338,7 +343,12 @@ fn row_to_api_key(row: sqlx::any::AnyRow) -> Result<ApiKeyRecord> {
         key_prefix: row.try_get("key_prefix")?,
         status: row.try_get("status")?,
         expires_at: expires_at.as_deref().map(parse_dt).transpose()?,
-        is_deleted: row.try_get::<i32, _>("is_deleted").unwrap_or(0) != 0,
+        // is_deleted is BOOLEAN on postgres and INTEGER 0/1 on sqlite.
+        // Try bool first, fall back to int — covers both.
+        is_deleted: row
+            .try_get::<bool, _>("is_deleted")
+            .or_else(|_| row.try_get::<i32, _>("is_deleted").map(|v| v != 0))
+            .unwrap_or(false),
         created_at: parse_dt(&created_at)?,
         updated_at: parse_dt(&updated_at)?,
         last_used_at: last_used_at.as_deref().map(parse_dt).transpose()?,
