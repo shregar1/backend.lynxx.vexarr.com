@@ -364,4 +364,3 @@ fn classify(err: &str) -> &'static str {
         "other"
     }
 }
-

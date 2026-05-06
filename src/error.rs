@@ -103,9 +103,7 @@ impl IntoResponse for GatewayError {
                 circuit_open = true;
                 (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
             }
-            GatewayError::QuotaExceeded => {
-                (StatusCode::TOO_MANY_REQUESTS, self.to_string())
-            }
+            GatewayError::QuotaExceeded => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
             GatewayError::PluginError(e) => match e {
                 PluginError::RateLimited => {
                     (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded".into())

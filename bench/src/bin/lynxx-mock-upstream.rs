@@ -22,7 +22,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "lynxx-mock-upstream", version, about = "Controllable mock HTTP upstream for chaos tests")]
+#[command(
+    name = "lynxx-mock-upstream",
+    version,
+    about = "Controllable mock HTTP upstream for chaos tests"
+)]
 struct Cli {
     /// Listen port on 127.0.0.1.
     #[arg(long, default_value_t = 19090)]
@@ -65,7 +69,10 @@ fn parse_status_dist(s: &str) -> Result<StatusDist> {
         .map(|p| p.trim().parse::<u32>())
         .collect::<Result<_, _>>()?;
     if parts.len() != 3 {
-        anyhow::bail!("--status-distribution needs exactly 3 comma-separated values, got {}", parts.len());
+        anyhow::bail!(
+            "--status-distribution needs exactly 3 comma-separated values, got {}",
+            parts.len()
+        );
     }
     if parts.iter().sum::<u32>() != 100 {
         anyhow::bail!("--status-distribution values must sum to 100");
@@ -111,12 +118,20 @@ fn pick_status(d: &StatusDist) -> StatusCode {
     let mut rng = rand::thread_rng();
     match class {
         0 => StatusCode::OK,
-        1 => *[StatusCode::BAD_REQUEST, StatusCode::UNAUTHORIZED, StatusCode::NOT_FOUND]
-            .get(rng.gen_range(0..3))
-            .unwrap(),
-        _ => *[StatusCode::INTERNAL_SERVER_ERROR, StatusCode::BAD_GATEWAY, StatusCode::SERVICE_UNAVAILABLE]
-            .get(rng.gen_range(0..3))
-            .unwrap(),
+        1 => *[
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::NOT_FOUND,
+        ]
+        .get(rng.gen_range(0..3))
+        .unwrap(),
+        _ => *[
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ]
+        .get(rng.gen_range(0..3))
+        .unwrap(),
     }
 }
 

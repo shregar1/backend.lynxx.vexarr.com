@@ -27,10 +27,11 @@ fn build(cfg: serde_json::Value) -> GraphqlGuardPlugin {
 
 fn assert_short_circuit(err: PluginError, status: u16, code: &str) {
     match err {
-        PluginError::ShortCircuit { status: s, body, .. } => {
+        PluginError::ShortCircuit {
+            status: s, body, ..
+        } => {
             assert_eq!(s, status, "status mismatch");
-            let parsed: serde_json::Value =
-                serde_json::from_slice(&body).expect("body is JSON");
+            let parsed: serde_json::Value = serde_json::from_slice(&body).expect("body is JSON");
             let actual = parsed
                 .pointer("/errors/0/extensions/code")
                 .and_then(|v| v.as_str())
@@ -218,7 +219,10 @@ async fn non_graphql_request_passes_through() {
     let mut req = req_with_body(json!({ "hello": "world" }));
     let res = p.on_request(&mut req).await;
     assert!(res.is_ok(), "non-graphql json should pass: {res:?}");
-    assert!(req.headers().get("x-lynxx-graphql-operation-type").is_none());
+    assert!(req
+        .headers()
+        .get("x-lynxx-graphql-operation-type")
+        .is_none());
 }
 
 #[tokio::test]

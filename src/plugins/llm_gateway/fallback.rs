@@ -49,10 +49,7 @@ pub async fn dispatch(
     let mut last: Option<DispatchResult> = None;
     for (i, p) in providers.iter().enumerate() {
         if i > 0 {
-            on_fallback(
-                &providers[i - 1].name,
-                &p.name,
-            );
+            on_fallback(&providers[i - 1].name, &p.name);
         }
         // Build the URL by joining base_url + path. We deliberately don't try
         // to be clever about double slashes — operators can fix their config
@@ -110,7 +107,8 @@ pub async fn dispatch(
                     provider: p.name.clone(),
                     status: 502,
                     headers: vec![("Content-Type".into(), "application/json".into())],
-                    body: format!(r#"{{"error":{{"code":"upstream_error","message":"{e}"}}}}"#).into_bytes(),
+                    body: format!(r#"{{"error":{{"code":"upstream_error","message":"{e}"}}}}"#)
+                        .into_bytes(),
                     fallback_count: i as u32,
                     exhausted: false,
                 });
@@ -132,7 +130,10 @@ pub async fn dispatch(
                     provider: p.name.clone(),
                     status: 502,
                     headers,
-                    body: format!(r#"{{"error":{{"code":"upstream_body_error","message":"{e}"}}}}"#).into_bytes(),
+                    body: format!(
+                        r#"{{"error":{{"code":"upstream_body_error","message":"{e}"}}}}"#
+                    )
+                    .into_bytes(),
                     fallback_count: i as u32,
                     exhausted: false,
                 });

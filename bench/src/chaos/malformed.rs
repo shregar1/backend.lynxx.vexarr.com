@@ -12,7 +12,7 @@ use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::chaos::{fmt_count, find_gateway_pid, rss_kb, AdminClient, Args, Report};
+use crate::chaos::{find_gateway_pid, fmt_count, rss_kb, AdminClient, Args, Report};
 
 const SCENARIO: &str = "malformed";
 

@@ -18,7 +18,11 @@ use lynxx_bench::chaos::{
 };
 
 #[derive(Parser, Debug)]
-#[command(name = "lynxx-chaos", version, about = "Chaos / soak / battle-test suite for the Lynxx gateway")]
+#[command(
+    name = "lynxx-chaos",
+    version,
+    about = "Chaos / soak / battle-test suite for the Lynxx gateway"
+)]
 struct Cli {
     /// Proxy listener URL (data plane).
     #[arg(long, default_value = "http://127.0.0.1:9000", global = true)]

@@ -124,7 +124,10 @@ pub fn admin_router(
 
     // ---- token management (admin) ----
     let tokens = Router::new()
-        .route("/tokens", get(routes::list_tokens).post(routes::create_token))
+        .route(
+            "/tokens",
+            get(routes::list_tokens).post(routes::create_token),
+        )
         .route(
             "/tokens/:id",
             put(routes::update_token).delete(routes::delete_token),
@@ -159,4 +162,3 @@ fn admin_cors() -> CorsLayer {
         .allow_origin(Any)
         .expose_headers(Any)
 }
-

@@ -90,7 +90,13 @@ impl Plugin for OpenApiDriftPlugin {
             .headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok())
-            .map(|ct| ct.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json"))
+            .map(|ct| {
+                ct.split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .eq_ignore_ascii_case("application/json")
+            })
             .unwrap_or(false);
         if !is_json {
             return Ok(());
@@ -114,8 +120,7 @@ impl Plugin for OpenApiDriftPlugin {
             }
             Err(_) => {
                 // Body wasn't JSON despite the header — record and move on.
-                self.inner
-                    .record(&ctx.method, &ctx.path, "non_json_body");
+                self.inner.record(&ctx.method, &ctx.path, "non_json_body");
             }
         }
 

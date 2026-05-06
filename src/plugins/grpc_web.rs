@@ -85,9 +85,7 @@ impl Plugin for GrpcWebPlugin {
         // Access-Control-Request-Method header set; respond with the allow
         // headers required by gRPC-Web before the upstream is contacted.
         if req.method() == axum::http::Method::OPTIONS
-            && req
-                .headers()
-                .contains_key("access-control-request-method")
+            && req.headers().contains_key("access-control-request-method")
         {
             let allow_origin = self.pick_allow_origin(if origin_str.is_empty() {
                 None
@@ -102,8 +100,7 @@ impl Plugin for GrpcWebPlugin {
                 ),
                 (
                     "access-control-allow-headers".into(),
-                    "content-type,x-grpc-web,x-user-agent,grpc-timeout,authorization"
-                        .into(),
+                    "content-type,x-grpc-web,x-user-agent,grpc-timeout,authorization".into(),
                 ),
                 (
                     "access-control-expose-headers".into(),
@@ -138,9 +135,9 @@ impl Plugin for GrpcWebPlugin {
                 .await
                 .map_err(|e| PluginError::Internal(format!("grpc-web body collect: {e}")))?
                 .to_bytes();
-            let decoded = B64.decode(bytes.as_ref()).map_err(|e| {
-                PluginError::Internal(format!("grpc-web: base64 decode: {e}"))
-            })?;
+            let decoded = B64
+                .decode(bytes.as_ref())
+                .map_err(|e| PluginError::Internal(format!("grpc-web: base64 decode: {e}")))?;
             *req.body_mut() = axum::body::Body::from(decoded);
         }
 
@@ -185,8 +182,7 @@ impl Plugin for GrpcWebPlugin {
             Some(&origin)
         });
         if let Ok(v) = HeaderValue::from_str(&allow_origin) {
-            resp.headers_mut()
-                .insert("access-control-allow-origin", v);
+            resp.headers_mut().insert("access-control-allow-origin", v);
         }
         resp.headers_mut().insert(
             "access-control-expose-headers",

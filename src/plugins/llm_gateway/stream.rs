@@ -39,7 +39,11 @@ pub struct StreamUsage {
 /// prefix.
 pub fn is_event_stream(content_type: Option<&str>) -> bool {
     content_type
-        .map(|c| c.trim_start().to_ascii_lowercase().starts_with("text/event-stream"))
+        .map(|c| {
+            c.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("text/event-stream")
+        })
         .unwrap_or(false)
 }
 
@@ -51,7 +55,10 @@ pub fn analyze_sse_body(model: &str, body: &[u8]) -> StreamUsage {
     let s = std::str::from_utf8(body).unwrap_or("");
     for raw_line in s.split('\n') {
         let line = raw_line.trim_end_matches('\r');
-        let Some(payload) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) else {
+        let Some(payload) = line
+            .strip_prefix("data: ")
+            .or_else(|| line.strip_prefix("data:"))
+        else {
             continue;
         };
         let payload = payload.trim();
@@ -75,16 +82,25 @@ pub fn analyze_sse_body(model: &str, body: &[u8]) -> StreamUsage {
 
         // Anthropic streaming: type=="content_block_delta" with delta.text
         if v.get("type").and_then(|t| t.as_str()) == Some("content_block_delta") {
-            if let Some(text) = v.get("delta").and_then(|d| d.get("text")).and_then(|t| t.as_str())
+            if let Some(text) = v
+                .get("delta")
+                .and_then(|d| d.get("text"))
+                .and_then(|t| t.as_str())
             {
                 out.completion_tokens += tokens::count_text(model, text) as u64;
             }
         }
 
         // Final usage block (OpenAI w/ stream_options, Anthropic message_stop)
-        if let Some(usage) = v.get("usage").or_else(|| v.get("message").and_then(|m| m.get("usage")))
+        if let Some(usage) = v
+            .get("usage")
+            .or_else(|| v.get("message").and_then(|m| m.get("usage")))
         {
-            if let Some(p) = usage.get("prompt_tokens").or_else(|| usage.get("input_tokens")).and_then(|x| x.as_u64()) {
+            if let Some(p) = usage
+                .get("prompt_tokens")
+                .or_else(|| usage.get("input_tokens"))
+                .and_then(|x| x.as_u64())
+            {
                 out.upstream_prompt_tokens = Some(p);
             }
             if let Some(c) = usage
@@ -130,7 +146,8 @@ mod tests {
 
     #[test]
     fn picks_up_upstream_usage_block() {
-        let body = b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":13}}\n\n";
+        let body =
+            b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":13}}\n\n";
         let u = analyze_sse_body("gpt-4o", body);
         assert_eq!(u.upstream_prompt_tokens, Some(7));
         assert_eq!(u.upstream_completion_tokens, Some(13));

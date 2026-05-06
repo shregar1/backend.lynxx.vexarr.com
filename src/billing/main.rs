@@ -25,8 +25,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let database_url = env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "sqlite://lynxx.db?mode=rwc".to_string());
+    let database_url =
+        env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://lynxx.db?mode=rwc".to_string());
     let bind: SocketAddr = env::var("LYNXX_BILLING_BIND")
         .unwrap_or_else(|_| "0.0.0.0:9100".to_string())
         .parse()

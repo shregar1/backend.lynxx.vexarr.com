@@ -65,10 +65,7 @@ impl SplunkPlugin {
             .get("verify_tls")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let batch_size = cfg
-            .get("batch_size")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(50) as usize;
+        let batch_size = cfg.get("batch_size").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
         let flush_interval_ms = cfg
             .get("flush_interval_ms")
             .and_then(|v| v.as_u64())

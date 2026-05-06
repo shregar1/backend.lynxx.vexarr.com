@@ -18,8 +18,7 @@ use crate::db::Repository;
 use crate::error::{GatewayError, PluginError};
 use crate::plugins::{BoxBody, Plugin};
 use crate::recording::{
-    redact, ContentAddressedStore, RecordedRequest, RecordedResponse, Recording,
-    RecordingIndexRow,
+    redact, ContentAddressedStore, RecordedRequest, RecordedResponse, Recording, RecordingIndexRow,
 };
 use async_trait::async_trait;
 use axum::http::{HeaderValue, Request, Response};
@@ -143,14 +142,14 @@ impl Plugin for RequestRecorderPlugin {
         redact::redact_headers(&mut headers, &self.cfg.redact_headers);
 
         // Body redaction only applies to JSON; non-JSON bodies are recorded as-is.
-        let body_for_record: Vec<u8> =
-            match serde_json::from_slice::<serde_json::Value>(&truncated) {
-                Ok(mut v) => {
-                    redact::redact_body_paths(&mut v, &self.cfg.redact_body_paths);
-                    serde_json::to_vec(&v).unwrap_or_else(|_| truncated.clone())
-                }
-                Err(_) => truncated.clone(),
-            };
+        let body_for_record: Vec<u8> = match serde_json::from_slice::<serde_json::Value>(&truncated)
+        {
+            Ok(mut v) => {
+                redact::redact_body_paths(&mut v, &self.cfg.redact_body_paths);
+                serde_json::to_vec(&v).unwrap_or_else(|_| truncated.clone())
+            }
+            Err(_) => truncated.clone(),
+        };
 
         // Prefer the consumer the proxy already resolved (from the
         // X-Consumer-Username request header at match time); fall back to
@@ -235,10 +234,7 @@ impl Plugin for RequestRecorderPlugin {
             Ok(c) => c.to_bytes(),
             Err(e) => {
                 tracing::debug!(error = %e, "request-recorder: collect resp body");
-                *resp = Response::from_parts(
-                    parts,
-                    BoxBody::new(hyper::body::Bytes::new()),
-                );
+                *resp = Response::from_parts(parts, BoxBody::new(hyper::body::Bytes::new()));
                 return Ok(());
             }
         };
@@ -368,10 +364,7 @@ mod tests {
         ) -> Result<Option<crate::models::Service>, GatewayError> {
             Ok(None)
         }
-        async fn create_service(
-            &self,
-            _svc: &crate::models::Service,
-        ) -> Result<(), GatewayError> {
+        async fn create_service(&self, _svc: &crate::models::Service) -> Result<(), GatewayError> {
             Ok(())
         }
         async fn update_service(
@@ -394,10 +387,7 @@ mod tests {
         ) -> Result<Option<crate::models::Route>, GatewayError> {
             Ok(None)
         }
-        async fn create_route(
-            &self,
-            _route: &crate::models::Route,
-        ) -> Result<(), GatewayError> {
+        async fn create_route(&self, _route: &crate::models::Route) -> Result<(), GatewayError> {
             Ok(())
         }
         async fn update_route(
@@ -411,9 +401,7 @@ mod tests {
             Ok(false)
         }
 
-        async fn list_plugins(
-            &self,
-        ) -> Result<Vec<crate::models::PluginInstance>, GatewayError> {
+        async fn list_plugins(&self) -> Result<Vec<crate::models::PluginInstance>, GatewayError> {
             Ok(vec![])
         }
         async fn get_plugin(
@@ -467,10 +455,7 @@ mod tests {
         ) -> Result<Option<crate::models::Target>, GatewayError> {
             Ok(None)
         }
-        async fn create_target(
-            &self,
-            _t: &crate::models::Target,
-        ) -> Result<(), GatewayError> {
+        async fn create_target(&self, _t: &crate::models::Target) -> Result<(), GatewayError> {
             Ok(())
         }
         async fn update_target(
@@ -494,9 +479,7 @@ mod tests {
             Ok(())
         }
 
-        async fn list_admin_tokens(
-            &self,
-        ) -> Result<Vec<crate::auth::AdminToken>, GatewayError> {
+        async fn list_admin_tokens(&self) -> Result<Vec<crate::auth::AdminToken>, GatewayError> {
             Ok(vec![])
         }
         async fn get_admin_token_by_hash(
@@ -570,10 +553,7 @@ mod tests {
             unimplemented!("test stub")
         }
 
-        async fn get_quota_usage(
-            &self,
-            _period: &str,
-        ) -> Result<Option<(u64, u64)>, GatewayError> {
+        async fn get_quota_usage(&self, _period: &str) -> Result<Option<(u64, u64)>, GatewayError> {
             Ok(None)
         }
         async fn upsert_quota_usage(
@@ -585,10 +565,7 @@ mod tests {
             Ok(())
         }
 
-        async fn append_recording(
-            &self,
-            _row: &RecordingIndexRow,
-        ) -> Result<(), GatewayError> {
+        async fn append_recording(&self, _row: &RecordingIndexRow) -> Result<(), GatewayError> {
             Ok(())
         }
         async fn list_recordings(

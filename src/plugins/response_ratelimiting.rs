@@ -136,8 +136,7 @@ impl Plugin for ResponseRateLimitingPlugin {
         // Surface the limit to the client so they can self-throttle.
         resp.headers_mut().remove(HDR_KEY);
         if let Ok(v) = axum::http::HeaderValue::from_str(&self.limit_per_second.to_string()) {
-            resp.headers_mut()
-                .insert("x-ratelimit-response-limit", v);
+            resp.headers_mut().insert("x-ratelimit-response-limit", v);
         }
         Ok(())
     }

@@ -53,7 +53,10 @@ mod tests {
         let mut t = HashMap::new();
         t.insert(
             "gpt-4o".to_string(),
-            ModelCostCfg { input_per_1k: 0.0025, output_per_1k: 0.01 },
+            ModelCostCfg {
+                input_per_1k: 0.0025,
+                output_per_1k: 0.01,
+            },
         );
         let c = CostTable::new(true, t);
         // 1000 input + 500 output = 0.0025 + 0.005 = 0.0075
@@ -72,7 +75,10 @@ mod tests {
         let mut t = HashMap::new();
         t.insert(
             "x".to_string(),
-            ModelCostCfg { input_per_1k: 1.0, output_per_1k: 1.0 },
+            ModelCostCfg {
+                input_per_1k: 1.0,
+                output_per_1k: 1.0,
+            },
         );
         let c = CostTable::new(false, t);
         assert_eq!(c.dollars("x", 1000, 1000), 0.0);

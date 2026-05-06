@@ -134,7 +134,11 @@ impl Plugin for OpenTelemetryPlugin {
     }
 
     async fn on_response(&self, resp: &mut Response<BoxBody>) -> Result<(), PluginError> {
-        let trace_id = match resp.headers().get(HDR_TRACE_ID).and_then(|v| v.to_str().ok()) {
+        let trace_id = match resp
+            .headers()
+            .get(HDR_TRACE_ID)
+            .and_then(|v| v.to_str().ok())
+        {
             Some(t) => t.to_string(),
             None => return Ok(()),
         };

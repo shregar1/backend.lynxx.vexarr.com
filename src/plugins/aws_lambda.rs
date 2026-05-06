@@ -35,7 +35,9 @@ impl AwsLambdaPlugin {
         let function_name = cfg
             .get("function_name")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| GatewayError::BadRequest("aws-lambda: `function_name` is required".into()))?
+            .ok_or_else(|| {
+                GatewayError::BadRequest("aws-lambda: `function_name` is required".into())
+            })?
             .to_string();
         let region = cfg
             .get("region")
@@ -89,8 +91,8 @@ impl AwsLambdaPlugin {
         self.client
             .get_or_init(|| async {
                 let region = aws_config::Region::new(self.region.clone());
-                let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
-                    .region(region);
+                let mut loader =
+                    aws_config::defaults(aws_config::BehaviorVersion::latest()).region(region);
                 if let (Some(id), Some(secret)) =
                     (&self.aws_access_key_id, &self.aws_secret_access_key)
                 {
@@ -169,43 +171,46 @@ impl Plugin for AwsLambdaPlugin {
             .map_err(|e| PluginError::Internal(format!("aws-lambda invoke: {e}")))?;
 
         let status = resp.status_code() as u16;
-        let body_blob = resp.payload().map(|b| b.as_ref().to_vec()).unwrap_or_default();
+        let body_blob = resp
+            .payload()
+            .map(|b| b.as_ref().to_vec())
+            .unwrap_or_default();
 
         // If the Lambda returned an API-GW-shaped response, surface its
         // statusCode + body verbatim. Otherwise treat the whole payload as
         // the response body with status 200.
-        let (status_out, headers_out, body_out) = match serde_json::from_slice::<serde_json::Value>(
-            &body_blob,
-        ) {
-            Ok(v) if v.get("statusCode").is_some() => {
-                let s = v
-                    .get("statusCode")
-                    .and_then(|x| x.as_u64())
-                    .unwrap_or(status as u64) as u16;
-                let b = v
-                    .get("body")
-                    .map(|x| match x {
-                        serde_json::Value::String(s) => s.clone().into_bytes(),
-                        other => other.to_string().into_bytes(),
-                    })
-                    .unwrap_or_default();
-                let mut hdrs = vec![("Content-Type".to_string(), "application/json".to_string())];
-                if let Some(obj) = v.get("headers").and_then(|h| h.as_object()) {
-                    hdrs.clear();
-                    for (k, val) in obj {
-                        if let Some(s) = val.as_str() {
-                            hdrs.push((k.clone(), s.to_string()));
+        let (status_out, headers_out, body_out) =
+            match serde_json::from_slice::<serde_json::Value>(&body_blob) {
+                Ok(v) if v.get("statusCode").is_some() => {
+                    let s = v
+                        .get("statusCode")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(status as u64) as u16;
+                    let b = v
+                        .get("body")
+                        .map(|x| match x {
+                            serde_json::Value::String(s) => s.clone().into_bytes(),
+                            other => other.to_string().into_bytes(),
+                        })
+                        .unwrap_or_default();
+                    let mut hdrs =
+                        vec![("Content-Type".to_string(), "application/json".to_string())];
+                    if let Some(obj) = v.get("headers").and_then(|h| h.as_object()) {
+                        hdrs.clear();
+                        for (k, val) in obj {
+                            if let Some(s) = val.as_str() {
+                                hdrs.push((k.clone(), s.to_string()));
+                            }
                         }
                     }
+                    (s, hdrs, b)
                 }
-                (s, hdrs, b)
-            }
-            _ => (
-                if status == 0 { 200 } else { status },
-                vec![("Content-Type".to_string(), "application/json".to_string())],
-                body_blob,
-            ),
-        };
+                _ => (
+                    if status == 0 { 200 } else { status },
+                    vec![("Content-Type".to_string(), "application/json".to_string())],
+                    body_blob,
+                ),
+            };
 
         Err(PluginError::ShortCircuit {
             status: status_out,

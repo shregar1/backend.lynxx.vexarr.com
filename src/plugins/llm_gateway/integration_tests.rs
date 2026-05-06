@@ -81,7 +81,11 @@ fn build_request(body: serde_json::Value) -> Request<Body> {
 
 fn unwrap_short_circuit(err: PluginError) -> (u16, Vec<(String, String)>, Vec<u8>) {
     match err {
-        PluginError::ShortCircuit { status, headers, body } => (status, headers, body),
+        PluginError::ShortCircuit {
+            status,
+            headers,
+            body,
+        } => (status, headers, body),
         other => panic!("expected ShortCircuit, got {other:?}"),
     }
 }
@@ -107,16 +111,21 @@ async fn cache_hit_on_second_call() {
     let err1 = plugin.on_request(&mut r1).await.expect_err("short-circuit");
     let (s1, h1, _) = unwrap_short_circuit(err1);
     assert_eq!(s1, 200);
-    assert!(h1.iter().any(|(k, v)| k == "x-lynxx-llm-cache" && v == "MISS"));
+    assert!(h1
+        .iter()
+        .any(|(k, v)| k == "x-lynxx-llm-cache" && v == "MISS"));
     assert!(h1.iter().any(|(k, _)| k == "x-lynxx-llm-tokens-in"));
-    assert!(h1.iter().any(|(k, v)| k == "x-lynxx-llm-tokens-out" && v == "5"));
+    assert!(h1
+        .iter()
+        .any(|(k, v)| k == "x-lynxx-llm-tokens-out" && v == "5"));
 
     let mut r2 = build_request(body);
     let err2 = plugin.on_request(&mut r2).await.expect_err("short-circuit");
     let (s2, h2, _) = unwrap_short_circuit(err2);
     assert_eq!(s2, 200);
     assert!(
-        h2.iter().any(|(k, v)| k == "x-lynxx-llm-cache" && v == "HIT"),
+        h2.iter()
+            .any(|(k, v)| k == "x-lynxx-llm-cache" && v == "HIT"),
         "second request should be a cache hit"
     );
 }
@@ -163,7 +172,9 @@ async fn pii_email_is_redacted_before_forwarding() {
     let mut r = build_request(body);
     let err = plugin.on_request(&mut r).await.expect_err("short-circuit");
     let (_, headers, _) = unwrap_short_circuit(err);
-    assert!(headers.iter().any(|(k, v)| k == "x-lynxx-llm-redacted" && v == "1"));
+    assert!(headers
+        .iter()
+        .any(|(k, v)| k == "x-lynxx-llm-redacted" && v == "1"));
 
     let recorded = server.received_requests().await.expect("received requests");
     assert_eq!(recorded.len(), 1);
@@ -202,6 +213,10 @@ async fn fallback_walks_chain_on_5xx() {
     let err = plugin.on_request(&mut r).await.expect_err("short-circuit");
     let (status, headers, _) = unwrap_short_circuit(err);
     assert_eq!(status, 200);
-    assert!(headers.iter().any(|(k, v)| k == "x-lynxx-llm-provider" && v == "secondary"));
-    assert!(headers.iter().any(|(k, v)| k == "x-lynxx-llm-fallback" && v == "1"));
+    assert!(headers
+        .iter()
+        .any(|(k, v)| k == "x-lynxx-llm-provider" && v == "secondary"));
+    assert!(headers
+        .iter()
+        .any(|(k, v)| k == "x-lynxx-llm-fallback" && v == "1"));
 }

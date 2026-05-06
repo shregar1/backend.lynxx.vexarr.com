@@ -127,9 +127,9 @@ fn build_client_verifier(
                 settings.client_ca_path
             ))
         })?;
-        roots.add(cert).map_err(|e| {
-            GatewayError::Internal(format!("add client ca cert: {e}"))
-        })?;
+        roots
+            .add(cert)
+            .map_err(|e| GatewayError::Internal(format!("add client ca cert: {e}")))?;
     }
     if roots.is_empty() {
         return Err(GatewayError::Internal(format!(
@@ -178,7 +178,8 @@ impl ClientCertVerifier for OptionalClientVerifier {
         intermediates: &[CertificateDer<'_>],
         now: rustls::pki_types::UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        self.inner.verify_client_cert(end_entity, intermediates, now)
+        self.inner
+            .verify_client_cert(end_entity, intermediates, now)
     }
 
     fn verify_tls12_signature(

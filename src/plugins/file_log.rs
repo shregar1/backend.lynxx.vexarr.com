@@ -83,11 +83,7 @@ impl FileLogPlugin {
             writer_task(target, rx, format_for_task, fields_for_task).await;
         });
 
-        Ok(Self {
-            tx,
-            fields,
-            format,
-        })
+        Ok(Self { tx, fields, format })
     }
 }
 
@@ -174,7 +170,11 @@ fn render(line: &LogLine, format: Format, fields: &[String]) -> String {
             format!(
                 "{} - {} [{}] \"{} {}\" {} {}ms",
                 line.service,
-                if line.consumer.is_empty() { "-" } else { &line.consumer },
+                if line.consumer.is_empty() {
+                    "-"
+                } else {
+                    &line.consumer
+                },
                 line.timestamp,
                 line.method,
                 line.path,

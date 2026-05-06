@@ -19,11 +19,7 @@ fn default_max_body_bytes() -> usize {
     1024 * 1024
 }
 fn default_redact_headers() -> Vec<String> {
-    vec![
-        "Authorization".into(),
-        "Cookie".into(),
-        "X-API-Key".into(),
-    ]
+    vec!["Authorization".into(), "Cookie".into(), "X-API-Key".into()]
 }
 fn default_redact_body_paths() -> Vec<String> {
     vec!["password".into(), "credit_card".into(), "ssn".into()]

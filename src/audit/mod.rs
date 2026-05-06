@@ -203,10 +203,13 @@ impl AuditLog {
 
     /// Recompute the chain from row 1 onwards and report inconsistencies.
     pub async fn verify_chain(&self) -> Result<ChainVerification, GatewayError> {
-        let all = self.repo.list_audit(&AuditFilter {
-            limit: Some(1000),
-            ..Default::default()
-        }).await?;
+        let all = self
+            .repo
+            .list_audit(&AuditFilter {
+                limit: Some(1000),
+                ..Default::default()
+            })
+            .await?;
         // list_audit returns most-recent-first by default; flip for verification.
         let mut rows = all;
         rows.sort_by_key(|r| r.id);

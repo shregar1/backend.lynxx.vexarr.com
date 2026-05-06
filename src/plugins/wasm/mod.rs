@@ -50,9 +50,8 @@ impl WasmPlugin {
         runtime::validate_magic(&bytes)?;
 
         let engine_handle = runtime::WasmEngine::global()?;
-        let module = Module::from_binary(engine_handle.engine(), &bytes).map_err(|e| {
-            GatewayError::BadRequest(format!("failed to compile wasm module: {e}"))
-        })?;
+        let module = Module::from_binary(engine_handle.engine(), &bytes)
+            .map_err(|e| GatewayError::BadRequest(format!("failed to compile wasm module: {e}")))?;
 
         // Required exports: `memory`, `on_request`, `on_response`.
         let exports: Vec<_> = module.exports().map(|e| e.name().to_string()).collect();
@@ -152,7 +151,12 @@ impl Plugin for WasmPlugin {
             self.build_limits(),
         );
         ctx.method = req.method().as_str().to_string();
-        ctx.path = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/").to_string();
+        ctx.path = req
+            .uri()
+            .path_and_query()
+            .map(|p| p.as_str())
+            .unwrap_or("/")
+            .to_string();
         ctx.request_headers = req
             .headers()
             .iter()
@@ -189,10 +193,7 @@ impl Plugin for WasmPlugin {
         let new_headers = mutated.request_headers;
         req.headers_mut().clear();
         for (k, v) in new_headers {
-            if let (Ok(name), Ok(value)) = (
-                HeaderName::from_str(&k),
-                HeaderValue::from_str(&v),
-            ) {
+            if let (Ok(name), Ok(value)) = (HeaderName::from_str(&k), HeaderValue::from_str(&v)) {
                 req.headers_mut().append(name, value);
             }
         }
@@ -222,10 +223,7 @@ impl Plugin for WasmPlugin {
         let new_headers = mutated.response_headers;
         resp.headers_mut().clear();
         for (k, v) in new_headers {
-            if let (Ok(name), Ok(value)) = (
-                HeaderName::from_str(&k),
-                HeaderValue::from_str(&v),
-            ) {
+            if let (Ok(name), Ok(value)) = (HeaderName::from_str(&k), HeaderValue::from_str(&v)) {
                 resp.headers_mut().append(name, value);
             }
         }
@@ -284,7 +282,7 @@ mod tests {
     /// pre-compiled binary into the repo.
     fn from_wat(wat_src: &str, extra: serde_json::Value) -> WasmPlugin {
         let bytes = wat::parse_str(wat_src).expect("wat compiles");
-        let b64 = Base64Engine::encode(&base64::engine::general_purpose::STANDARD,&bytes);
+        let b64 = Base64Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
         let mut cfg = json!({ "module_b64": b64 });
         if let Some(obj) = extra.as_object() {
             for (k, v) in obj {
@@ -333,7 +331,9 @@ mod tests {
         let mut req = Request::builder().uri("/x").body(Body::empty()).unwrap();
         p.on_request(&mut req).await.unwrap();
         assert_eq!(
-            req.headers().get("x-wasm-test").and_then(|v| v.to_str().ok()),
+            req.headers()
+                .get("x-wasm-test")
+                .and_then(|v| v.to_str().ok()),
             Some("ok"),
         );
     }
@@ -367,8 +367,7 @@ mod tests {
             &base64::engine::general_purpose::STANDARD,
             HEADER_INJECTOR_WASM,
         );
-        let plugin =
-            WasmPlugin::from_config(&json!({ "module_b64": b64 })).expect("plugin builds");
+        let plugin = WasmPlugin::from_config(&json!({ "module_b64": b64 })).expect("plugin builds");
         let mut req = Request::builder().uri("/x").body(Body::empty()).unwrap();
         plugin.on_request(&mut req).await.unwrap();
         assert_eq!(
@@ -383,15 +382,22 @@ mod tests {
     #[test]
     fn rejects_module_missing_required_exports() {
         let bytes = wat::parse_str(r#"(module (func (export "noop")))"#).unwrap();
-        let b64 = Base64Engine::encode(&base64::engine::general_purpose::STANDARD,&bytes);
-        let err = WasmPlugin::from_config(&json!({ "module_b64": b64 })).err().expect("must reject");
+        let b64 = Base64Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+        let err = WasmPlugin::from_config(&json!({ "module_b64": b64 }))
+            .err()
+            .expect("must reject");
         assert!(format!("{err}").contains("missing required export"));
     }
 
     #[test]
     fn rejects_non_wasm_bytes() {
-        let b64 = Base64Engine::encode(&base64::engine::general_purpose::STANDARD,b"not-wasm-at-all");
-        let err = WasmPlugin::from_config(&json!({ "module_b64": b64 })).err().expect("must reject");
+        let b64 = Base64Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"not-wasm-at-all",
+        );
+        let err = WasmPlugin::from_config(&json!({ "module_b64": b64 }))
+            .err()
+            .expect("must reject");
         let s = format!("{err}");
         assert!(s.contains("WebAssembly") || s.contains("magic"), "got: {s}");
     }

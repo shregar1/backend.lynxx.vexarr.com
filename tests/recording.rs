@@ -107,7 +107,10 @@ async fn launch_gateway(
 
     let guard = GatewayGuard::new(child);
     let up = wait_for_status(admin_port, Duration::from_secs(30)).await;
-    assert!(up, "gateway admin port {admin_port} did not respond in time");
+    assert!(
+        up,
+        "gateway admin port {admin_port} did not respond in time"
+    );
     guard
 }
 
@@ -188,11 +191,19 @@ async fn time_travel_capture_list_replay_delete() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "install plugin: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "install plugin: {}",
+        resp.status()
+    );
 
     // 5. Drive a few requests through the proxy.
     for _ in 0..3 {
-        let r = http.get(format!("{proxy_base}/thing")).send().await.unwrap();
+        let r = http
+            .get(format!("{proxy_base}/thing"))
+            .send()
+            .await
+            .unwrap();
         assert!(r.status().is_success(), "proxy 200: {}", r.status());
     }
 
@@ -237,7 +248,10 @@ async fn time_travel_capture_list_replay_delete() {
     let resp_b64 = rec["response"]["body_b64"].as_str().unwrap();
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     let decoded = STANDARD.decode(resp_b64).unwrap();
-    assert_eq!(std::str::from_utf8(&decoded).unwrap(), "{\"hello\":\"world\"}");
+    assert_eq!(
+        std::str::from_utf8(&decoded).unwrap(),
+        "{\"hello\":\"world\"}"
+    );
 
     // 9. Replay against the gateway itself; wiremock is deterministic so
     //    the body should be identical.

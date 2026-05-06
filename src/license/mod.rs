@@ -107,8 +107,8 @@ impl License {
             return Err(LicenseError::BadFormat);
         }
 
-        let verify_url = env::var("LYNXX_LICENSE_VERIFY_URL")
-            .unwrap_or_else(|_| DEFAULT_VERIFY_URL.to_string());
+        let verify_url =
+            env::var("LYNXX_LICENSE_VERIFY_URL").unwrap_or_else(|_| DEFAULT_VERIFY_URL.to_string());
 
         match verify_online(&api_key, &verify_url).await {
             Ok(resp) => {
@@ -128,8 +128,7 @@ impl License {
             )),
             Err(net_err) => match read_cache(&api_key)? {
                 Some(entry) => {
-                    let age_days =
-                        (Utc::now().timestamp() - entry.verified_at).max(0) / 86_400;
+                    let age_days = (Utc::now().timestamp() - entry.verified_at).max(0) / 86_400;
                     if age_days > OFFLINE_GRACE_DAYS {
                         Err(LicenseError::StaleCache(age_days))
                     } else {
@@ -246,8 +245,8 @@ fn read_cache(api_key: &str) -> Result<Option<CacheEntry>, LicenseError> {
     if !path.exists() {
         return Ok(None);
     }
-    let body = std::fs::read(&path)
-        .map_err(|e| LicenseError::Offline(format!("cache read: {e}")))?;
+    let body =
+        std::fs::read(&path).map_err(|e| LicenseError::Offline(format!("cache read: {e}")))?;
     let entry: CacheEntry = serde_json::from_slice(&body)
         .map_err(|e| LicenseError::Malformed(format!("cache parse: {e}")))?;
     if entry.api_key_hash != key_fingerprint(api_key) {

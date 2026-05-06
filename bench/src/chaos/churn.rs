@@ -34,10 +34,7 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
         .unwrap_or_default()
         .into_iter()
         .filter(|p| {
-            p.name == "rate-limit"
-                && p.service_id.is_none()
-                && p.route_id.is_none()
-                && p.enabled
+            p.name == "rate-limit" && p.service_id.is_none() && p.route_id.is_none() && p.enabled
         })
         .map(|p| p.id)
         .collect();
@@ -125,7 +122,10 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
         tick += 1;
         let name = format!("chaos-churn-{tick}");
         let path = format!("/chaos-churn-{tick}");
-        let svc = match admin.create_service(&name, &args.mock_upstream_url, 0, 5_000).await {
+        let svc = match admin
+            .create_service(&name, &args.mock_upstream_url, 0, 5_000)
+            .await
+        {
             Ok(id) => id,
             Err(e) => {
                 tracing::warn!(error = %e, "churn create_service failed");
@@ -176,7 +176,11 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     let churn_err_n = churn_err.load(Ordering::Relaxed);
     let total = bg_ok_n + bg_err_n + 10 * tick;
     let total_err = bg_err_n + churn_err_n;
-    let err_rate = if total == 0 { 0.0 } else { 100.0 * total_err as f64 / total as f64 };
+    let err_rate = if total == 0 {
+        0.0
+    } else {
+        100.0 * total_err as f64 / total as f64
+    };
 
     // Leaked open circuits? Skip bg_svc (may have transient blips) and any
     // circuits that were already open before this scenario ran.

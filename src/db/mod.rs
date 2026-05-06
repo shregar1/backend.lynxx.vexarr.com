@@ -147,10 +147,7 @@ pub trait Repository: Send + Sync {
 
     /// Delete every recording row with `ts < cutoff`. Returns the number
     /// of rows removed. Used by the retention sweeper.
-    async fn delete_recordings_before(
-        &self,
-        ts: DateTime<Utc>,
-    ) -> Result<u64, GatewayError>;
+    async fn delete_recordings_before(&self, ts: DateTime<Utc>) -> Result<u64, GatewayError>;
 }
 
 /// Build the appropriate repository implementation from the configured URL.

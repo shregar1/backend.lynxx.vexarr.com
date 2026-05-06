@@ -474,7 +474,9 @@ impl Repository for SqliteRepository {
         .bind(id.to_string())
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(row) = row else { return Ok(None); };
+        let Some(row) = row else {
+            return Ok(None);
+        };
         let mut existing = row_to_admin_token(row)?;
         if let Some(name) = patch.name.clone() {
             existing.name = name;
@@ -485,15 +487,13 @@ impl Repository for SqliteRepository {
         if let Some(exp) = patch.expires_at {
             existing.expires_at = exp;
         }
-        sqlx::query(
-            "UPDATE admin_tokens SET name = ?, role = ?, expires_at = ? WHERE id = ?",
-        )
-        .bind(&existing.name)
-        .bind(existing.role.to_string())
-        .bind(existing.expires_at.map(|d| d.to_rfc3339()))
-        .bind(id.to_string())
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("UPDATE admin_tokens SET name = ?, role = ?, expires_at = ? WHERE id = ?")
+            .bind(&existing.name)
+            .bind(existing.role.to_string())
+            .bind(existing.expires_at.map(|d| d.to_rfc3339()))
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(Some(existing))
     }
@@ -722,10 +722,7 @@ impl Repository for SqliteRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn delete_recordings_before(
-        &self,
-        ts: DateTime<Utc>,
-    ) -> Result<u64, GatewayError> {
+    async fn delete_recordings_before(&self, ts: DateTime<Utc>) -> Result<u64, GatewayError> {
         let result = sqlx::query("DELETE FROM recordings WHERE ts < ?")
             .bind(ts.to_rfc3339())
             .execute(&self.pool)
@@ -736,15 +733,14 @@ impl Repository for SqliteRepository {
     // ---------- quota ----------
 
     async fn get_quota_usage(&self, period: &str) -> Result<Option<(u64, u64)>, GatewayError> {
-        let row = sqlx::query(
-            "SELECT calls_total, calls_rejected FROM quota_usage WHERE period = ?",
-        )
-        .bind(period)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row =
+            sqlx::query("SELECT calls_total, calls_rejected FROM quota_usage WHERE period = ?")
+                .bind(period)
+                .fetch_optional(&self.pool)
+                .await?;
 
         Ok(row.map(|r| {
-            let calls: i64    = r.get(0);
+            let calls: i64 = r.get(0);
             let rejected: i64 = r.get(1);
             (calls.max(0) as u64, rejected.max(0) as u64)
         }))
@@ -856,7 +852,10 @@ fn row_to_service(row: sqlx::sqlite::SqliteRow) -> Result<Service, GatewayError>
     // TLS columns are introduced in migration 0006. `try_get` failure
     // (e.g. running against an out-of-date schema) falls back to safe
     // defaults: verify on, no client cert, no extra CA.
-    let tls_verify: bool = row.try_get::<i64, _>("tls_verify").map(|v| v != 0).unwrap_or(true);
+    let tls_verify: bool = row
+        .try_get::<i64, _>("tls_verify")
+        .map(|v| v != 0)
+        .unwrap_or(true);
     let tls_client_cert_path: Option<String> = row
         .try_get::<Option<String>, _>("tls_client_cert_path")
         .ok()
@@ -980,7 +979,10 @@ fn row_to_audit(row: sqlx::sqlite::SqliteRow) -> Result<AuditEntry, GatewayError
     let ts: String = row.try_get("ts")?;
     let actor_id: Option<String> = row.try_get("actor_id")?;
     let diff: Option<String> = row.try_get("diff")?;
-    let actor_id = actor_id.filter(|s| !s.is_empty()).map(|s| parse_uuid(&s)).transpose()?;
+    let actor_id = actor_id
+        .filter(|s| !s.is_empty())
+        .map(|s| parse_uuid(&s))
+        .transpose()?;
     let diff = match diff {
         Some(s) if !s.is_empty() => Some(
             serde_json::from_str(&s)
@@ -1003,9 +1005,7 @@ fn row_to_audit(row: sqlx::sqlite::SqliteRow) -> Result<AuditEntry, GatewayError
     })
 }
 
-fn row_to_recording_index(
-    row: sqlx::sqlite::SqliteRow,
-) -> Result<RecordingIndexRow, GatewayError> {
+fn row_to_recording_index(row: sqlx::sqlite::SqliteRow) -> Result<RecordingIndexRow, GatewayError> {
     let id: String = row.try_get("id")?;
     let ts: String = row.try_get("ts")?;
     let status: i64 = row.try_get("status")?;
@@ -1072,7 +1072,13 @@ mod recording_tests {
         SqliteRepository::new(&url).await.unwrap()
     }
 
-    fn sample_row(id: &str, ts: chrono::DateTime<Utc>, method: &str, path: &str, status: u16) -> RecordingIndexRow {
+    fn sample_row(
+        id: &str,
+        ts: chrono::DateTime<Utc>,
+        method: &str,
+        path: &str,
+        status: u16,
+    ) -> RecordingIndexRow {
         RecordingIndexRow {
             id: id.into(),
             ts,
@@ -1093,7 +1099,11 @@ mod recording_tests {
         let repo = fresh_repo().await;
         let row = sample_row("aabbccddeeff0011", Utc::now(), "GET", "/v1/x", 200);
         repo.append_recording(&row).await.unwrap();
-        let got = repo.get_recording_index("aabbccddeeff0011").await.unwrap().unwrap();
+        let got = repo
+            .get_recording_index("aabbccddeeff0011")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got.id, row.id);
         assert_eq!(got.method, "GET");
         assert_eq!(got.status, 200);
@@ -1105,47 +1115,80 @@ mod recording_tests {
     async fn list_filters_method_status_since_limit() {
         let repo = fresh_repo().await;
         let now = Utc::now();
-        repo.append_recording(&sample_row("11111111aaaa", now - Duration::hours(2), "GET", "/a", 200)).await.unwrap();
-        repo.append_recording(&sample_row("22222222bbbb", now - Duration::hours(1), "POST", "/b", 500)).await.unwrap();
-        repo.append_recording(&sample_row("33333333cccc", now, "GET", "/a/sub", 200)).await.unwrap();
+        repo.append_recording(&sample_row(
+            "11111111aaaa",
+            now - Duration::hours(2),
+            "GET",
+            "/a",
+            200,
+        ))
+        .await
+        .unwrap();
+        repo.append_recording(&sample_row(
+            "22222222bbbb",
+            now - Duration::hours(1),
+            "POST",
+            "/b",
+            500,
+        ))
+        .await
+        .unwrap();
+        repo.append_recording(&sample_row("33333333cccc", now, "GET", "/a/sub", 200))
+            .await
+            .unwrap();
 
         // method filter
-        let got = repo.list_recordings(&RecordingFilter {
-            method: Some("GET".into()),
-            ..Default::default()
-        }).await.unwrap();
+        let got = repo
+            .list_recordings(&RecordingFilter {
+                method: Some("GET".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         assert_eq!(got.len(), 2);
         // newest first
         assert_eq!(got[0].id, "33333333cccc");
 
         // status filter
-        let got = repo.list_recordings(&RecordingFilter {
-            status: Some(500),
-            ..Default::default()
-        }).await.unwrap();
+        let got = repo
+            .list_recordings(&RecordingFilter {
+                status: Some(500),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, "22222222bbbb");
 
         // since filter
-        let got = repo.list_recordings(&RecordingFilter {
-            since: Some(now - Duration::minutes(30)),
-            ..Default::default()
-        }).await.unwrap();
+        let got = repo
+            .list_recordings(&RecordingFilter {
+                since: Some(now - Duration::minutes(30)),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, "33333333cccc");
 
         // path prefix
-        let got = repo.list_recordings(&RecordingFilter {
-            path_prefix: Some("/a".into()),
-            ..Default::default()
-        }).await.unwrap();
+        let got = repo
+            .list_recordings(&RecordingFilter {
+                path_prefix: Some("/a".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         assert_eq!(got.len(), 2);
 
         // limit
-        let got = repo.list_recordings(&RecordingFilter {
-            limit: 1,
-            ..Default::default()
-        }).await.unwrap();
+        let got = repo
+            .list_recordings(&RecordingFilter {
+                limit: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         assert_eq!(got.len(), 1);
     }
 
@@ -1161,11 +1204,21 @@ mod recording_tests {
     #[tokio::test]
     async fn delete_before_with_far_future_clears_all() {
         let repo = fresh_repo().await;
-        repo.append_recording(&sample_row("aaaa1111", Utc::now(), "GET", "/a", 200)).await.unwrap();
-        repo.append_recording(&sample_row("bbbb2222", Utc::now(), "GET", "/b", 200)).await.unwrap();
-        let n = repo.delete_recordings_before(Utc::now() + Duration::days(365)).await.unwrap();
+        repo.append_recording(&sample_row("aaaa1111", Utc::now(), "GET", "/a", 200))
+            .await
+            .unwrap();
+        repo.append_recording(&sample_row("bbbb2222", Utc::now(), "GET", "/b", 200))
+            .await
+            .unwrap();
+        let n = repo
+            .delete_recordings_before(Utc::now() + Duration::days(365))
+            .await
+            .unwrap();
         assert_eq!(n, 2);
-        let remaining = repo.list_recordings(&RecordingFilter::default()).await.unwrap();
+        let remaining = repo
+            .list_recordings(&RecordingFilter::default())
+            .await
+            .unwrap();
         assert!(remaining.is_empty());
     }
 }

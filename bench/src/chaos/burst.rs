@@ -39,9 +39,33 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     let h_steady_b = Arc::new(Mutex::new(new_hist()));
     let err = Arc::new(AtomicU64::new(0));
 
-    phase(&client, &url, 200, Duration::from_secs(30), h_steady_a.clone(), err.clone()).await;
-    phase(&client, &url, 2000, Duration::from_secs(10), h_burst.clone(), err.clone()).await;
-    phase(&client, &url, 200, Duration::from_secs(30), h_steady_b.clone(), err.clone()).await;
+    phase(
+        &client,
+        &url,
+        200,
+        Duration::from_secs(30),
+        h_steady_a.clone(),
+        err.clone(),
+    )
+    .await;
+    phase(
+        &client,
+        &url,
+        2000,
+        Duration::from_secs(10),
+        h_burst.clone(),
+        err.clone(),
+    )
+    .await;
+    phase(
+        &client,
+        &url,
+        200,
+        Duration::from_secs(30),
+        h_steady_b.clone(),
+        err.clone(),
+    )
+    .await;
 
     let _ = admin.delete_route(route_id).await;
     let _ = admin.delete_service(svc_id).await;
@@ -142,4 +166,3 @@ async fn phase(
         let _ = h.await;
     }
 }
-

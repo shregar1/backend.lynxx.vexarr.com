@@ -66,7 +66,10 @@ pub async fn create_checkout_session(
     form.insert("line_items[0][quantity]", "1".into());
     form.insert("customer_email", customer_email.into());
     form.insert("client_reference_id", client_reference_id.into());
-    form.insert("success_url", format!("{}?session_id={{CHECKOUT_SESSION_ID}}", cfg.success_url));
+    form.insert(
+        "success_url",
+        format!("{}?session_id={{CHECKOUT_SESSION_ID}}", cfg.success_url),
+    );
     form.insert("cancel_url", cfg.cancel_url.clone());
     form.insert("allow_promotion_codes", "true".into());
 
@@ -126,7 +129,9 @@ pub fn verify_webhook(secret: &str, body: &[u8], header: &str) -> Result<serde_j
     let mut t: Option<i64> = None;
     let mut v1: Option<String> = None;
     for pair in header.split(',') {
-        let (k, v) = pair.split_once('=').ok_or_else(|| anyhow!("bad sig pair"))?;
+        let (k, v) = pair
+            .split_once('=')
+            .ok_or_else(|| anyhow!("bad sig pair"))?;
         match k {
             "t" => t = v.parse().ok(),
             "v1" => v1 = Some(v.to_string()),

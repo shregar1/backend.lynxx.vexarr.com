@@ -121,7 +121,9 @@ impl Plugin for ShadowPlugin {
 
         tokio::spawn(async move {
             let client = shadow_client();
-            let mut builder = client.request(reqwest_method(&method), &url).headers(headers);
+            let mut builder = client
+                .request(reqwest_method(&method), &url)
+                .headers(headers);
             if let Some(b) = body_bytes {
                 builder = builder.body(b.to_vec());
             }
@@ -145,7 +147,10 @@ impl Plugin for ShadowPlugin {
 }
 
 fn body_methods(m: &Method) -> bool {
-    matches!(*m, Method::POST | Method::PUT | Method::PATCH | Method::DELETE)
+    matches!(
+        *m,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    )
 }
 
 fn reqwest_method(m: &Method) -> reqwest::Method {

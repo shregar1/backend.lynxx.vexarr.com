@@ -41,7 +41,11 @@ impl RequestIdPlugin {
             .get("echo_downstream")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let generator = match cfg.get("generator").and_then(|v| v.as_str()).unwrap_or("uuid") {
+        let generator = match cfg
+            .get("generator")
+            .and_then(|v| v.as_str())
+            .unwrap_or("uuid")
+        {
             "nanoid" => Generator::Nanoid,
             "sequential" => Generator::Sequential,
             _ => Generator::Uuid,
@@ -72,10 +76,7 @@ impl RequestIdPlugin {
                 }
                 out
             }
-            Generator::Sequential => self
-                .counter
-                .fetch_add(1, Ordering::Relaxed)
-                .to_string(),
+            Generator::Sequential => self.counter.fetch_add(1, Ordering::Relaxed).to_string(),
         }
     }
 }
@@ -94,7 +95,8 @@ impl Plugin for RequestIdPlugin {
             .map(String::from);
         let id = existing.unwrap_or_else(|| self.generate());
         if let Ok(v) = HeaderValue::from_str(&id) {
-            req.headers_mut().insert(self.header_name.clone(), v.clone());
+            req.headers_mut()
+                .insert(self.header_name.clone(), v.clone());
             req.headers_mut().insert(HDR_PINNED, v);
         }
         // Best-effort: also stash on the request extensions so other plugins

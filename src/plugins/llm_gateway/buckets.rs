@@ -29,7 +29,10 @@ pub enum Decision {
     Allow,
     /// Reject — the estimated tokens or the request count would exceed the
     /// configured ceiling within the current window.
-    Deny { reason: DenyReason, retry_after: u64 },
+    Deny {
+        reason: DenyReason,
+        retry_after: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,7 +123,10 @@ impl Buckets {
         let now = Instant::now();
         let mut entry = self.inner.entry(consumer.to_string()).or_default();
         entry.maybe_reset(now);
-        entry.tokens = entry.tokens.saturating_add(extra_tokens).min(self.tokens_per_min * 2);
+        entry.tokens = entry
+            .tokens
+            .saturating_add(extra_tokens)
+            .min(self.tokens_per_min * 2);
     }
 }
 

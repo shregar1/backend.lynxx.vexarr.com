@@ -139,10 +139,7 @@ impl TowerService<Name> for CachingDnsResolver {
                 .await
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
             // Port 0 — the connector fills it in from the URL.
-            let addrs: Vec<SocketAddr> = lookup
-                .iter()
-                .map(|ip| SocketAddr::new(ip, 0))
-                .collect();
+            let addrs: Vec<SocketAddr> = lookup.iter().map(|ip| SocketAddr::new(ip, 0)).collect();
             Ok(ResolvedAddrs(addrs.into_iter()))
         })
     }
@@ -315,17 +312,15 @@ fn build_rustls_client_config(svc: &Service) -> Result<ClientConfig, GatewayErro
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     if let Some(ca_path) = &svc.tls_ca_path {
-        let pem = std::fs::read(ca_path).map_err(|e| {
-            GatewayError::Internal(format!("read tls_ca_path {ca_path}: {e}"))
-        })?;
+        let pem = std::fs::read(ca_path)
+            .map_err(|e| GatewayError::Internal(format!("read tls_ca_path {ca_path}: {e}")))?;
         let mut cursor = std::io::Cursor::new(pem);
         for cert in rustls_pemfile::certs(&mut cursor) {
-            let cert = cert.map_err(|e| {
-                GatewayError::Internal(format!("parse tls_ca_path {ca_path}: {e}"))
-            })?;
-            roots.add(cert).map_err(|e| {
-                GatewayError::Internal(format!("add ca cert from {ca_path}: {e}"))
-            })?;
+            let cert = cert
+                .map_err(|e| GatewayError::Internal(format!("parse tls_ca_path {ca_path}: {e}")))?;
+            roots
+                .add(cert)
+                .map_err(|e| GatewayError::Internal(format!("add ca cert from {ca_path}: {e}")))?;
         }
     }
 
@@ -386,9 +381,8 @@ fn load_client_auth(
         )));
     }
 
-    let key_bytes = std::fs::read(key_path).map_err(|e| {
-        GatewayError::Internal(format!("read tls_client_key_path {key_path}: {e}"))
-    })?;
+    let key_bytes = std::fs::read(key_path)
+        .map_err(|e| GatewayError::Internal(format!("read tls_client_key_path {key_path}: {e}")))?;
     let mut key_cursor = std::io::Cursor::new(key_bytes);
     let key = rustls_pemfile::private_key(&mut key_cursor)
         .map_err(|e| GatewayError::Internal(format!("parse client key {key_path}: {e}")))?

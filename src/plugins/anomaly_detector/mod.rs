@@ -150,7 +150,9 @@ impl AnomalyDetectorPlugin {
                 self.cfg.signals.error_rate.window_secs,
             ))
         });
-        let mut b = entry.lock().expect("anomaly-detector baseline mutex poisoned");
+        let mut b = entry
+            .lock()
+            .expect("anomaly-detector baseline mutex poisoned");
         let now = Instant::now();
 
         let req_count = b.push_request(now);
@@ -246,7 +248,9 @@ impl AnomalyDetectorPlugin {
             return None;
         }
         let entry = self.state.get(key)?;
-        let mut b = entry.lock().expect("anomaly-detector baseline mutex poisoned");
+        let mut b = entry
+            .lock()
+            .expect("anomaly-detector baseline mutex poisoned");
         let now = Instant::now();
         b.error_window.record(status >= 400, now);
         let frac = b.error_window.fraction();
@@ -290,7 +294,10 @@ impl AnomalyDetectorPlugin {
                 PluginError::ShortCircuit {
                     status: 429,
                     headers: vec![
-                        ("retry-after".into(), self.cfg.challenge_retry_after.to_string()),
+                        (
+                            "retry-after".into(),
+                            self.cfg.challenge_retry_after.to_string(),
+                        ),
                         ("content-type".into(), "application/json".into()),
                         ("x-lynxx-anomaly".into(), sig.name.into()),
                     ],
@@ -485,7 +492,10 @@ mod tests {
         let mut found_429 = false;
         for _ in 0..20 {
             let mut r = req("/a", &[("x-consumer-username", "bob")]);
-            if let Err(PluginError::ShortCircuit { status, headers, .. }) = p.on_request(&mut r).await {
+            if let Err(PluginError::ShortCircuit {
+                status, headers, ..
+            }) = p.on_request(&mut r).await
+            {
                 assert_eq!(status, 429);
                 assert!(headers.iter().any(|(k, v)| k == "retry-after" && v == "7"));
                 found_429 = true;
@@ -543,7 +553,10 @@ mod tests {
         }));
         for _ in 0..500 {
             let mut r = req("/x", &[("x-consumer-username", "dave")]);
-            assert!(p.on_request(&mut r).await.is_ok(), "exempt key must always pass");
+            assert!(
+                p.on_request(&mut r).await.is_ok(),
+                "exempt key must always pass"
+            );
         }
         // No baseline should have been created for the exempt key.
         assert!(!p.state.contains_key("dave"));
@@ -565,7 +578,10 @@ mod tests {
         }));
         for _ in 0..200 {
             let mut r = req("/x", &[("x-consumer-username", "eve")]);
-            assert!(p.on_request(&mut r).await.is_ok(), "must not score during warmup");
+            assert!(
+                p.on_request(&mut r).await.is_ok(),
+                "must not score during warmup"
+            );
         }
     }
 

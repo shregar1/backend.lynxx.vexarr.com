@@ -84,7 +84,11 @@ impl SyslogPlugin {
             .unwrap_or("127.0.0.1")
             .to_string();
         let port = cfg.get("port").and_then(|v| v.as_u64()).unwrap_or(514) as u16;
-        let proto = match cfg.get("protocol").and_then(|v| v.as_str()).unwrap_or("udp") {
+        let proto = match cfg
+            .get("protocol")
+            .and_then(|v| v.as_str())
+            .unwrap_or("udp")
+        {
             "tcp" => Protocol::Tcp,
             _ => Protocol::Udp,
         };

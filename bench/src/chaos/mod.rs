@@ -180,7 +180,8 @@ impl AdminClient {
         retries: u32,
         timeout_ms: u64,
     ) -> Result<Uuid> {
-        self.create_service_lb(name, url, retries, timeout_ms, "round-robin").await
+        self.create_service_lb(name, url, retries, timeout_ms, "round-robin")
+            .await
     }
 
     /// Like `create_service` but lets you specify the LB strategy explicitly.
@@ -216,10 +217,15 @@ impl AdminClient {
     /// Add a weighted upstream target to a service.
     pub async fn create_target(&self, service_id: Uuid, url: &str, weight: u32) -> Result<Uuid> {
         #[derive(Deserialize)]
-        struct TargetView { id: Uuid }
+        struct TargetView {
+            id: Uuid,
+        }
         let body = serde_json::json!({ "url": url, "weight": weight, "enabled": true });
         let resp = self
-            .req(reqwest::Method::POST, &format!("/services/{service_id}/targets"))
+            .req(
+                reqwest::Method::POST,
+                &format!("/services/{service_id}/targets"),
+            )
             .json(&body)
             .send()
             .await?;
@@ -233,8 +239,16 @@ impl AdminClient {
     }
 
     /// Convenience: attach a plugin to a service, silently skip on failure.
-    pub async fn create_plugin_for_service(&self, service_id: Uuid, name: &str, config: serde_json::Value) {
-        if let Err(e) = self.install_plugin(name, config, Some(service_id), None).await {
+    pub async fn create_plugin_for_service(
+        &self,
+        service_id: Uuid,
+        name: &str,
+        config: serde_json::Value,
+    ) {
+        if let Err(e) = self
+            .install_plugin(name, config, Some(service_id), None)
+            .await
+        {
             tracing::warn!(plugin = name, error = %e, "install_plugin failed (continuing)");
         }
     }
@@ -330,7 +344,10 @@ impl AdminClient {
 
     pub async fn set_plugin_enabled(&self, id: Uuid, enabled: bool) -> Result<()> {
         // GET the current state, then PUT back with only enabled changed.
-        let get_resp = self.req(reqwest::Method::GET, &format!("/plugins/{id}")).send().await?;
+        let get_resp = self
+            .req(reqwest::Method::GET, &format!("/plugins/{id}"))
+            .send()
+            .await?;
         if !get_resp.status().is_success() {
             return Err(anyhow!("get plugin {id} -> {}", get_resp.status()));
         }

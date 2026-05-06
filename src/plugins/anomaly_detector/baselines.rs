@@ -177,7 +177,12 @@ pub struct Baseline {
 }
 
 impl Baseline {
-    pub fn new(alpha: f64, request_window_secs: u64, path_window_secs: u64, error_window_secs: u64) -> Self {
+    pub fn new(
+        alpha: f64,
+        request_window_secs: u64,
+        path_window_secs: u64,
+        error_window_secs: u64,
+    ) -> Self {
         let now = Instant::now();
         Self {
             seen: 0,

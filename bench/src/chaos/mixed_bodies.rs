@@ -118,7 +118,10 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     let hist = Arc::try_unwrap(hist).map(|m| m.into_inner()).ok();
     let okc = ok.load(Ordering::Relaxed);
     let errc = err.load(Ordering::Relaxed);
-    let p99 = hist.as_ref().map(|h| h.value_at_quantile(0.99)).unwrap_or(0);
+    let p99 = hist
+        .as_ref()
+        .map(|h| h.value_at_quantile(0.99))
+        .unwrap_or(0);
     let p99_ms = p99 as f64 / 1_000.0;
 
     drop(cleanup);
@@ -131,7 +134,11 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
         fmt_us(p99)
     );
     let total_reqs = okc + errc;
-    let err_rate = if total_reqs == 0 { 0.0 } else { errc as f64 / total_reqs as f64 };
+    let err_rate = if total_reqs == 0 {
+        0.0
+    } else {
+        errc as f64 / total_reqs as f64
+    };
     // 2% tolerance: 5MB bodies at 1% of traffic can occasionally hit connection limits.
     let passed = err_rate < 0.02 && p99_ms < 100.0;
     let r = if passed {
@@ -159,13 +166,25 @@ struct Job {
 fn pick_job() -> Job {
     let r = rand::thread_rng().gen_range(0..1000);
     if r < 700 {
-        Job { method: Method::GET, body: BodyKind::None }
+        Job {
+            method: Method::GET,
+            body: BodyKind::None,
+        }
     } else if r < 900 {
-        Job { method: Method::POST, body: BodyKind::K1 }
+        Job {
+            method: Method::POST,
+            body: BodyKind::K1,
+        }
     } else if r < 990 {
-        Job { method: Method::POST, body: BodyKind::K100 }
+        Job {
+            method: Method::POST,
+            body: BodyKind::K100,
+        }
     } else {
-        Job { method: Method::POST, body: BodyKind::M5 }
+        Job {
+            method: Method::POST,
+            body: BodyKind::M5,
+        }
     }
 }
 

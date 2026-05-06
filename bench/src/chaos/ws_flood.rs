@@ -23,7 +23,10 @@ use crate::chaos::{fmt_count, AdminClient, Args, Report};
 fn raise_fd_limit(target: u64) {
     #[cfg(unix)]
     unsafe {
-        let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut rl = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) == 0 {
             let new_soft = target.min(rl.rlim_max);
             if new_soft > rl.rlim_cur {
@@ -64,8 +67,7 @@ fn start_echo_server() -> (SocketAddr, std::thread::JoinHandle<()>) {
             .build()
             .expect("echo rt");
         rt.block_on(async move {
-            let listener =
-                TcpListener::from_std(std_listener).expect("convert listener");
+            let listener = TcpListener::from_std(std_listener).expect("convert listener");
             run_ws_echo(listener).await;
         });
     });
@@ -142,8 +144,7 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
                     let sent = sent.clone();
                     tokio::spawn(async move {
                         let interval = Duration::from_millis(10); // 100 msg/sec
-                        let total_msgs =
-                            (dur.as_millis() / interval.as_millis()) as u64;
+                        let total_msgs = (dur.as_millis() / interval.as_millis()) as u64;
                         for n in 0..total_msgs {
                             let msg = format!("c{i}-{n}");
                             if tx.send(Message::text(msg)).await.is_err() {

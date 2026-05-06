@@ -469,7 +469,9 @@ impl Repository for PostgresRepository {
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(row) = row else { return Ok(None); };
+        let Some(row) = row else {
+            return Ok(None);
+        };
         let mut existing = row_to_admin_token(row)?;
         if let Some(name) = patch.name.clone() {
             existing.name = name;
@@ -480,15 +482,13 @@ impl Repository for PostgresRepository {
         if let Some(exp) = patch.expires_at {
             existing.expires_at = exp;
         }
-        sqlx::query(
-            "UPDATE admin_tokens SET name = $1, role = $2, expires_at = $3 WHERE id = $4",
-        )
-        .bind(&existing.name)
-        .bind(existing.role.to_string())
-        .bind(existing.expires_at)
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("UPDATE admin_tokens SET name = $1, role = $2, expires_at = $3 WHERE id = $4")
+            .bind(&existing.name)
+            .bind(existing.role.to_string())
+            .bind(existing.expires_at)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(Some(existing))
     }
@@ -576,7 +576,11 @@ impl Repository for PostgresRepository {
         if let Some(actor) = &filter.actor {
             actor_uuid = Uuid::parse_str(actor).ok();
             if actor_uuid.is_some() {
-                sql.push_str(&format!(" AND (actor_id = ${} OR actor_name = ${})", idx, idx + 1));
+                sql.push_str(&format!(
+                    " AND (actor_id = ${} OR actor_name = ${})",
+                    idx,
+                    idx + 1
+                ));
                 idx += 2;
                 params.push(actor.clone());
             } else {
@@ -735,10 +739,7 @@ impl Repository for PostgresRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn delete_recordings_before(
-        &self,
-        ts: DateTime<Utc>,
-    ) -> Result<u64, GatewayError> {
+    async fn delete_recordings_before(&self, ts: DateTime<Utc>) -> Result<u64, GatewayError> {
         let result = sqlx::query("DELETE FROM recordings WHERE ts < $1")
             .bind(ts)
             .execute(&self.pool)
@@ -749,15 +750,14 @@ impl Repository for PostgresRepository {
     // ---------- quota ----------
 
     async fn get_quota_usage(&self, period: &str) -> Result<Option<(u64, u64)>, GatewayError> {
-        let row = sqlx::query(
-            "SELECT calls_total, calls_rejected FROM quota_usage WHERE period = $1",
-        )
-        .bind(period)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row =
+            sqlx::query("SELECT calls_total, calls_rejected FROM quota_usage WHERE period = $1")
+                .bind(period)
+                .fetch_optional(&self.pool)
+                .await?;
 
         Ok(row.map(|r| {
-            let calls: i64    = r.get(0);
+            let calls: i64 = r.get(0);
             let rejected: i64 = r.get(1);
             (calls.max(0) as u64, rejected.max(0) as u64)
         }))
@@ -801,14 +801,14 @@ fn row_to_service(row: sqlx::postgres::PgRow) -> Result<Service, GatewayError> {
         .unwrap_or_else(|_| "round-robin".to_string());
 
     let tls_verify: bool = row.try_get("tls_verify").unwrap_or(true);
-    let tls_client_cert_path: Option<String> =
-        row.try_get::<Option<String>, _>("tls_client_cert_path")
-            .ok()
-            .flatten();
-    let tls_client_key_path: Option<String> =
-        row.try_get::<Option<String>, _>("tls_client_key_path")
-            .ok()
-            .flatten();
+    let tls_client_cert_path: Option<String> = row
+        .try_get::<Option<String>, _>("tls_client_cert_path")
+        .ok()
+        .flatten();
+    let tls_client_key_path: Option<String> = row
+        .try_get::<Option<String>, _>("tls_client_key_path")
+        .ok()
+        .flatten();
     let tls_ca_path: Option<String> = row
         .try_get::<Option<String>, _>("tls_ca_path")
         .ok()
@@ -929,9 +929,7 @@ fn row_to_audit(row: sqlx::postgres::PgRow) -> Result<AuditEntry, GatewayError> 
     })
 }
 
-fn row_to_recording_index(
-    row: sqlx::postgres::PgRow,
-) -> Result<RecordingIndexRow, GatewayError> {
+fn row_to_recording_index(row: sqlx::postgres::PgRow) -> Result<RecordingIndexRow, GatewayError> {
     let id: String = row.try_get("id")?;
     let ts: DateTime<Utc> = row.try_get("ts")?;
     let status: i16 = row.try_get("status")?;

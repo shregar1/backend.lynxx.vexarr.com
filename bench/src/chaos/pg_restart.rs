@@ -91,9 +91,18 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
                         let ok_c;
                         let err_c;
                         match p {
-                            0 => { ok_c = &pre_ok; err_c = &pre_err; }
-                            1 => { ok_c = &mid_ok; err_c = &mid_err; }
-                            _ => { ok_c = &post_ok; err_c = &post_err; }
+                            0 => {
+                                ok_c = &pre_ok;
+                                err_c = &pre_err;
+                            }
+                            1 => {
+                                ok_c = &mid_ok;
+                                err_c = &mid_err;
+                            }
+                            _ => {
+                                ok_c = &post_ok;
+                                err_c = &post_err;
+                            }
                         }
                         match client.get(&url).send().await {
                             Ok(resp) => {
@@ -152,7 +161,10 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
         Err(e) => {
             stop.store(true, Ordering::Relaxed);
             let _ = load_handle.await;
-            return Ok(Report::fail(SCENARIO, format!("docker restart errored: {e}")));
+            return Ok(Report::fail(
+                SCENARIO,
+                format!("docker restart errored: {e}"),
+            ));
         }
     }
 
@@ -212,10 +224,7 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
         mid_ok_n as f64 / (mid_ok_n + mid_err_n) as f64
     };
     // Cached config means in-flight data-plane requests should remain healthy.
-    let pass = admin_recovered
-        && mid_success_rate >= 0.99
-        && pre_err_n == 0
-        && post_err_n == 0;
+    let pass = admin_recovered && mid_success_rate >= 0.99 && pre_err_n == 0 && post_err_n == 0;
 
     let summary = format!(
         "data: pre={}/{} mid={}/{} post={}/{} · admin_recovered={}",

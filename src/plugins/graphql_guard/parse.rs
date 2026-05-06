@@ -8,9 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use graphql_parser::query::{
-    Definition, Document, OperationDefinition, Selection, SelectionSet,
-};
+use graphql_parser::query::{Definition, Document, OperationDefinition, Selection, SelectionSet};
 
 use super::config::GraphqlGuardConfig;
 
@@ -258,7 +256,12 @@ mod tests {
 
     #[test]
     fn mutation_classified() {
-        let s = analyze("mutation Foo { deleteUser(id: \"1\") { ok } }", &cfg(), None).unwrap();
+        let s = analyze(
+            "mutation Foo { deleteUser(id: \"1\") { ok } }",
+            &cfg(),
+            None,
+        )
+        .unwrap();
         assert_eq!(s.operation_type, "mutation");
         assert_eq!(s.operation_name.as_deref(), Some("Foo"));
     }

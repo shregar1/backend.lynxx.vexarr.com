@@ -101,21 +101,23 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     let okc = ok.load(Ordering::Relaxed);
     let errc = err.load(Ordering::Relaxed);
     let hist = Arc::try_unwrap(hist).map(|m| m.into_inner()).ok();
-    let p50 = hist.as_ref().map(|h| h.value_at_quantile(0.50)).unwrap_or(0);
+    let p50 = hist
+        .as_ref()
+        .map(|h| h.value_at_quantile(0.50))
+        .unwrap_or(0);
     let p50_ms = p50 as f64 / 1_000.0;
 
-    let summary = format!(
-        "{}/100 fast ok · p50={} during slow",
-        okc,
-        fmt_us(p50)
-    );
+    let summary = format!("{}/100 fast ok · p50={} during slow", okc, fmt_us(p50));
     let passed = errc == 0 && okc == 100 && p50_ms < 50.0;
     let r = if passed {
         Report::pass(SCENARIO, summary)
     } else {
         Report::fail(SCENARIO, summary)
     };
-    Ok(r.detail(format!("100 slow TCP clients held open for {}s", duration.as_secs())))
+    Ok(r.detail(format!(
+        "100 slow TCP clients held open for {}s",
+        duration.as_secs()
+    )))
 }
 
 fn parse_host_port(url: &str) -> Result<String> {

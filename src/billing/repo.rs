@@ -149,10 +149,11 @@ impl BillingRepo for SqlBillingRepo {
     }
 
     async fn list_api_keys(&self, customer_id: Uuid) -> Result<Vec<ApiKeyRecord>> {
-        let rows = sqlx::query("SELECT * FROM api_keys WHERE customer_id = ? ORDER BY created_at DESC")
-            .bind(customer_id.to_string())
-            .fetch_all(&self.pool)
-            .await?;
+        let rows =
+            sqlx::query("SELECT * FROM api_keys WHERE customer_id = ? ORDER BY created_at DESC")
+                .bind(customer_id.to_string())
+                .fetch_all(&self.pool)
+                .await?;
         rows.into_iter().map(row_to_api_key).collect()
     }
 
@@ -165,13 +166,12 @@ impl BillingRepo for SqlBillingRepo {
     }
 
     async fn revoke_api_key(&self, customer_id: Uuid, key_id: Uuid) -> Result<bool> {
-        let res = sqlx::query(
-            "UPDATE api_keys SET status = 'revoked' WHERE id = ? AND customer_id = ?",
-        )
-        .bind(key_id.to_string())
-        .bind(customer_id.to_string())
-        .execute(&self.pool)
-        .await?;
+        let res =
+            sqlx::query("UPDATE api_keys SET status = 'revoked' WHERE id = ? AND customer_id = ?")
+                .bind(key_id.to_string())
+                .bind(customer_id.to_string())
+                .execute(&self.pool)
+                .await?;
         Ok(res.rows_affected() > 0)
     }
 
@@ -205,8 +205,14 @@ fn row_to_customer(row: sqlx::any::AnyRow) -> Result<Customer> {
         name: row.try_get::<Option<String>, _>("name").ok().flatten(),
         company: row.try_get::<Option<String>, _>("company").ok().flatten(),
         tier: row.try_get("tier")?,
-        stripe_customer_id: row.try_get::<Option<String>, _>("stripe_customer_id").ok().flatten(),
-        stripe_subscription_id: row.try_get::<Option<String>, _>("stripe_subscription_id").ok().flatten(),
+        stripe_customer_id: row
+            .try_get::<Option<String>, _>("stripe_customer_id")
+            .ok()
+            .flatten(),
+        stripe_subscription_id: row
+            .try_get::<Option<String>, _>("stripe_subscription_id")
+            .ok()
+            .flatten(),
         subscription_status: row.try_get("subscription_status")?,
         created_at: parse_dt(&created_at)?,
         updated_at: parse_dt(&updated_at)?,

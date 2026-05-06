@@ -12,7 +12,7 @@ use anyhow::Result;
 use tokio::sync::Mutex;
 use tokio::time::{sleep_until, Instant as TokioInstant};
 
-use crate::chaos::{fmt_count, find_gateway_pid, rss_kb, AdminClient, Args, Report};
+use crate::chaos::{find_gateway_pid, fmt_count, rss_kb, AdminClient, Args, Report};
 
 const SCENARIO: &str = "memory";
 
@@ -112,7 +112,11 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     tokio::time::sleep(Duration::from_secs(30)).await;
     let baseline = rss_kb(pid).unwrap_or(0);
     let mut samples = vec![(Duration::from_secs(0), baseline)];
-    tracing::info!(scenario = SCENARIO, baseline_kb = baseline, "baseline RSS captured");
+    tracing::info!(
+        scenario = SCENARIO,
+        baseline_kb = baseline,
+        "baseline RSS captured"
+    );
 
     let test_start = Instant::now();
     while test_start.elapsed() < duration {
@@ -120,7 +124,12 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
         let elapsed = test_start.elapsed();
         if let Some(rss) = rss_kb(pid) {
             samples.push((elapsed, rss));
-            tracing::info!(scenario = SCENARIO, rss_kb = rss, elapsed_s = elapsed.as_secs(), "rss sample");
+            tracing::info!(
+                scenario = SCENARIO,
+                rss_kb = rss,
+                elapsed_s = elapsed.as_secs(),
+                "rss sample"
+            );
         }
     }
 
@@ -150,9 +159,17 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     } else {
         Report::fail(SCENARIO, summary)
     };
-    r = r.detail(format!("budget 50 MB; observed {:+.1} MB over {}s", growth_mb, duration.as_secs()));
+    r = r.detail(format!(
+        "budget 50 MB; observed {:+.1} MB over {}s",
+        growth_mb,
+        duration.as_secs()
+    ));
     for (t, k) in samples.iter().take(10) {
-        r = r.detail(format!("  t={}s rss={:.1} MB", t.as_secs(), *k as f64 / 1024.0));
+        r = r.detail(format!(
+            "  t={}s rss={:.1} MB",
+            t.as_secs(),
+            *k as f64 / 1024.0
+        ));
     }
     Ok(r)
 }

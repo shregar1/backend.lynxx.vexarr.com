@@ -39,7 +39,13 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     // 1. Service with weighted round-robin across 4 upstream instances.
     // -----------------------------------------------------------------------
     let svc_id = admin
-        .create_service_lb("extreme-gateway", "http://127.0.0.1:19090", 0, 5_000, "round-robin")
+        .create_service_lb(
+            "extreme-gateway",
+            "http://127.0.0.1:19090",
+            0,
+            5_000,
+            "round-robin",
+        )
         .await?;
 
     // Targets: weights 4, 3, 2, 1 → 40 / 30 / 20 / 10 % distribution.
@@ -57,65 +63,113 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     // 2. Plugin chain: 9 plugins, fully configured.
     // -----------------------------------------------------------------------
     // 2a. CORS — allow everything (verifies header injection on every response)
-    admin.create_plugin_for_service(svc_id, "cors", serde_json::json!({
-        "allow_origins": ["*"],
-        "allow_methods": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
-        "allow_headers": ["*"],
-        "expose_headers": ["X-Request-Id", "X-Correlation-Id", "X-Processed-By"]
-    })).await;
+    admin
+        .create_plugin_for_service(
+            svc_id,
+            "cors",
+            serde_json::json!({
+                "allow_origins": ["*"],
+                "allow_methods": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+                "allow_headers": ["*"],
+                "expose_headers": ["X-Request-Id", "X-Correlation-Id", "X-Processed-By"]
+            }),
+        )
+        .await;
 
     // 2b. Rate limiter — 1 M req/s (effectively unlimited but still executes
     //     the token-bucket code path on every request).
-    admin.create_plugin_for_service(svc_id, "rate-limit", serde_json::json!({
-        "requests_per_second": 1_000_000.0
-    })).await;
+    admin
+        .create_plugin_for_service(
+            svc_id,
+            "rate-limit",
+            serde_json::json!({
+                "requests_per_second": 1_000_000.0
+            }),
+        )
+        .await;
 
     // 2c. IP restriction — explicit allow-all CIDR (executes IP parse + lookup)
-    admin.create_plugin_for_service(svc_id, "ip-restriction", serde_json::json!({
-        "allow": ["0.0.0.0/0", "::/0"]
-    })).await;
+    admin
+        .create_plugin_for_service(
+            svc_id,
+            "ip-restriction",
+            serde_json::json!({
+                "allow": ["0.0.0.0/0", "::/0"]
+            }),
+        )
+        .await;
 
     // 2d. Request transformer — add two headers upstream sees on every request
-    admin.create_plugin_for_service(svc_id, "request-transformer", serde_json::json!({
-        "add_headers": {
-            "X-Extreme-Test": "yes",
-            "X-Gateway": "lynxx"
-        }
-    })).await;
+    admin
+        .create_plugin_for_service(
+            svc_id,
+            "request-transformer",
+            serde_json::json!({
+                "add_headers": {
+                    "X-Extreme-Test": "yes",
+                    "X-Gateway": "lynxx"
+                }
+            }),
+        )
+        .await;
 
     // 2e. Response transformer — add two headers the client sees
-    admin.create_plugin_for_service(svc_id, "response-transformer", serde_json::json!({
-        "add_headers": {
-            "X-Processed-By": "lynxx-gateway",
-            "X-LB-Strategy": "weighted-round-robin"
-        }
-    })).await;
+    admin
+        .create_plugin_for_service(
+            svc_id,
+            "response-transformer",
+            serde_json::json!({
+                "add_headers": {
+                    "X-Processed-By": "lynxx-gateway",
+                    "X-LB-Strategy": "weighted-round-robin"
+                }
+            }),
+        )
+        .await;
 
     // 2f. Proxy cache — 5-second TTL for GET 200s (exercises cache hit path)
-    admin.create_plugin_for_service(svc_id, "proxy-cache", serde_json::json!({
-        "ttl_seconds": 5,
-        "cache_methods": ["GET"],
-        "cache_status": [200],
-        "cache_key_strategy": "uri"
-    })).await;
+    admin
+        .create_plugin_for_service(
+            svc_id,
+            "proxy-cache",
+            serde_json::json!({
+                "ttl_seconds": 5,
+                "cache_methods": ["GET"],
+                "cache_status": [200],
+                "cache_key_strategy": "uri"
+            }),
+        )
+        .await;
 
     // 2g. Logging — structured request logging (exercises the plugin hook)
-    admin.create_plugin_for_service(svc_id, "logging", serde_json::json!({})).await;
+    admin
+        .create_plugin_for_service(svc_id, "logging", serde_json::json!({}))
+        .await;
 
     // 2h. Bot detection — permissive; still runs UA parsing
-    admin.create_plugin_for_service(svc_id, "bot-detection", serde_json::json!({
-        "deny": []
-    })).await;
+    admin
+        .create_plugin_for_service(
+            svc_id,
+            "bot-detection",
+            serde_json::json!({
+                "deny": []
+            }),
+        )
+        .await;
 
     // 2i. Correlation ID — inject X-Correlation-Id on every request
-    admin.create_plugin_for_service(svc_id, "correlation-id", serde_json::json!({
-        "header_name": "X-Correlation-Id",
-        "generator": "uuid"
-    })).await;
+    admin
+        .create_plugin_for_service(
+            svc_id,
+            "correlation-id",
+            serde_json::json!({
+                "header_name": "X-Correlation-Id",
+                "generator": "uuid"
+            }),
+        )
+        .await;
 
-    let route_id = admin
-        .create_route(svc_id, &["/extreme"], &[], true)
-        .await?;
+    let route_id = admin.create_route(svc_id, &["/extreme"], &[], true).await?;
 
     let proxy_url = format!("{}/extreme", args.proxy_url.trim_end_matches('/'));
     let raw_url = "http://127.0.0.1:19090/";
@@ -124,11 +178,11 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     // 3. Benchmark at escalating RPS tiers.
     // -----------------------------------------------------------------------
     let tiers: &[(u64, &str, f64, f64)] = &[
-        (500,  "500 RPS",  0.001, 50.0),   // (rps, label, max_err_rate, max_p99_ms)
-        (1000, "1k RPS",   0.001, 50.0),
-        (2000, "2k RPS",   0.001, 150.0),
-        (3000, "3k RPS",   0.001, 150.0),
-        (5000, "5k RPS",   0.001, 300.0),
+        (500, "500 RPS", 0.001, 50.0), // (rps, label, max_err_rate, max_p99_ms)
+        (1000, "1k RPS", 0.001, 50.0),
+        (2000, "2k RPS", 0.001, 150.0),
+        (3000, "3k RPS", 0.001, 150.0),
+        (5000, "5k RPS", 0.001, 300.0),
     ];
 
     let warmup = Duration::from_secs(3);
@@ -195,14 +249,28 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
 
     detail_lines.push(format!(
         "{:<12} {:>8} {:>8} {:>10} {:>10} {:>10}   {:<12} {:>8} {:>8} {:>10} {:>10}   {}",
-        "tier", "gw-ok", "gw-err", "gw-p50", "gw-p99", "gw-p999",
-        "raw-ok", "raw-p50", "raw-p99", "overhead-p99", "overhead-p999", "pass?"
+        "tier",
+        "gw-ok",
+        "gw-err",
+        "gw-p50",
+        "gw-p99",
+        "gw-p999",
+        "raw-ok",
+        "raw-p50",
+        "raw-p99",
+        "overhead-p99",
+        "overhead-p999",
+        "pass?"
     ));
     detail_lines.push("-".repeat(120));
 
     for (gw, raw) in tier_results.iter().zip(raw_results.iter()) {
         let total = gw.ok + gw.err;
-        let err_rate = if total == 0 { 0.0 } else { gw.err as f64 / total as f64 };
+        let err_rate = if total == 0 {
+            0.0
+        } else {
+            gw.err as f64 / total as f64
+        };
         let p99_ms = gw.p99 as f64 / 1000.0;
         let tier_pass = err_rate <= gw.max_err && p99_ms <= gw.max_p99;
         if !tier_pass {
@@ -234,7 +302,8 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
     //   p50 ≈ 6 ms, p99 ≈ 22 ms, p99.9 ≈ 45 ms
     detail_lines.push("".into());
     detail_lines.push("Kong OSS 5-plugin benchmark reference (1000 RPS, LuaJIT/Nginx):".into());
-    detail_lines.push("  p50≈6ms  p99≈22ms  p99.9≈45ms  (source: Kong Gateway Performance 2024)".into());
+    detail_lines
+        .push("  p50≈6ms  p99≈22ms  p99.9≈45ms  (source: Kong Gateway Performance 2024)".into());
 
     if let Some(lynxx_1k) = tier_results.iter().find(|t| t.rps == 1000) {
         let gw_p50_ms = lynxx_1k.p50 as f64 / 1000.0;
@@ -246,7 +315,11 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
 
         let p99_advantage = 22.0 - gw_p99_ms;
         let direction = if gw_p99_ms < 22.0 { "faster" } else { "slower" };
-        let pct = if gw_p99_ms < 22.0 { 100.0 * (22.0 - gw_p99_ms) / 22.0 } else { 0.0 };
+        let pct = if gw_p99_ms < 22.0 {
+            100.0 * (22.0 - gw_p99_ms) / 22.0
+        } else {
+            0.0
+        };
         detail_lines.push(format!(
             "Lynxx p99 advantage over Kong: {p99_advantage:+.1}ms ({pct:.0}% {direction})"
         ));
@@ -366,9 +439,24 @@ async fn run_tier(
     let okc = ok.load(Ordering::Relaxed);
     let errc = err.load(Ordering::Relaxed);
     let hist = Arc::try_unwrap(hist).map(|m| m.into_inner()).ok();
-    let p50 = hist.as_ref().map(|h| h.value_at_quantile(0.50)).unwrap_or(0);
-    let p99 = hist.as_ref().map(|h| h.value_at_quantile(0.99)).unwrap_or(0);
-    let p999 = hist.as_ref().map(|h| h.value_at_quantile(0.999)).unwrap_or(0);
+    let p50 = hist
+        .as_ref()
+        .map(|h| h.value_at_quantile(0.50))
+        .unwrap_or(0);
+    let p99 = hist
+        .as_ref()
+        .map(|h| h.value_at_quantile(0.99))
+        .unwrap_or(0);
+    let p999 = hist
+        .as_ref()
+        .map(|h| h.value_at_quantile(0.999))
+        .unwrap_or(0);
 
-    PhaseResult { ok: okc, err: errc, p50, p99, p999 }
+    PhaseResult {
+        ok: okc,
+        err: errc,
+        p50,
+        p99,
+        p999,
+    }
 }

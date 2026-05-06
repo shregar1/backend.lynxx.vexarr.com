@@ -43,16 +43,12 @@ fn pick_encoder(model: &str) -> Encoder {
 
 fn cl100k() -> &'static CoreBPE {
     static CL: OnceLock<CoreBPE> = OnceLock::new();
-    CL.get_or_init(|| {
-        tiktoken_rs::cl100k_base().expect("cl100k_base BPE bundled with tiktoken-rs")
-    })
+    CL.get_or_init(|| tiktoken_rs::cl100k_base().expect("cl100k_base BPE bundled with tiktoken-rs"))
 }
 
 fn o200k() -> &'static CoreBPE {
     static O2: OnceLock<CoreBPE> = OnceLock::new();
-    O2.get_or_init(|| {
-        tiktoken_rs::o200k_base().expect("o200k_base BPE bundled with tiktoken-rs")
-    })
+    O2.get_or_init(|| tiktoken_rs::o200k_base().expect("o200k_base BPE bundled with tiktoken-rs"))
 }
 
 /// Count tokens in a single string, using the BPE for the named model.
@@ -107,7 +103,10 @@ pub fn count_messages(model: &str, messages: &[Value]) -> usize {
 pub fn extract_usage(body: &Value) -> Option<(u64, u64)> {
     let usage = body.get("usage")?;
     let prompt = usage.get("prompt_tokens").and_then(|v| v.as_u64())?;
-    let completion = usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let completion = usage
+        .get("completion_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     Some((prompt, completion))
 }
 

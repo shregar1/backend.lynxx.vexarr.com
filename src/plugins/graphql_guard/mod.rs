@@ -231,11 +231,8 @@ impl Plugin for GraphqlGuardPlugin {
             .get("x-consumer-username")
             .and_then(|v| v.to_str().ok())
             .map(String::from);
-        let is_anon =
-            matches!(consumer.as_deref(), None | Some("anonymous") | Some(""));
-        if self.cfg.block_mutations_for_anonymous
-            && summary.operation_type == "mutation"
-            && is_anon
+        let is_anon = matches!(consumer.as_deref(), None | Some("anonymous") | Some(""));
+        if self.cfg.block_mutations_for_anonymous && summary.operation_type == "mutation" && is_anon
         {
             metric_block("ANONYMOUS_MUTATIONS_BLOCKED", "mutation");
             return Err(short_circuit(
@@ -333,7 +330,10 @@ impl Plugin for GraphqlGuardPlugin {
                 "global" => rl.field.clone(),
                 _ => consumer.clone().unwrap_or_else(|| "anonymous".into()),
             };
-            if !self.buckets.try_consume(&rl.field, &key, rl.requests_per_second) {
+            if !self
+                .buckets
+                .try_consume(&rl.field, &key, rl.requests_per_second)
+            {
                 metric_block("FIELD_RATE_LIMIT", summary.operation_type);
                 return Err(short_circuit(
                     429,
@@ -379,11 +379,7 @@ impl Plugin for GraphqlGuardPlugin {
             "x-lynxx-graphql-complexity",
             &summary.complexity.to_string(),
         );
-        insert_header(
-            headers,
-            "x-lynxx-graphql-depth",
-            &summary.depth.to_string(),
-        );
+        insert_header(headers, "x-lynxx-graphql-depth", &summary.depth.to_string());
         insert_header(
             headers,
             "x-lynxx-graphql-persisted",
@@ -392,11 +388,7 @@ impl Plugin for GraphqlGuardPlugin {
         // Update content-length so the upstream gets the right framing if
         // we rewrote the body. axum/hyper will redo this when streaming, but
         // some downstream plugins read `content-length` directly.
-        insert_header(
-            headers,
-            "content-length",
-            &outbound_bytes.len().to_string(),
-        );
+        insert_header(headers, "content-length", &outbound_bytes.len().to_string());
 
         // -- Metrics --------------------------------------------------
         metrics::counter!(

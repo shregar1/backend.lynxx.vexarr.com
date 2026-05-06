@@ -131,7 +131,10 @@ async fn verify_license(
         .repo
         .find_customer(key.customer_id)
         .await?
-        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "customer missing".into()))?;
+        .ok_or(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "customer missing".into(),
+        ))?;
     if customer.subscription_status != "active" {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
@@ -225,8 +228,13 @@ async fn signup(
         let key = mint_key(&state, customer.id, "Default").await?;
         resp.api_key = Some(key);
     } else if let Some(price_id) = state.stripe.price_for_tier(&tier) {
-        match stripe::create_checkout_session(&state.stripe, price_id, &email, &customer.id.to_string())
-            .await
+        match stripe::create_checkout_session(
+            &state.stripe,
+            price_id,
+            &email,
+            &customer.id.to_string(),
+        )
+        .await
         {
             Ok(sess) => resp.checkout_url = sess.url,
             Err(e) => {
@@ -323,10 +331,7 @@ struct MeResp {
     has_stripe_customer: bool,
 }
 
-async fn me(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<MeResp>, ApiError> {
+async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<MeResp>, ApiError> {
     let c = require_session(&state, &headers).await?;
     Ok(Json(MeResp {
         id: c.id.to_string(),
@@ -424,9 +429,10 @@ async fn start_checkout(
         .price_for_tier(&req.tier.to_lowercase())
         .ok_or_else(|| bad("unsupported tier or stripe not configured"))?
         .to_string();
-    let sess = stripe::create_checkout_session(&state.stripe, &price_id, &c.email, &c.id.to_string())
-        .await
-        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let sess =
+        stripe::create_checkout_session(&state.stripe, &price_id, &c.email, &c.id.to_string())
+            .await
+            .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(json!({ "url": sess.url })))
 }
 
@@ -457,23 +463,30 @@ async fn stripe_webhook(
         .get("stripe-signature")
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| bad("missing signature"))?;
-    let event = stripe::verify_webhook(&state.stripe.webhook_secret, &body, sig)
-        .map_err(|e| {
-            warn!(error=%e, "webhook verify failed");
-            ApiError(StatusCode::UNAUTHORIZED, "bad signature".into())
-        })?;
+    let event = stripe::verify_webhook(&state.stripe.webhook_secret, &body, sig).map_err(|e| {
+        warn!(error=%e, "webhook verify failed");
+        ApiError(StatusCode::UNAUTHORIZED, "bad signature".into())
+    })?;
 
     let kind = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    let data = event.get("data").and_then(|v| v.get("object")).cloned().unwrap_or(Value::Null);
+    let data = event
+        .get("data")
+        .and_then(|v| v.get("object"))
+        .cloned()
+        .unwrap_or(Value::Null);
 
     match kind {
         // Initial subscription completed via Checkout. Promote tier and
         // mint the customer's first live API key.
         "checkout.session.completed" => handle_checkout_completed(&state, &data).await?,
         // Renewal / plan change. Reflect tier from the active line item.
-        "customer.subscription.updated" => handle_subscription_event(&state, &data, "active").await?,
+        "customer.subscription.updated" => {
+            handle_subscription_event(&state, &data, "active").await?
+        }
         // Cancellation. Mark inactive and revoke all API keys.
-        "customer.subscription.deleted" => handle_subscription_event(&state, &data, "canceled").await?,
+        "customer.subscription.deleted" => {
+            handle_subscription_event(&state, &data, "canceled").await?
+        }
         // Payment failed → past_due (still active grace, but flagged).
         "invoice.payment_failed" => handle_payment_failed(&state, &data).await?,
         _ => info!(event_type = %kind, "unhandled stripe event"),
@@ -487,8 +500,14 @@ async fn handle_checkout_completed(state: &AppState, obj: &Value) -> Result<(), 
         .and_then(|v| v.as_str())
         .ok_or_else(|| bad("missing client_reference_id"))?;
     let customer_uuid = Uuid::parse_str(client_ref).map_err(|_| bad("bad client_reference_id"))?;
-    let stripe_customer = obj.get("customer").and_then(|v| v.as_str()).map(String::from);
-    let stripe_sub = obj.get("subscription").and_then(|v| v.as_str()).map(String::from);
+    let stripe_customer = obj
+        .get("customer")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let stripe_sub = obj
+        .get("subscription")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     // Look up the subscription to determine tier.
     let mut tier = "pro".to_string();
@@ -595,7 +614,10 @@ async fn handle_payment_failed(state: &AppState, obj: &Value) -> Result<(), ApiE
     Ok(())
 }
 
-async fn fetch_subscription(cfg: &stripe::StripeConfig, sub_id: &str) -> Result<Value, anyhow::Error> {
+async fn fetch_subscription(
+    cfg: &stripe::StripeConfig,
+    sub_id: &str,
+) -> Result<Value, anyhow::Error> {
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("https://api.stripe.com/v1/subscriptions/{sub_id}"))

@@ -234,8 +234,10 @@ impl Plugin for StatsdPlugin {
             }
             if metrics.contains(&Metric::StatusCount) {
                 let class = format!("{}xx", status / 100);
-                let suffix =
-                    format_tags(vec![("status_class".into(), class), ("status".into(), status.to_string())]);
+                let suffix = format_tags(vec![
+                    ("status_class".into(), class),
+                    ("status".into(), status.to_string()),
+                ]);
                 send_line(format!("{prefix}.status:1|c{suffix}")).await;
             }
             if metrics.contains(&Metric::RequestDuration) {

@@ -344,8 +344,7 @@ async fn async_main() -> anyhow::Result<()> {
                 .to_string_lossy()
                 .into_owned()
         });
-    let recording_store =
-        Arc::new(crate::recording::ContentAddressedStore::new(recording_dir));
+    let recording_store = Arc::new(crate::recording::ContentAddressedStore::new(recording_dir));
     let admin_http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -382,8 +381,7 @@ async fn async_main() -> anyhow::Result<()> {
     // / mesh by convention).
     let proxy_addr_socket: std::net::SocketAddr = proxy_addr.parse()?;
     if config.gateway.tls.enabled {
-        let server_config =
-            crate::proxy::tls::build_server_config(&config.gateway.tls)?;
+        let server_config = crate::proxy::tls::build_server_config(&config.gateway.tls)?;
         tracing::info!(
             "proxy listening on {proxy_addr} (TLS{})",
             if config.gateway.tls.mtls_enabled() {
@@ -392,7 +390,8 @@ async fn async_main() -> anyhow::Result<()> {
                 ""
             }
         );
-        let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
+        let rustls_cfg =
+            axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
         let serve = axum_server::bind_rustls(proxy_addr_socket, rustls_cfg)
             .serve(proxy_app.into_make_service());
         tokio::select! {

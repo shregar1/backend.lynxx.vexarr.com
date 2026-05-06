@@ -46,28 +46,28 @@ pub enum PlanTier {
 impl PlanTier {
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "pro"        => PlanTier::Pro,
-            "business"   => PlanTier::Business,
+            "pro" => PlanTier::Pro,
+            "business" => PlanTier::Business,
             "enterprise" => PlanTier::Enterprise,
-            _            => PlanTier::Free,
+            _ => PlanTier::Free,
         }
     }
 
     /// Monthly call limit, or `None` for unlimited plans.
     pub fn monthly_limit(self) -> Option<u64> {
         match self {
-            PlanTier::Free       => Some(1_000_000),
-            PlanTier::Pro        => Some(10_000_000),
-            PlanTier::Business   => None,
+            PlanTier::Free => Some(1_000_000),
+            PlanTier::Pro => Some(10_000_000),
+            PlanTier::Business => None,
             PlanTier::Enterprise => None,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
-            PlanTier::Free       => "free",
-            PlanTier::Pro        => "pro",
-            PlanTier::Business   => "business",
+            PlanTier::Free => "free",
+            PlanTier::Pro => "pro",
+            PlanTier::Business => "business",
             PlanTier::Enterprise => "enterprise",
         }
     }
@@ -81,29 +81,34 @@ impl PlanTier {
 /// at startup, share it as `Arc<QuotaTracker>` across the proxy handler and
 /// the admin API.
 pub struct QuotaTracker {
-    plan:     PlanTier,
+    plan: PlanTier,
     /// Current billing period ('YYYY-MM'). Updated atomically on rollover.
-    period:   std::sync::Mutex<String>,
+    period: std::sync::Mutex<String>,
     /// Calls allowed through this period.
-    calls:    AtomicU64,
+    calls: AtomicU64,
     /// Calls rejected due to over-quota this period.
     rejected: AtomicU64,
-    repo:     Arc<dyn Repository>,
+    repo: Arc<dyn Repository>,
 }
 
 impl QuotaTracker {
     /// Load the current period's counters from the DB and return a ready
     /// tracker. Call this once during gateway startup.
-    pub async fn load(plan: PlanTier, repo: Arc<dyn Repository>) -> Result<Arc<Self>, GatewayError> {
+    pub async fn load(
+        plan: PlanTier,
+        repo: Arc<dyn Repository>,
+    ) -> Result<Arc<Self>, GatewayError> {
         let period = current_period();
-        let (calls, rejected) = repo.get_quota_usage(&period).await?
+        let (calls, rejected) = repo
+            .get_quota_usage(&period)
+            .await?
             .map(|(c, r)| (c, r))
             .unwrap_or((0, 0));
 
         let tracker = Arc::new(Self {
             plan,
             period: std::sync::Mutex::new(period.clone()),
-            calls:    AtomicU64::new(calls),
+            calls: AtomicU64::new(calls),
             rejected: AtomicU64::new(rejected),
             repo,
         });
@@ -153,25 +158,25 @@ impl QuotaTracker {
 
     /// Snapshot of current usage for the admin API / dashboard.
     pub fn snapshot(&self) -> QuotaSnapshot {
-        let period  = self.period.lock().expect("period mutex").clone();
-        let calls   = self.calls.load(Ordering::Relaxed);
-        let rejected= self.rejected.load(Ordering::Relaxed);
-        let limit   = self.plan.monthly_limit();
+        let period = self.period.lock().expect("period mutex").clone();
+        let calls = self.calls.load(Ordering::Relaxed);
+        let rejected = self.rejected.load(Ordering::Relaxed);
+        let limit = self.plan.monthly_limit();
         QuotaSnapshot {
-            plan:             self.plan,
+            plan: self.plan,
             period,
-            calls_total:      calls,
-            calls_rejected:   rejected,
-            calls_limit:      limit,
-            calls_remaining:  limit.map(|l| l.saturating_sub(calls)),
+            calls_total: calls,
+            calls_rejected: rejected,
+            calls_limit: limit,
+            calls_remaining: limit.map(|l| l.saturating_sub(calls)),
         }
     }
 
     /// Persist counters to the DB. Called by the background flush task and
     /// on clean shutdown.
     pub async fn flush(&self) {
-        let period   = self.period.lock().expect("period mutex").clone();
-        let calls    = self.calls.load(Ordering::Relaxed);
+        let period = self.period.lock().expect("period mutex").clone();
+        let calls = self.calls.load(Ordering::Relaxed);
         let rejected = self.rejected.load(Ordering::Relaxed);
         if let Err(e) = self.repo.upsert_quota_usage(&period, calls, rejected).await {
             warn!(error = %e, "quota flush failed");
@@ -218,11 +223,11 @@ pub fn spawn_quota_flusher(tracker: Arc<QuotaTracker>) {
 
 #[derive(Debug, Serialize)]
 pub struct QuotaSnapshot {
-    pub plan:            PlanTier,
-    pub period:          String,
-    pub calls_total:     u64,
-    pub calls_rejected:  u64,
-    pub calls_limit:     Option<u64>,
+    pub plan: PlanTier,
+    pub period: String,
+    pub calls_total: u64,
+    pub calls_rejected: u64,
+    pub calls_limit: Option<u64>,
     pub calls_remaining: Option<u64>,
 }
 

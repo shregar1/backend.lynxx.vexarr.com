@@ -41,11 +41,7 @@ pub fn spawn_prewarmer(
         return None;
     }
     let concurrency = concurrency.max(1);
-    tracing::info!(
-        interval_secs,
-        concurrency,
-        "spawning connection pre-warmer"
-    );
+    tracing::info!(interval_secs, concurrency, "spawning connection pre-warmer");
 
     let handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));

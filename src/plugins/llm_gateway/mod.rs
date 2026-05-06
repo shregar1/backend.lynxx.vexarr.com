@@ -130,7 +130,10 @@ impl LlmGatewayPlugin {
             parsed.rate_limit.requests_per_minute_per_consumer,
         );
 
-        let cost = CostTable::new(parsed.cost_tracking.enabled, parsed.cost_tracking.model_costs);
+        let cost = CostTable::new(
+            parsed.cost_tracking.enabled,
+            parsed.cost_tracking.model_costs,
+        );
 
         // 120s is generous; matched to the default OpenAI socket timeout.
         // Pool defaults are fine — one shared client across providers; the
@@ -281,7 +284,10 @@ impl Plugin for LlmGatewayPlugin {
         // -- Rate limit: per-consumer tokens + requests ----------------
         match self.buckets.check(&consumer, est_input) {
             Decision::Allow => {}
-            Decision::Deny { reason, retry_after } => {
+            Decision::Deny {
+                reason,
+                retry_after,
+            } => {
                 let code = match reason {
                     DenyReason::Tokens => "token_rate_limit_exceeded",
                     DenyReason::Requests => "request_rate_limit_exceeded",
@@ -346,7 +352,11 @@ impl Plugin for LlmGatewayPlugin {
         let forwarded_headers: Vec<(String, String)> = req
             .headers()
             .iter()
-            .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|s| (k.as_str().to_string(), s.to_string()))
+            })
             .collect();
 
         // -- Dispatch with fallback ------------------------------------
@@ -387,8 +397,7 @@ impl Plugin for LlmGatewayPlugin {
         } else {
             // Try to parse JSON and pull `usage`; fall back to estimate over
             // the response text.
-            let parsed: Value =
-                serde_json::from_slice(&result.body).unwrap_or(Value::Null);
+            let parsed: Value = serde_json::from_slice(&result.body).unwrap_or(Value::Null);
             match tokens::extract_usage(&parsed) {
                 Some(u) => u,
                 None => {
@@ -397,9 +406,7 @@ impl Plugin for LlmGatewayPlugin {
                     let mut out = 0u64;
                     if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
                         for c in choices {
-                            if let Some(t) = c
-                                .pointer("/message/content")
-                                .and_then(|v| v.as_str())
+                            if let Some(t) = c.pointer("/message/content").and_then(|v| v.as_str())
                             {
                                 out += tokens::count_text(&model, t) as u64;
                             }
@@ -522,7 +529,8 @@ mod tests {
         let err = LlmGatewayPlugin::from_config(&serde_json::json!({
             "providers":[{"name":"a","base_url":"http://x"}],
             "default_provider":"b"
-        })).err();
+        }))
+        .err();
         assert!(err.is_some());
     }
 

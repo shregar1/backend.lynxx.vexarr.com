@@ -26,7 +26,10 @@ impl CorrelationIdPlugin {
         let header_name = HeaderName::from_str(header)
             .map_err(|e| GatewayError::BadRequest(format!("invalid header name: {e}")))?;
         // `generator` is currently always w3c; accept the field for forward compat.
-        let _gen = cfg.get("generator").and_then(|v| v.as_str()).unwrap_or("w3c");
+        let _gen = cfg
+            .get("generator")
+            .and_then(|v| v.as_str())
+            .unwrap_or("w3c");
         Ok(Self { header_name })
     }
 
@@ -72,7 +75,8 @@ impl Plugin for CorrelationIdPlugin {
             _ => Self::synthesize(),
         };
         if let Ok(v) = HeaderValue::from_str(&value) {
-            req.headers_mut().insert(self.header_name.clone(), v.clone());
+            req.headers_mut()
+                .insert(self.header_name.clone(), v.clone());
             req.headers_mut().insert(HDR_PINNED, v);
         }
         req.extensions_mut().insert(CorrelationId(value));

@@ -146,10 +146,7 @@ fn pick_example(op: &Operation, default_status: u16) -> Option<(u16, String, Vec
     let content = if let Some(c) = resp.content.get("application/json") {
         Some(("application/json", c))
     } else {
-        resp.content
-            .iter()
-            .next()
-            .map(|(k, v)| (k.as_str(), v))
+        resp.content.iter().next().map(|(k, v)| (k.as_str(), v))
     };
     let (ct, media) = content?;
 

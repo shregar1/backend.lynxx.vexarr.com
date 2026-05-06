@@ -116,7 +116,13 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
         }));
     }
 
-    let methods = [Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::PATCH];
+    let methods = [
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::DELETE,
+        Method::PATCH,
+    ];
     for i in 0..total_requests {
         let target = producer_start + interval * (i as u32);
         sleep_until(target).await;
@@ -137,15 +143,27 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
         let _ = proc.kill();
     }
 
-    let counts = Arc::try_unwrap(counts).map(|m| m.into_inner()).unwrap_or_default();
+    let counts = Arc::try_unwrap(counts)
+        .map(|m| m.into_inner())
+        .unwrap_or_default();
     let total: u64 = counts.values().sum();
     let class = |lo: u16, hi: u16| -> u64 {
-        counts.iter().filter(|(s, _)| **s >= lo && **s < hi).map(|(_, n)| n).sum()
+        counts
+            .iter()
+            .filter(|(s, _)| **s >= lo && **s < hi)
+            .map(|(_, n)| n)
+            .sum()
     };
     let c2xx = class(200, 300);
     let c4xx = class(400, 500);
     let c5xx = class(500, 600);
-    let pct = |n: u64| if total == 0 { 0.0 } else { 100.0 * n as f64 / total as f64 };
+    let pct = |n: u64| {
+        if total == 0 {
+            0.0
+        } else {
+            100.0 * n as f64 / total as f64
+        }
+    };
     let p2 = pct(c2xx);
     let p4 = pct(c4xx);
     let p5 = pct(c5xx);

@@ -38,7 +38,11 @@ impl RedisRateLimitPlugin {
             .get("requests_per_second")
             .and_then(|v| v.as_u64())
             .unwrap_or(100);
-        let key_strategy = match cfg.get("key_strategy").and_then(|v| v.as_str()).unwrap_or("ip") {
+        let key_strategy = match cfg
+            .get("key_strategy")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ip")
+        {
             "consumer" => KeyStrategy::Consumer,
             "service" => KeyStrategy::Service,
             _ => KeyStrategy::Ip,
@@ -110,12 +114,7 @@ impl Plugin for RedisRateLimitPlugin {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let key = format!(
-            "{}:{}:{}",
-            self.namespace,
-            self.extract_key(req),
-            bucket
-        );
+        let key = format!("{}:{}:{}", self.namespace, self.extract_key(req), bucket);
 
         let mut conn = match self.connection().await {
             Ok(c) => c,

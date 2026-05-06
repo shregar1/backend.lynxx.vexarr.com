@@ -47,25 +47,23 @@ impl MockingPlugin {
         let arr = cfg
             .get("responses")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| GatewayError::BadRequest("mocking: `responses` must be an array".into()))?;
+            .ok_or_else(|| {
+                GatewayError::BadRequest("mocking: `responses` must be an array".into())
+            })?;
         let mut responses = Vec::with_capacity(arr.len());
         for r in arr {
-            let m = r
-                .get("match")
-                .ok_or_else(|| GatewayError::BadRequest("mocking: response missing `match`".into()))?;
+            let m = r.get("match").ok_or_else(|| {
+                GatewayError::BadRequest("mocking: response missing `match`".into())
+            })?;
             let method = m
                 .get("method")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_uppercase());
-            let path = m
-                .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| GatewayError::BadRequest("mocking: `match.path` is required".into()))?;
+            let path = m.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                GatewayError::BadRequest("mocking: `match.path` is required".into())
+            })?;
             let (path_segments, trailing_slash) = parse_path_pattern(path);
-            let status = r
-                .get("status")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(200) as u16;
+            let status = r.get("status").and_then(|v| v.as_u64()).unwrap_or(200) as u16;
             let headers = r
                 .get("headers")
                 .and_then(|v| v.as_object())
@@ -164,7 +162,9 @@ impl Plugin for MockingPlugin {
                 continue;
             }
             let mut headers = r.headers.clone();
-            if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            if !headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                 && !r.body.is_empty()
             {
                 headers.push(("content-type".into(), "application/octet-stream".into()));
