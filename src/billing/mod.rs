@@ -19,6 +19,7 @@ pub mod keys;
 pub mod models;
 pub mod repo;
 pub mod server;
+pub mod signing;
 pub mod stripe;
 
 use std::sync::Arc;
@@ -33,4 +34,8 @@ pub struct AppState {
     pub admin_api_key: String,
     pub stripe: stripe::StripeConfig,
     pub website_origin: String,
+    /// GCS V4 signed-URL minter for the binaries bucket. None when the
+    /// service runs locally without a GCS bucket configured (`/v1/install/binary`
+    /// returns 503 in that mode).
+    pub gcs: Option<signing::GcsSigner>,
 }

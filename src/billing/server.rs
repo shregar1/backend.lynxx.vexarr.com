@@ -45,6 +45,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/customers/internal", post(admin_create_internal))
         .route("/install.sh", get(install_script))
         .route("/install", get(install_script))
+        // Returns a short-lived V4 signed URL for the requested binary.
+        // The install.sh script calls this once per binary it needs.
+        .route("/v1/install/binary", get(install_binary))
         .route("/healthz", get(|| async { "ok" }))
         .layer(cors)
         .with_state(state)
@@ -65,6 +68,72 @@ async fn install_script() -> Response {
         INSTALL_SCRIPT,
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Install: signed URL for binary downloads
+// ---------------------------------------------------------------------------
+
+/// Allowlist of (binary, os, arch) triples we serve. Anything outside
+/// this list returns 404 — prevents the endpoint from being abused as
+/// a generic GCS signer for arbitrary objects in the bucket.
+const ALLOWED_BINARIES: &[&str] = &["lynxx", "lynx-gateway"];
+const ALLOWED_OS: &[&str] = &["linux", "darwin"];
+const ALLOWED_ARCH: &[&str] = &["amd64", "arm64"];
+const SIGNED_URL_TTL_SECS: i64 = 300; // 5 minutes
+
+#[derive(Deserialize)]
+struct InstallBinaryQuery {
+    name: String,
+    os: String,
+    arch: String,
+}
+
+#[derive(Serialize)]
+struct InstallBinaryResponse {
+    url: String,
+    expires_at: i64,
+}
+
+async fn install_binary(
+    State(state): State<AppState>,
+    Query(q): Query<InstallBinaryQuery>,
+) -> Result<Json<InstallBinaryResponse>, ApiError> {
+    if !ALLOWED_BINARIES.contains(&q.name.as_str()) {
+        return Err(ApiError(StatusCode::NOT_FOUND, "unknown binary".into()));
+    }
+    if !ALLOWED_OS.contains(&q.os.as_str()) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "unsupported os".into()));
+    }
+    if !ALLOWED_ARCH.contains(&q.arch.as_str()) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "unsupported arch".into()));
+    }
+    let signer = state.gcs.as_ref().ok_or_else(|| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "binary distribution disabled (no GCS bucket configured)".into(),
+        )
+    })?;
+    let object = format!(
+        "{os}/{arch}/{name}",
+        os = q.os,
+        arch = q.arch,
+        name = q.name
+    );
+    let url = signer
+        .sign_get(&object, SIGNED_URL_TTL_SECS)
+        .await
+        .map_err(|e| {
+            error!(error=%e, "sign GCS URL failed");
+            ApiError(
+                StatusCode::BAD_GATEWAY,
+                "could not sign download URL".into(),
+            )
+        })?;
+    Ok(Json(InstallBinaryResponse {
+        url,
+        expires_at: Utc::now().timestamp() + SIGNED_URL_TTL_SECS,
+    }))
 }
 
 // ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use lynx_gateway::billing::{
     repo::{BillingRepo, SqlBillingRepo},
     server,
+    signing::GcsSigner,
     stripe::StripeConfig,
     AppState,
 };
@@ -90,12 +91,26 @@ async fn main() -> Result<()> {
 
     let repo: Arc<dyn BillingRepo> = Arc::new(sql_repo);
 
+    // GCS bucket for downloadable binaries. Optional — when unset, the
+    // /v1/install/binary endpoint returns 503. Set BINARIES_BUCKET in
+    // production (Terraform output `binaries_bucket`).
+    let gcs = env::var("BINARIES_BUCKET")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(GcsSigner::new);
+    if let Some(s) = &gcs {
+        tracing::info!(bucket = %s.bucket(), "binaries bucket configured");
+    } else {
+        tracing::warn!("BINARIES_BUCKET not set — /v1/install/binary disabled");
+    }
+
     let state = AppState {
         repo,
         session_secret,
         admin_api_key,
         stripe,
         website_origin,
+        gcs,
     };
 
     let app = server::router(state);

@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
-# Lynxx gateway installer.
+# Lynxx installer.
 #
 #   curl -fsSL https://api.lynxx.vexarr.com/install.sh | bash
 #
-# Detects OS + architecture, downloads the matching release binaries from
-# the public release bucket, drops them in /usr/local/bin (with sudo) or
-# ~/.local/bin (without). After install, the user only needs to set their
-# API key and run `lynxx start`.
+# 1. Detects OS + architecture.
+# 2. For each required binary, asks the licence/billing service for a
+#    short-lived V4 signed URL (the binaries themselves live in a private
+#    GCS bucket; only the billing service can mint download URLs).
+# 3. Downloads each binary into /usr/local/bin (with sudo if needed)
+#    or ~/.local/bin (fallback). After install, the user only needs
+#    to set their API key and run `lynxx start`.
 
 set -euo pipefail
 
-REPO_NAME="lynxx"
-RELEASE_BASE_URL="${LYNXX_RELEASE_BASE_URL:-https://storage.googleapis.com/lynxx-releases/latest}"
+# Where the API lives. Override with LYNXX_API_BASE for staging / self-host.
+API_BASE="${LYNXX_API_BASE:-https://api.lynxx.vexarr.com}"
 INSTALL_DIR="${LYNXX_INSTALL_DIR:-}"
 BINARIES=("lynxx" "lynx-gateway")
+
+# Older releases used LYNXX_RELEASE_BASE_URL — accept it as an explicit
+# direct-download override, bypassing the signed-URL flow.
+RELEASE_BASE_URL="${LYNXX_RELEASE_BASE_URL:-}"
 
 # ---- coloured output (only on TTY) -----------------------------------------
 if [ -t 1 ]; then
@@ -26,6 +33,11 @@ err()    { printf "${C_RED}error:${C_RESET} %s\n" "$*" >&2; exit 1; }
 warn()   { printf "${C_YELLOW}warn:${C_RESET} %s\n"  "$*" >&2; }
 info()   { printf "  %s\n" "$*"; }
 title()  { printf "${C_BOLD}%s${C_RESET}\n" "$*"; }
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || err "$1 is required but not installed."
+}
+require_cmd curl
 
 # ---- detect platform -------------------------------------------------------
 detect_os() {
@@ -72,17 +84,59 @@ if [ "${DEST_DIR}" = "/usr/local/bin" ] && [ ! -w "/usr/local/bin" ]; then
   USE_SUDO="sudo"
 fi
 
+# ---- already installed? ----------------------------------------------------
+all_installed=1
+for bin in "${BINARIES[@]}"; do
+  if ! command -v "${bin}" >/dev/null 2>&1; then
+    all_installed=0
+    break
+  fi
+done
+if [ "${all_installed}" -eq 1 ] && [ -z "${LYNXX_FORCE:-}" ]; then
+  warn "lynxx and lynx-gateway already installed. Set LYNXX_FORCE=1 to reinstall."
+  echo
+  for bin in "${BINARIES[@]}"; do
+    info "$(command -v "${bin}")"
+  done
+  exit 0
+fi
+
+# ---- resolve a download URL for one binary ---------------------------------
+# If LYNXX_RELEASE_BASE_URL is set, use it as a direct prefix.
+# Otherwise call the billing service for a short-lived signed URL.
+resolve_url() {
+  local bin="$1"
+  if [ -n "${RELEASE_BASE_URL}" ]; then
+    echo "${RELEASE_BASE_URL}/${OS}/${ARCH}/${bin}"
+    return
+  fi
+  local resp
+  resp=$(curl -fsSL --retry 3 \
+    --get \
+    --data-urlencode "name=${bin}" \
+    --data-urlencode "os=${OS}" \
+    --data-urlencode "arch=${ARCH}" \
+    "${API_BASE}/v1/install/binary") || \
+    err "failed to fetch signed URL for ${bin} from ${API_BASE}"
+  # Parse the {"url":"..."} field without jq dep.
+  local url
+  url=$(printf '%s' "${resp}" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+  [ -n "${url}" ] || err "could not parse signed URL from API response: ${resp}"
+  echo "${url}"
+}
+
 # ---- download + install ----------------------------------------------------
 TMP=$(mktemp -d)
 trap 'rm -rf "${TMP}"' EXIT
 
 title "Installing Lynxx (${OS}/${ARCH}) → ${DEST_DIR}"
+info "API: ${API_BASE}"
 
 for bin in "${BINARIES[@]}"; do
-  url="${RELEASE_BASE_URL}/${OS}/${ARCH}/${bin}"
   info "↓ ${bin}"
+  url=$(resolve_url "${bin}")
   if ! curl -fsSL --retry 3 -o "${TMP}/${bin}" "${url}"; then
-    err "download failed: ${url}\n       (set LYNXX_RELEASE_BASE_URL to a custom mirror)"
+    err "download failed for ${bin}"
   fi
   chmod +x "${TMP}/${bin}"
 done

@@ -216,6 +216,10 @@ resource "google_cloud_run_v2_service" "billing" {
         name  = "STRIPE_PRICE_BUSINESS"
         value = var.stripe_price_business
       }
+      env {
+        name  = "BINARIES_BUCKET"
+        value = google_storage_bucket.binaries.name
+      }
     }
   }
 
