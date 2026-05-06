@@ -246,3 +246,26 @@ resource "google_cloud_run_v2_service_iam_member" "billing_public" {
   role     = "roles/run.invoker"
   member   = "allUsers"
 }
+
+# ---------------------------------------------------------------------------
+# Custom domain — api.lynxx.vexarr.com → lynxx-billing
+# Requires the parent domain (vexarr.com or lynxx.vexarr.com) to be
+# verified in Google Search Console under the same Google account that
+# owns this project. Output `billing_domain_dns` lists the DNS records
+# to add at the domain's authoritative DNS provider.
+# ---------------------------------------------------------------------------
+
+resource "google_cloud_run_domain_mapping" "billing" {
+  name     = var.domain
+  location = var.region
+
+  metadata {
+    namespace = var.project_id
+  }
+
+  spec {
+    route_name = google_cloud_run_v2_service.billing.name
+  }
+
+  depends_on = [google_cloud_run_v2_service.billing]
+}

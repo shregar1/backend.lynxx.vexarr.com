@@ -43,6 +43,11 @@ output "billing_url" {
   value       = google_cloud_run_v2_service.billing.uri
 }
 
+output "billing_domain_dns" {
+  description = "DNS records to add at the authoritative DNS provider for the billing custom domain. Add each as the matching record type (CNAME for subdomain, A/AAAA for apex)."
+  value       = google_cloud_run_domain_mapping.billing.status[0].resource_records
+}
+
 output "wif_provider" {
   description = "Workload Identity Federation provider resource name — set as GitHub variable WIF_PROVIDER."
   value       = google_iam_workload_identity_pool_provider.github.name
