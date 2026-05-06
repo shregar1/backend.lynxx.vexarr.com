@@ -34,7 +34,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/signin", post(signin))
         .route("/v1/account/me", get(me))
         .route("/v1/account/keys", get(list_keys).post(create_key))
-        .route("/v1/account/keys/:id/revoke", post(revoke_key))
+        .route("/v1/account/keys/:urn/revoke", post(revoke_key))
         .route("/v1/billing/checkout", post(start_checkout))
         .route("/v1/billing/portal", get(billing_portal))
         .route("/v1/stripe/webhook", post(stripe_webhook))
@@ -99,7 +99,7 @@ struct VerifyQuery {
 
 #[derive(Serialize)]
 struct VerifyResponse {
-    customer_id: String,
+    customer_urn: String,
     tier: String,
     expires_at: Option<i64>,
 }
@@ -143,7 +143,7 @@ async fn verify_license(
     }
 
     Ok(Json(VerifyResponse {
-        customer_id: customer.id.to_string(),
+        customer_urn: customer.urn.to_string(),
         tier: customer.tier,
         expires_at: key.expires_at.map(|t| t.timestamp()),
     }))
@@ -169,7 +169,7 @@ fn default_tier() -> String {
 
 #[derive(Serialize)]
 struct SignupResp {
-    customer_id: String,
+    customer_urn: String,
     session_token: String,
     /// Present only when `tier == "free"` — the user's first API key.
     api_key: Option<String>,
@@ -203,14 +203,16 @@ async fn signup(
     let now = Utc::now();
     let customer = Customer {
         id: Uuid::new_v4(),
+        urn: Uuid::new_v4(),
         email: email.clone(),
         password_hash: hash,
         name: req.name.filter(|s| !s.is_empty()),
         company: req.company.filter(|s| !s.is_empty()),
-        tier: "free".to_string(), // promoted later if Stripe completes
+        tier: "free".to_string(),
         stripe_customer_id: None,
         stripe_subscription_id: None,
         subscription_status: "active".into(),
+        is_deleted: false,
         created_at: now,
         updated_at: now,
     };
@@ -218,7 +220,7 @@ async fn signup(
     let session_token = issue_session(customer.id, &state.session_secret);
 
     let mut resp = SignupResp {
-        customer_id: customer.id.to_string(),
+        customer_urn: customer.urn.to_string(),
         session_token,
         api_key: None,
         checkout_url: None,
@@ -232,7 +234,10 @@ async fn signup(
             &state.stripe,
             price_id,
             &email,
-            &customer.id.to_string(),
+            // Stripe `client_reference_id` carries the customer urn back
+            // through checkout.session.completed so the webhook handler
+            // can resolve it without exposing the internal id.
+            &customer.urn.to_string(),
         )
         .await
         {
@@ -244,27 +249,30 @@ async fn signup(
             }
         }
     } else {
-        // Stripe not configured — fall back to free tier with a key.
         warn!(tier=%tier, "stripe price unset; signing up as free tier");
         let key = mint_key(&state, customer.id, "Default").await?;
         resp.api_key = Some(key);
     }
 
-    info!(customer_id=%customer.id, tier=%tier, "customer created");
+    info!(customer_urn=%customer.urn, tier=%tier, "customer created");
     Ok(Json(resp))
 }
 
 async fn mint_key(state: &AppState, customer_id: Uuid, name: &str) -> Result<String, ApiError> {
     let g = gen_key(false);
+    let now = Utc::now();
     let rec = ApiKeyRecord {
         id: Uuid::new_v4(),
+        urn: Uuid::new_v4(),
         customer_id,
         name: name.to_string(),
         key_hash: g.hash,
         key_prefix: g.prefix,
         status: "active".into(),
         expires_at: None,
-        created_at: Utc::now(),
+        is_deleted: false,
+        created_at: now,
+        updated_at: now,
         last_used_at: None,
     };
     state.repo.insert_api_key(&rec).await?;
@@ -283,7 +291,7 @@ struct SigninReq {
 
 #[derive(Serialize)]
 struct SigninResp {
-    customer_id: String,
+    customer_urn: String,
     session_token: String,
     tier: String,
     name: Option<String>,
@@ -308,7 +316,7 @@ async fn signin(
     }
     let token = issue_session(customer.id, &state.session_secret);
     Ok(Json(SigninResp {
-        customer_id: customer.id.to_string(),
+        customer_urn: customer.urn.to_string(),
         session_token: token,
         tier: customer.tier,
         name: customer.name,
@@ -322,7 +330,7 @@ async fn signin(
 
 #[derive(Serialize)]
 struct MeResp {
-    id: String,
+    urn: String,
     email: String,
     name: Option<String>,
     company: Option<String>,
@@ -334,7 +342,7 @@ struct MeResp {
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<MeResp>, ApiError> {
     let c = require_session(&state, &headers).await?;
     Ok(Json(MeResp {
-        id: c.id.to_string(),
+        urn: c.urn.to_string(),
         email: c.email,
         name: c.name,
         company: c.company,
@@ -346,7 +354,7 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Me
 
 #[derive(Serialize)]
 struct ListedKey {
-    id: String,
+    urn: String,
     name: String,
     prefix: String,
     status: String,
@@ -364,7 +372,7 @@ async fn list_keys(
     let listed: Vec<ListedKey> = keys
         .into_iter()
         .map(|k| ListedKey {
-            id: k.id.to_string(),
+            urn: k.urn.to_string(),
             name: k.name,
             prefix: k.key_prefix,
             status: k.status,
@@ -397,11 +405,11 @@ async fn create_key(
 async fn revoke_key(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    Path(urn): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let c = require_session(&state, &headers).await?;
-    let id = Uuid::parse_str(&id).map_err(|_| bad("bad id"))?;
-    let ok = state.repo.revoke_api_key(c.id, id).await?;
+    let urn = Uuid::parse_str(&urn).map_err(|_| bad("bad urn"))?;
+    let ok = state.repo.revoke_api_key_by_urn(c.id, urn).await?;
     if ok {
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -495,11 +503,19 @@ async fn stripe_webhook(
 }
 
 async fn handle_checkout_completed(state: &AppState, obj: &Value) -> Result<(), ApiError> {
+    // We pass the customer's urn (not the internal id) into Stripe's
+    // `client_reference_id` at checkout time. Resolve it back to the
+    // internal id before any DB writes.
     let client_ref = obj
         .get("client_reference_id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| bad("missing client_reference_id"))?;
-    let customer_uuid = Uuid::parse_str(client_ref).map_err(|_| bad("bad client_reference_id"))?;
+    let customer_urn = Uuid::parse_str(client_ref).map_err(|_| bad("bad client_reference_id"))?;
+    let customer = state
+        .repo
+        .find_customer_by_urn(customer_urn)
+        .await?
+        .ok_or_else(|| bad("customer not found for urn"))?;
     let stripe_customer = obj
         .get("customer")
         .and_then(|v| v.as_str())
@@ -527,7 +543,7 @@ async fn handle_checkout_completed(state: &AppState, obj: &Value) -> Result<(), 
     state
         .repo
         .update_customer_stripe(
-            customer_uuid,
+            customer.id,
             stripe_customer.as_deref(),
             stripe_sub.as_deref(),
             &tier,
@@ -535,26 +551,28 @@ async fn handle_checkout_completed(state: &AppState, obj: &Value) -> Result<(), 
         )
         .await?;
 
-    // Mint an API key on first paid subscription (only if there are no
-    // active keys yet — the free-tier signup code path also mints one).
-    let existing = state.repo.list_api_keys(customer_uuid).await?;
+    let existing = state.repo.list_api_keys(customer.id).await?;
     if !existing.iter().any(|k| k.status == "active") {
         let g = gen_key(false);
+        let now = Utc::now();
         let rec = ApiKeyRecord {
             id: Uuid::new_v4(),
-            customer_id: customer_uuid,
+            urn: Uuid::new_v4(),
+            customer_id: customer.id,
             name: "Default".to_string(),
             key_hash: g.hash,
             key_prefix: g.prefix,
             status: "active".into(),
             expires_at: None,
-            created_at: Utc::now(),
+            is_deleted: false,
+            created_at: now,
+            updated_at: now,
             last_used_at: None,
         };
         state.repo.insert_api_key(&rec).await?;
-        info!(customer_id=%customer_uuid, tier=%tier, "minted key after checkout");
+        info!(customer_urn=%customer.urn, tier=%tier, "minted key after checkout");
     } else {
-        info!(customer_id=%customer_uuid, tier=%tier, "subscription activated; existing key kept");
+        info!(customer_urn=%customer.urn, tier=%tier, "subscription activated; existing key kept");
     }
     Ok(())
 }

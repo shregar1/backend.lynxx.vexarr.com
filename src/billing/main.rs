@@ -59,11 +59,27 @@ async fn main() -> Result<()> {
         );
     }
 
-    let repo: Arc<dyn BillingRepo> = Arc::new(
-        SqlBillingRepo::connect(&database_url)
+    let sql_repo = SqlBillingRepo::connect(&database_url)
+        .await
+        .context("billing db connect")?;
+
+    // Apply migrations on startup. Idempotent — sqlx tracks applied
+    // versions in `_sqlx_migrations`. Picks the right directory based
+    // on the URL scheme.
+    if database_url.starts_with("postgres") {
+        sqlx::migrate!("./migrations/postgres")
+            .run(sql_repo.pool())
             .await
-            .context("billing db connect")?,
-    );
+            .context("apply postgres migrations")?;
+    } else {
+        sqlx::migrate!("./migrations/sqlite")
+            .run(sql_repo.pool())
+            .await
+            .context("apply sqlite migrations")?;
+    }
+    tracing::info!("migrations applied");
+
+    let repo: Arc<dyn BillingRepo> = Arc::new(sql_repo);
 
     let state = AppState {
         repo,
