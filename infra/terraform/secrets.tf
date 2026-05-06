@@ -83,3 +83,28 @@ resource "google_secret_manager_secret_version" "session_secret" {
   secret      = google_secret_manager_secret.session_secret.id
   secret_data = random_password.session_secret.result
 }
+
+# Master admin API key for the billing service `/v1/admin/*` endpoints.
+# Auto-generated on first apply; rotate via the GCP console (the
+# `ignore_changes` keeps Terraform from clobbering manual rotations).
+# Required to provision internal-dev customers — there is no public path.
+resource "random_password" "admin_api_key" {
+  length  = 64
+  special = false
+}
+
+resource "google_secret_manager_secret" "admin_api_key" {
+  secret_id = "lynxx-admin-api-key"
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_secret_manager_secret_version" "admin_api_key" {
+  secret      = google_secret_manager_secret.admin_api_key.id
+  secret_data = random_password.admin_api_key.result
+  lifecycle {
+    ignore_changes = [secret_data]
+  }
+}

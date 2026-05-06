@@ -858,7 +858,9 @@ fn row_to_route(row: sqlx::postgres::PgRow) -> Result<Route, GatewayError> {
     let service_id: Uuid = row.try_get("service_id")?;
     let paths: serde_json::Value = row.try_get("paths")?;
     let methods: serde_json::Value = row.try_get("methods")?;
-    let hosts: serde_json::Value = row.try_get("hosts").unwrap_or(serde_json::Value::Array(Vec::new()));
+    let hosts: serde_json::Value = row
+        .try_get("hosts")
+        .unwrap_or(serde_json::Value::Array(Vec::new()));
     let strip_path: bool = row.try_get("strip_path")?;
     let created_at: DateTime<Utc> = row.try_get("created_at")?;
     let updated_at: DateTime<Utc> = row.try_get("updated_at")?;

@@ -27,6 +27,10 @@ use std::sync::Arc;
 pub struct AppState {
     pub repo: Arc<dyn repo::BillingRepo>,
     pub session_secret: Vec<u8>,
+    /// Master secret for the `/v1/admin/*` endpoints. Compared in constant
+    /// time against the bearer token. Provisioning internal-dev customers
+    /// requires this — there is no public path to do it.
+    pub admin_api_key: String,
     pub stripe: stripe::StripeConfig,
     pub website_origin: String,
 }

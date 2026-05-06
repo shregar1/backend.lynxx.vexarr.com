@@ -115,6 +115,12 @@ openapiv3 = "2"
 argon2 = "0.5"
 hex = "0.4"
 
+# Self-signed certificate generation for the ACME/cert-manager module.
+# Used when `[gateway.acme].self_signed = true` to create a dev/test cert
+# on startup when no real cert exists on disk. Also generates the CSR for
+# future full-ACME flows.
+rcgen = { version = "0.13", features = ["pem"] }
+
 [lib]
 name = "lynx_gateway"
 path = "src/lib.rs"

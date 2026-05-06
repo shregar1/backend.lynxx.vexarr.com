@@ -109,7 +109,10 @@ pub async fn proxy_handler(
         .and_then(|v| v.to_str().ok())
         .map(|h| h.split(':').next().unwrap_or(h).to_string());
 
-    let (route, service) = match state.route_table.match_route(&path, &method, host.as_deref()) {
+    let (route, service) = match state
+        .route_table
+        .match_route(&path, &method, host.as_deref())
+    {
         Some(pair) => pair,
         None => {
             metrics::counter!(
@@ -325,8 +328,6 @@ pub async fn proxy_handler(
     // upstreams expect from a forward proxy.
     parts.version = axum::http::Version::HTTP_11;
 
-    let upstream_req = Request::from_parts(parts, body);
-
     // Per-service client lookup. For plain HTTP and for HTTPS services that
     // don't customise TLS (the common case) this resolves to the shared
     // default client without a hashmap miss in the steady state.
@@ -346,21 +347,10 @@ pub async fn proxy_handler(
     let mut last_err = String::new();
     let mut upstream_resp = None;
 
-    for attempt in 0..max_attempts {
-        if attempt > 0 {
-            metrics::counter!(
-                "lynxx_upstream_retries_total",
-                "service" => svc_name.clone(),
-            )
-            .increment(1);
-            tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt.min(4)))).await;
-        }
-
-        match client.request(upstream_req.clone()).await {
-            Ok(r) => {
-                upstream_resp = Some(r);
-                break;
-            }
+    if max_attempts <= 1 {
+        let upstream_req = Request::from_parts(parts, body);
+        match client.request(upstream_req).await {
+            Ok(r) => upstream_resp = Some(r),
             Err(e) => {
                 let kind = if e.is_connect() { "connect" } else { "other" };
                 metrics::counter!(
@@ -370,8 +360,43 @@ pub async fn proxy_handler(
                 )
                 .increment(1);
                 last_err = e.to_string();
-                if !e.is_connect() && !e.is_timeout() {
+            }
+        }
+    } else {
+        let body_bytes = axum::body::to_bytes(body, 10 * 1024 * 1024)
+            .await
+            .map_err(|e| GatewayError::BadRequest(format!("failed to buffer request body: {e}")))?;
+
+        for attempt in 0..max_attempts {
+            if attempt > 0 {
+                metrics::counter!(
+                    "lynxx_upstream_retries_total",
+                    "service" => svc_name.clone(),
+                )
+                .increment(1);
+                tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt.min(4))))
+                    .await;
+            }
+
+            let retry_body = Body::from(body_bytes.clone());
+            let upstream_req = Request::from_parts(parts.clone(), retry_body);
+            match client.request(upstream_req).await {
+                Ok(r) => {
+                    upstream_resp = Some(r);
                     break;
+                }
+                Err(e) => {
+                    let kind = if e.is_connect() { "connect" } else { "other" };
+                    metrics::counter!(
+                        "lynxx_upstream_errors_total",
+                        "service" => svc_name.clone(),
+                        "kind" => kind,
+                    )
+                    .increment(1);
+                    last_err = e.to_string();
+                    if !e.is_connect() {
+                        break;
+                    }
                 }
             }
         }

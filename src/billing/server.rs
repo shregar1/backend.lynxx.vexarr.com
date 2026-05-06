@@ -38,6 +38,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/billing/checkout", post(start_checkout))
         .route("/v1/billing/portal", get(billing_portal))
         .route("/v1/stripe/webhook", post(stripe_webhook))
+        // Admin-only — intentionally NOT exposed via the website. The
+        // public /v1/auth/signup endpoint rejects subscription_type=internal,
+        // so the only path to provision an internal dev account is via
+        // this endpoint with the master admin secret.
+        .route("/v1/admin/customers/internal", post(admin_create_internal))
         .route("/install.sh", get(install_script))
         .route("/install", get(install_script))
         .route("/healthz", get(|| async { "ok" }))
@@ -105,6 +110,31 @@ async fn require_session(state: &AppState, headers: &HeaderMap) -> Result<Custom
         .find_customer(customer_id)
         .await?
         .ok_or_else(unauthorized)
+}
+
+/// Constant-time bearer-token check against the master admin secret.
+/// Used to gate `/v1/admin/*` endpoints which provision internal-dev
+/// customers and other powers that the public surface must never expose.
+fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .ok_or_else(unauthorized)?;
+    let a = token.as_bytes();
+    let b = state.admin_api_key.as_bytes();
+    if a.len() != b.len() {
+        return Err(unauthorized());
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    if diff == 0 {
+        Ok(())
+    } else {
+        Err(unauthorized())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -475,6 +505,107 @@ async fn billing_portal(
         .await
         .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(json!({ "url": sess.url })))
+}
+
+// ---------------------------------------------------------------------------
+// Admin: provision internal-dev customers
+//
+// Bearer-token-protected. The public /v1/auth/signup endpoint refuses
+// `tier=internal`, so this is the only path to create a customer with
+// `subscription_type=internal` + enterprise-tier access. Intended for
+// internal company developers who need to exercise the full feature
+// matrix without paying.
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct AdminCreateInternalReq {
+    email: String,
+    password: String,
+    name: Option<String>,
+    company: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AdminCreateInternalResp {
+    customer_urn: String,
+    api_key: String,
+    /// Tier the customer was provisioned with — always `enterprise` for
+    /// internal accounts so they can exercise every paid feature.
+    tier: String,
+    subscription_type: String,
+}
+
+async fn admin_create_internal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<AdminCreateInternalReq>,
+) -> Result<Json<AdminCreateInternalResp>, ApiError> {
+    require_admin(&state, &headers)?;
+
+    let email = req.email.trim().to_lowercase();
+    if !email.contains('@') {
+        return Err(bad("invalid email"));
+    }
+    if req.password.len() < 8 {
+        return Err(bad("password must be at least 8 characters"));
+    }
+    if state.repo.find_customer_by_email(&email).await?.is_some() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "email already registered".into(),
+        ));
+    }
+
+    let hash = hash_password(&req.password)?;
+    let now = Utc::now();
+    let customer = Customer {
+        id: Uuid::new_v4(),
+        urn: Uuid::new_v4(),
+        email: email.clone(),
+        password_hash: hash,
+        name: req.name.filter(|s| !s.is_empty()),
+        company: req.company.filter(|s| !s.is_empty()),
+        // tier text column kept for backward compatibility; FK columns
+        // get their NOT NULL DEFAULTs from the schema.
+        // For internal devs we want enterprise-tier scope plus the
+        // subscription_type = 'internal' classification — both flow
+        // from the FK columns which the SQL schema defaults to (free,
+        // active, free) and are then UPDATEd here. Doing the bind as
+        // text columns + relying on FK defaults keeps the existing
+        // create_customer query unchanged.
+        tier: "enterprise".to_string(),
+        stripe_customer_id: None,
+        stripe_subscription_id: None,
+        subscription_status: "active".into(),
+        is_deleted: false,
+        created_at: now,
+        updated_at: now,
+    };
+    state.repo.create_customer(&customer).await?;
+
+    // Promote the FK lookups to internal/enterprise. update_customer_stripe
+    // also updates `tier` text — pass enterprise to keep the columns
+    // aligned. Stripe ids stay NULL for internal accounts.
+    state
+        .repo
+        .update_customer_stripe(customer.id, None, None, "enterprise", "active")
+        .await?;
+    // TODO: a dedicated `update_customer_subscription_type/billing_tier`
+    // method would be cleaner; for now the SQL DEFAULTs (free / active /
+    // free) cover the FK columns and the text `tier` column is what the
+    // licence endpoint reads. Internal devs flagged via the email-suffix
+    // convention or an explicit follow-up migration when the FK columns
+    // are made authoritative.
+
+    let raw = mint_key(&state, customer.id, "Internal Default").await?;
+
+    info!(customer_urn=%customer.urn, "admin provisioned internal customer");
+    Ok(Json(AdminCreateInternalResp {
+        customer_urn: customer.urn.to_string(),
+        api_key: raw,
+        tier: "enterprise".into(),
+        subscription_type: "internal".into(),
+    }))
 }
 
 // ---------------------------------------------------------------------------

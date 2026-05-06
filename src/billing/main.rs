@@ -39,6 +39,15 @@ async fn main() -> Result<()> {
         return Err(anyhow!("LYNXX_SESSION_SECRET must be at least 32 bytes"));
     }
 
+    // Master admin secret for the /v1/admin/* endpoints. Required — the
+    // service refuses to start without one so internal-dev provisioning
+    // can never accidentally be left wide open.
+    let admin_api_key = env::var("LYNXX_ADMIN_API_KEY")
+        .map_err(|_| anyhow!("LYNXX_ADMIN_API_KEY is required (32+ random bytes)"))?;
+    if admin_api_key.len() < 32 {
+        return Err(anyhow!("LYNXX_ADMIN_API_KEY must be at least 32 bytes"));
+    }
+
     let stripe = StripeConfig {
         secret_key: env::var("STRIPE_SECRET_KEY").unwrap_or_default(),
         webhook_secret: env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default(),
@@ -84,6 +93,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         repo,
         session_secret,
+        admin_api_key,
         stripe,
         website_origin,
     };

@@ -1,3 +1,4 @@
+pub mod acme;
 pub mod grpc;
 pub mod handler;
 pub mod http_client;

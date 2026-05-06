@@ -33,6 +33,7 @@ use crate::proxy::handler::{proxy_handler, ProxyState};
 use crate::proxy::loadbalancer::{LbStrategy, LoadBalancerRegistry};
 use crate::proxy::router::{RouteTable, SharedRouteTable};
 use axum::extract::DefaultBodyLimit;
+use axum::response::IntoResponse;
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -228,6 +229,26 @@ async fn async_main() -> anyhow::Result<()> {
     plugin_exec.rebuild(&repo).await?;
     tracing::info!("plugin executor ready");
 
+    // WASM hot-reload listener. The file watcher inside PluginExecutor
+    // polls registered `.wasm` module paths for mtime changes. When one
+    // changes it fires `reload_signal`; this task catches that and
+    // rebuilds all plugins from the DB so the new module is compiled and
+    // swapped in without a gateway restart.
+    {
+        let signal = plugin_exec.reload_signal.clone();
+        let exec = plugin_exec.clone();
+        let repo = repo.clone();
+        tokio::spawn(async move {
+            loop {
+                signal.notified().await;
+                tracing::info!("wasm hot-reload: rebuilding plugins");
+                if let Err(e) = exec.rebuild(&repo).await {
+                    tracing::error!(error = %e, "wasm hot-reload: rebuild failed");
+                }
+            }
+        });
+    }
+
     // Streaming hyper-util client used by the proxy hot path (HTTP/1.1 + h2
     // via ALPN). Separate from the `reqwest::Client` used by the health
     // checker and out-of-band plugins (oauth2-introspect) — those benefit
@@ -291,13 +312,77 @@ async fn async_main() -> anyhow::Result<()> {
         config.gateway.prewarm_concurrency,
     );
 
+    // ---------- ACME / cert manager ----------
+    // Initialise before building the proxy app so we can inject the
+    // challenge handler route and have a ServerConfig ready for bind.
+    let acme_manager: Option<Arc<crate::proxy::acme::AcmeManager>> = if config.gateway.acme.enabled
+    {
+        let mgr = Arc::new(crate::proxy::acme::AcmeManager::new(
+            config.gateway.acme.clone(),
+        ));
+        match mgr.init().await {
+            Ok(true) => {
+                tracing::info!("ACME cert manager initialised with certificate");
+            }
+            Ok(false) => {
+                tracing::warn!(
+                    "ACME cert manager initialised but no certificate available; \
+                         the proxy will not serve HTTPS until a cert is provisioned"
+                );
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "ACME cert manager init failed");
+                return Err(anyhow::anyhow!("ACME init: {e}"));
+            }
+        }
+        // Start background cert file watcher (polls every 30s).
+        mgr.spawn_cert_watcher();
+        Some(mgr)
+    } else {
+        None
+    };
+
     // Raise axum's default 2 MB body limit to 64 MB so the gateway can
     // forward large request bodies (file uploads, 5 MB+ API payloads, etc.)
     // without returning 413. Kong defaults to 64 MB; we match it.
-    let proxy_app = axum::Router::new()
-        .fallback(proxy_handler)
-        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
-        .with_state(proxy_state);
+    //
+    // When ACME is enabled, mount the HTTP-01 challenge responder at
+    // `/.well-known/acme-challenge/*` so ACME validators can reach it
+    // even on the plain-HTTP listener. The challenge route runs before
+    // the catch-all proxy fallback.
+    let proxy_app = {
+        let router = axum::Router::new();
+        let router = if let Some(ref mgr) = acme_manager {
+            let mgr_clone = Arc::clone(mgr);
+            router.route(
+                "/.well-known/acme-challenge/{token}",
+                axum::routing::get(
+                    move |axum::extract::Path(token): axum::extract::Path<String>| {
+                        let mgr = Arc::clone(&mgr_clone);
+                        async move {
+                            let full_path = format!("/.well-known/acme-challenge/{token}");
+                            match mgr.handle_challenge(&full_path) {
+                                Some(auth) => (
+                                    axum::http::StatusCode::OK,
+                                    [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                                    auth,
+                                )
+                                    .into_response(),
+                                None => (axum::http::StatusCode::NOT_FOUND, "challenge not found")
+                                    .into_response(),
+                            }
+                        }
+                    },
+                ),
+            )
+        } else {
+            router
+        };
+        router
+            .fallback(proxy_handler)
+            .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
+            .with_state(proxy_state)
+    };
 
     metrics::spawn_metrics_collector(route_table.clone(), repo.clone(), health.clone(), 5_000);
 
@@ -379,8 +464,41 @@ async fn async_main() -> anyhow::Result<()> {
     // reinvent the accept loop. Only the proxy listener is affected — the
     // admin port stays plain HTTP (it lives behind the operator's own VPN
     // / mesh by convention).
+    //
+    // Priority: ACME-managed cert > static `[gateway.tls]` > plain HTTP.
     let proxy_addr_socket: std::net::SocketAddr = proxy_addr.parse()?;
-    if config.gateway.tls.enabled {
+
+    let acme_has_cert = if let Some(ref mgr) = acme_manager {
+        mgr.has_cert().await
+    } else {
+        false
+    };
+
+    if acme_has_cert {
+        // ACME-managed TLS — cert comes from the AcmeManager.
+        let mgr = acme_manager.as_ref().unwrap();
+        let server_config = mgr.server_config().await?;
+        tracing::info!(
+            "proxy listening on {proxy_addr} (TLS via ACME, domains={:?})",
+            config.gateway.acme.domains
+        );
+        let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(server_config);
+        let serve = axum_server::bind_rustls(proxy_addr_socket, rustls_cfg)
+            .serve(proxy_app.into_make_service());
+        tokio::select! {
+            result = serve => {
+                if let Err(e) = result {
+                    tracing::error!("proxy server error: {e}");
+                }
+            }
+            result = axum::serve(admin_listener, admin_app) => {
+                if let Err(e) = result {
+                    tracing::error!("admin server error: {e}");
+                }
+            }
+        }
+    } else if config.gateway.tls.enabled {
+        // Static TLS — cert/key paths from [gateway.tls].
         let server_config = crate::proxy::tls::build_server_config(&config.gateway.tls)?;
         tracing::info!(
             "proxy listening on {proxy_addr} (TLS{})",
@@ -407,6 +525,7 @@ async fn async_main() -> anyhow::Result<()> {
             }
         }
     } else {
+        // Plain HTTP.
         let proxy_listener = TcpListener::bind(&proxy_addr).await?;
         tracing::info!("proxy listening on {proxy_addr}");
         tokio::select! {

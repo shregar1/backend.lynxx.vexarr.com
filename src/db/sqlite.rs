@@ -804,6 +804,7 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
         let route = Route::new(
             rt_cfg.paths.clone(),
             rt_cfg.methods.clone(),
+            rt_cfg.hosts.clone(),
             service_id,
             rt_cfg.strip_path,
         );

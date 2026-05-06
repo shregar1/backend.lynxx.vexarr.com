@@ -52,9 +52,10 @@ use async_trait::async_trait;
 use axum::http::{Request, Response};
 use hyper::body::Bytes;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use uuid::Uuid;
 
 pub type BoxBody = http_body_util::Full<Bytes>;
@@ -86,14 +87,34 @@ pub struct PluginExecutor {
     /// return without acquiring any lock — the common production-default case
     /// when a route has zero scoped plugins.
     is_empty: AtomicBool,
+    /// File watcher for WASM modules loaded from disk. Registered paths
+    /// are polled for mtime changes; a change signals `reload_signal`.
+    wasm_watcher: wasm::watcher::WasmWatcher,
+    /// Signalled by the WASM file watcher when a `.wasm` module on disk
+    /// changes. The main server loop listens on this and triggers a
+    /// `rebuild()`.
+    pub reload_signal: Arc<Notify>,
 }
 
 impl PluginExecutor {
     pub fn new() -> Self {
+        let reload_signal = Arc::new(Notify::new());
+        let wasm_watcher = wasm::watcher::WasmWatcher::new();
+
+        // Spawn the file-watcher polling loop. When any registered WASM
+        // module's mtime changes on disk, the callback fires
+        // `reload_signal` so the main server loop can trigger a rebuild.
+        let signal = reload_signal.clone();
+        wasm_watcher.spawn(move |_path| {
+            signal.notify_one();
+        });
+
         Self {
             built: RwLock::new(HashMap::new()),
             index: RwLock::new(PluginIndex::default()),
             is_empty: AtomicBool::new(true),
+            wasm_watcher,
+            reload_signal,
         }
     }
 
@@ -112,7 +133,7 @@ impl PluginExecutor {
         let mut built: HashMap<Uuid, Arc<dyn Plugin>> = HashMap::with_capacity(rows.len());
         let mut index = PluginIndex::default();
 
-        for row in rows {
+        for row in &rows {
             if !row.enabled {
                 continue;
             }
@@ -151,6 +172,20 @@ impl PluginExecutor {
         *self.built.write().await = built;
         *self.index.write().await = index;
         self.is_empty.store(empty, Ordering::Release);
+
+        // Sync the WASM file watcher with the current set of file-based
+        // module paths. Paths that no longer appear are dropped; new ones
+        // are registered with their current mtime as the baseline.
+        let mut wasm_paths: Vec<PathBuf> = Vec::new();
+        for row in &rows {
+            if row.enabled && row.name == "wasm" {
+                if let Some(p) = row.config.get("module_path").and_then(|v| v.as_str()) {
+                    wasm_paths.push(PathBuf::from(p));
+                }
+            }
+        }
+        self.wasm_watcher.sync_paths(wasm_paths).await;
+
         Ok(())
     }
 

@@ -126,7 +126,12 @@ impl RouteTable {
         removed
     }
 
-    pub fn match_route(&self, path: &str, method: &str, host: Option<&str>) -> Option<(Route, Service)> {
+    pub fn match_route(
+        &self,
+        path: &str,
+        method: &str,
+        host: Option<&str>,
+    ) -> Option<(Route, Service)> {
         // Fast path: exact-path lookup. Avoids the O(N) scan for the common
         // case of a busy API with literal route paths.
         if let Some(id_ref) = self.exact_index.get(path) {
@@ -137,7 +142,9 @@ impl RouteTable {
                 let method_matches =
                     route.methods.is_empty() || route.methods.iter().any(|m| m == method);
                 let host_matches = route.hosts.is_empty()
-                    || host.map_or(false, |h| route.hosts.iter().any(|rh| rh.eq_ignore_ascii_case(h)));
+                    || host.map_or(false, |h| {
+                        route.hosts.iter().any(|rh| rh.eq_ignore_ascii_case(h))
+                    });
                 if method_matches && host_matches {
                     if let Some(service) = self.get_service(&route.service_id) {
                         return Some((route.clone(), service));
@@ -174,7 +181,9 @@ impl RouteTable {
             }
 
             let host_matches = route.hosts.is_empty()
-                || host.map_or(false, |h| route.hosts.iter().any(|rh| rh.eq_ignore_ascii_case(h)));
+                || host.map_or(false, |h| {
+                    route.hosts.iter().any(|rh| rh.eq_ignore_ascii_case(h))
+                });
 
             if !host_matches {
                 continue;

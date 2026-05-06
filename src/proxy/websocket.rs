@@ -9,9 +9,7 @@ use std::sync::Arc;
 use tokio_tungstenite::tungstenite::Message as TtMessage;
 
 fn default_tls_config() -> rustls::ClientConfig {
-    let roots = rustls::RootCertStore::from_iter(
-        webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
-    );
+    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth()

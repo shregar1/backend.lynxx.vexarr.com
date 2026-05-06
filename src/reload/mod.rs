@@ -304,6 +304,7 @@ async fn diff_routes(
         match by_key.get(&key) {
             Some(cur) => {
                 if cur.methods != rt_cfg.methods
+                    || cur.hosts != rt_cfg.hosts
                     || cur.strip_path != rt_cfg.strip_path
                     || cur.service_id != service_id
                 {
@@ -311,6 +312,7 @@ async fn diff_routes(
                         id: cur.id,
                         paths: cur.paths.clone(),
                         methods: rt_cfg.methods.clone(),
+                        hosts: rt_cfg.hosts.clone(),
                         service_id,
                         strip_path: rt_cfg.strip_path,
                         created_at: cur.created_at,
@@ -329,6 +331,7 @@ async fn diff_routes(
                 let route = Route::new(
                     rt_cfg.paths.clone(),
                     rt_cfg.methods.clone(),
+                    rt_cfg.hosts.clone(),
                     service_id,
                     rt_cfg.strip_path,
                 );

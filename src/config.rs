@@ -50,6 +50,13 @@ pub struct GatewaySettings {
     #[serde(default)]
     pub tls: TlsSettings,
 
+    /// ACME / automatic certificate provisioning. When enabled, the
+    /// gateway manages its own TLS certificates — loading from disk,
+    /// generating self-signed certs for dev, serving HTTP-01 challenges,
+    /// and hot-reloading on renewal. See [`AcmeConfig`].
+    #[serde(default)]
+    pub acme: AcmeConfig,
+
     /// Background connection pre-warmer interval in seconds. `0` disables
     /// pre-warming. Pre-warm respects circuit-breaker state — services
     /// whose circuit is `Open` are skipped.
@@ -80,6 +87,66 @@ pub struct GatewaySettings {
     /// `"enterprise"` (∞). Defaults to `"free"` when not set.
     #[serde(default = "default_plan_tier")]
     pub plan_tier: String,
+}
+
+/// ACME / automatic certificate provisioning settings. When
+/// `enabled = true` the gateway manages its own TLS certificates:
+///
+/// * On startup, looks for `cert.pem` + `key.pem` in
+///   `{storage_dir}/{primary_domain}/`.
+/// * If `self_signed = true` and no cert exists, generates a self-signed
+///   cert (useful for development / local testing).
+/// * Serves `/.well-known/acme-challenge/{token}` responses so external
+///   ACME clients (certbot, acme.sh) can complete HTTP-01 validation.
+/// * Polls cert files every 30 seconds and hot-reloads the TLS config
+///   when they change on disk — no restart needed after renewal.
+///
+/// `acme` and `tls` are complementary: `tls` provides static cert paths
+/// and mTLS knobs, while `acme` adds automatic provisioning. When both
+/// are enabled, `acme` takes precedence for the server certificate.
+#[derive(Debug, Deserialize, Clone)]
+pub struct AcmeConfig {
+    /// Master switch. Defaults to `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Domain names for the certificate. The first entry becomes the CN;
+    /// all entries are added as Subject Alternative Names. Required when
+    /// `enabled = true`.
+    #[serde(default)]
+    pub domains: Vec<String>,
+    /// Contact email for the ACME account (e.g. Let's Encrypt). Not
+    /// used for self-signed certs but stored for future ACME flows.
+    #[serde(default)]
+    pub email: String,
+    /// ACME directory URL. Defaults to Let's Encrypt production.
+    #[serde(default = "default_acme_directory_url")]
+    pub directory_url: String,
+    /// Where to store certs and account keys. Defaults to
+    /// `~/.lynxx/acme/`.
+    #[serde(default)]
+    pub storage_dir: String,
+    /// Generate a self-signed certificate on startup when no cert exists
+    /// on disk. Intended for development / local testing. Defaults to
+    /// `false`.
+    #[serde(default)]
+    pub self_signed: bool,
+}
+
+impl Default for AcmeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            domains: Vec::new(),
+            email: String::new(),
+            directory_url: default_acme_directory_url(),
+            storage_dir: String::new(),
+            self_signed: false,
+        }
+    }
+}
+
+fn default_acme_directory_url() -> String {
+    "https://acme-v02.api.letsencrypt.org/directory".to_string()
 }
 
 /// Inbound TLS termination knobs. When `enabled = false` (the default)
@@ -145,6 +212,8 @@ pub struct RouteConfig {
     pub paths: Vec<String>,
     #[serde(default)]
     pub methods: Vec<String>,
+    #[serde(default)]
+    pub hosts: Vec<String>,
     pub service: String,
     #[serde(default)]
     pub strip_path: bool,
@@ -182,6 +251,7 @@ fn default_gateway() -> GatewaySettings {
         health_circuit_success_threshold: default_hc_success_threshold(),
         health_circuit_open_duration_ms: default_hc_open_duration(),
         tls: TlsSettings::default(),
+        acme: AcmeConfig::default(),
         prewarm_interval_secs: default_prewarm_interval(),
         prewarm_concurrency: default_prewarm_concurrency(),
         auth_required: false,
