@@ -144,6 +144,8 @@ pub struct CreateRoute {
     pub paths: Vec<String>,
     #[serde(default)]
     pub methods: Vec<String>,
+    #[serde(default)]
+    pub hosts: Vec<String>,
     pub service_id: Uuid,
     #[serde(default)]
     pub strip_path: bool,
@@ -383,6 +385,7 @@ pub async fn create_route(
     let route = Route::new(
         input.paths,
         input.methods,
+        input.hosts,
         input.service_id,
         input.strip_path,
     );
@@ -437,6 +440,7 @@ pub async fn update_route(
         id,
         paths: input.paths,
         methods: input.methods,
+        hosts: input.hosts,
         service_id: input.service_id,
         strip_path: input.strip_path,
         created_at: existing.created_at,

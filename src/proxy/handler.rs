@@ -103,8 +103,13 @@ pub async fn proxy_handler(
     let start = Instant::now();
     let path = req.uri().path().to_string();
     let method = req.method().as_str().to_string();
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|h| h.split(':').next().unwrap_or(h).to_string());
 
-    let (route, service) = match state.route_table.match_route(&path, &method) {
+    let (route, service) = match state.route_table.match_route(&path, &method, host.as_deref()) {
         Some(pair) => pair,
         None => {
             metrics::counter!(
@@ -337,16 +342,44 @@ pub async fn proxy_handler(
         }
     };
 
-    let upstream_resp = match client.request(upstream_req).await {
-        Ok(r) => r,
-        Err(e) => {
-            let kind = if e.is_connect() { "connect" } else { "other" };
+    let max_attempts = (service.retries + 1).max(1) as usize;
+    let mut last_err = String::new();
+    let mut upstream_resp = None;
+
+    for attempt in 0..max_attempts {
+        if attempt > 0 {
             metrics::counter!(
-                "lynxx_upstream_errors_total",
+                "lynxx_upstream_retries_total",
                 "service" => svc_name.clone(),
-                "kind" => kind,
             )
             .increment(1);
+            tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt.min(4)))).await;
+        }
+
+        match client.request(upstream_req.clone()).await {
+            Ok(r) => {
+                upstream_resp = Some(r);
+                break;
+            }
+            Err(e) => {
+                let kind = if e.is_connect() { "connect" } else { "other" };
+                metrics::counter!(
+                    "lynxx_upstream_errors_total",
+                    "service" => svc_name.clone(),
+                    "kind" => kind,
+                )
+                .increment(1);
+                last_err = e.to_string();
+                if !e.is_connect() && !e.is_timeout() {
+                    break;
+                }
+            }
+        }
+    }
+
+    let upstream_resp = match upstream_resp {
+        Some(r) => r,
+        None => {
             metrics::counter!(
                 "lynxx_requests_total",
                 "service" => svc_name.clone(),
@@ -367,9 +400,9 @@ pub async fn proxy_handler(
             state.health.record_failure(
                 &service.id,
                 &svc_name,
-                format!("upstream send error: {e}"),
+                format!("upstream send error: {last_err}"),
             );
-            return Err(GatewayError::UpstreamError(e.to_string()));
+            return Err(GatewayError::UpstreamError(last_err));
         }
     };
 

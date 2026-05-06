@@ -61,6 +61,8 @@ pub struct Route {
     pub id: Uuid,
     pub paths: Vec<String>,
     pub methods: Vec<String>,
+    #[serde(default)]
+    pub hosts: Vec<String>,
     pub service_id: Uuid,
     pub strip_path: bool,
     pub created_at: DateTime<Utc>,
@@ -141,6 +143,7 @@ impl Route {
     pub fn new(
         paths: Vec<String>,
         methods: Vec<String>,
+        hosts: Vec<String>,
         service_id: Uuid,
         strip_path: bool,
     ) -> Self {
@@ -149,6 +152,7 @@ impl Route {
             id: Uuid::new_v4(),
             paths,
             methods,
+            hosts,
             service_id,
             strip_path,
             created_at: now,

@@ -126,7 +126,7 @@ impl RouteTable {
         removed
     }
 
-    pub fn match_route(&self, path: &str, method: &str) -> Option<(Route, Service)> {
+    pub fn match_route(&self, path: &str, method: &str, host: Option<&str>) -> Option<(Route, Service)> {
         // Fast path: exact-path lookup. Avoids the O(N) scan for the common
         // case of a busy API with literal route paths.
         if let Some(id_ref) = self.exact_index.get(path) {
@@ -136,13 +136,19 @@ impl RouteTable {
                 let route = route_ref.value();
                 let method_matches =
                     route.methods.is_empty() || route.methods.iter().any(|m| m == method);
-                if method_matches {
+                let host_matches = route.hosts.is_empty()
+                    || host.map_or(false, |h| route.hosts.iter().any(|rh| rh.eq_ignore_ascii_case(h)));
+                if method_matches && host_matches {
                     if let Some(service) = self.get_service(&route.service_id) {
                         return Some((route.clone(), service));
                     }
                 }
             }
         }
+
+        // Prefer routes with explicit host constraints over wildcard ones.
+        let mut best: Option<(Route, Service)> = None;
+        let mut best_has_hosts = false;
 
         for entry in self.routes.iter() {
             let route = entry.value();
@@ -167,12 +173,26 @@ impl RouteTable {
                 continue;
             }
 
-            if let Some(service) = self.get_service(&route.service_id) {
-                return Some((route.clone(), service));
+            let host_matches = route.hosts.is_empty()
+                || host.map_or(false, |h| route.hosts.iter().any(|rh| rh.eq_ignore_ascii_case(h)));
+
+            if !host_matches {
+                continue;
+            }
+
+            let has_hosts = !route.hosts.is_empty();
+            if has_hosts && !best_has_hosts {
+                best = Some((route.clone(), self.get_service(&route.service_id)?));
+                best_has_hosts = true;
+            } else if best.is_none() {
+                if let Some(service) = self.get_service(&route.service_id) {
+                    best = Some((route.clone(), service));
+                    best_has_hosts = has_hosts;
+                }
             }
         }
 
-        None
+        best
     }
 
     pub fn resolve_upstream_path(&self, route: &Route, original_path: &str) -> String {

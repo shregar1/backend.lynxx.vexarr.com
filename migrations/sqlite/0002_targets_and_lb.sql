@@ -18,4 +18,5 @@ CREATE TABLE IF NOT EXISTS targets (
   FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_targets_service ON targets(service_id);
-ALTER TABLE services ADD COLUMN lb_strategy TEXT NOT NULL DEFAULT 'round-robin';
+-- services.lb_strategy + lb_strategy_id are now declared inline in
+-- 0001_initial.sql alongside the lb_strategy_lk lookup table.

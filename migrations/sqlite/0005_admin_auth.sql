@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS admin_tokens (
   name TEXT NOT NULL,
   token_hash TEXT NOT NULL UNIQUE,
   role TEXT NOT NULL,
+  -- 3 = viewer (read-only); the safest default. Code that creates
+  -- elevated tokens must set user_type_id explicitly.
+  user_type_id INTEGER NOT NULL DEFAULT 3 REFERENCES user_type_lk(id),
   is_deleted INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -18,6 +21,7 @@ CREATE TABLE IF NOT EXISTS admin_tokens (
   last_used_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_admin_tokens_hash ON admin_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_admin_tokens_user_type ON admin_tokens(user_type_id);
 
 -- audit_log is append-only with a hash chain — no is_deleted (entries
 -- can't be soft-deleted without invalidating downstream chain hashes).

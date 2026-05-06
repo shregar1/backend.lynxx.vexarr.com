@@ -203,7 +203,7 @@ impl Repository for SqliteRepository {
 
     async fn list_routes(&self) -> Result<Vec<Route>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, service_id, paths, methods, strip_path, created_at, updated_at \
+            "SELECT id, service_id, paths, methods, hosts, strip_path, created_at, updated_at \
              FROM routes",
         )
         .fetch_all(&self.pool)
@@ -214,7 +214,7 @@ impl Repository for SqliteRepository {
 
     async fn get_route(&self, id: &Uuid) -> Result<Option<Route>, GatewayError> {
         let row = sqlx::query(
-            "SELECT id, service_id, paths, methods, strip_path, created_at, updated_at \
+            "SELECT id, service_id, paths, methods, hosts, strip_path, created_at, updated_at \
              FROM routes WHERE id = ?",
         )
         .bind(id.to_string())
@@ -229,7 +229,8 @@ impl Repository for SqliteRepository {
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
         let methods = serde_json::to_string(&route.methods)
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
-        let hosts = "[]".to_string();
+        let hosts = serde_json::to_string(&route.hosts)
+            .map_err(|e| GatewayError::Internal(e.to_string()))?;
 
         sqlx::query(
             "INSERT INTO routes (id, service_id, paths, methods, hosts, strip_path, enabled, created_at, updated_at) \
@@ -253,14 +254,17 @@ impl Repository for SqliteRepository {
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
         let methods = serde_json::to_string(&route.methods)
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
+        let hosts = serde_json::to_string(&route.hosts)
+            .map_err(|e| GatewayError::Internal(e.to_string()))?;
 
         sqlx::query(
-            "UPDATE routes SET service_id = ?, paths = ?, methods = ?, strip_path = ?, updated_at = ? \
+            "UPDATE routes SET service_id = ?, paths = ?, methods = ?, hosts = ?, strip_path = ?, updated_at = ? \
              WHERE id = ?",
         )
         .bind(route.service_id.to_string())
         .bind(paths)
         .bind(methods)
+        .bind(hosts)
         .bind(route.strip_path as i64)
         .bind(route.updated_at.to_rfc3339())
         .bind(id.to_string())
@@ -909,6 +913,7 @@ fn row_to_route(row: sqlx::sqlite::SqliteRow) -> Result<Route, GatewayError> {
     let service_id: String = row.try_get("service_id")?;
     let paths: String = row.try_get("paths")?;
     let methods: String = row.try_get("methods")?;
+    let hosts: String = row.try_get("hosts").unwrap_or_else(|_| "[]".to_string());
     let strip_path: i64 = row.try_get("strip_path")?;
     let created_at: String = row.try_get("created_at")?;
     let updated_at: String = row.try_get("updated_at")?;
@@ -920,6 +925,7 @@ fn row_to_route(row: sqlx::sqlite::SqliteRow) -> Result<Route, GatewayError> {
             .map_err(|e| GatewayError::Internal(format!("invalid paths json: {e}")))?,
         methods: serde_json::from_str(&methods)
             .map_err(|e| GatewayError::Internal(format!("invalid methods json: {e}")))?,
+        hosts: serde_json::from_str(&hosts).unwrap_or_default(),
         strip_path: strip_path != 0,
         created_at: parse_dt(&created_at)?,
         updated_at: parse_dt(&updated_at)?,

@@ -205,7 +205,7 @@ impl Repository for PostgresRepository {
 
     async fn list_routes(&self) -> Result<Vec<Route>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, service_id, paths, methods, strip_path, created_at, updated_at \
+            "SELECT id, service_id, paths, methods, hosts, strip_path, created_at, updated_at \
              FROM routes",
         )
         .fetch_all(&self.pool)
@@ -216,7 +216,7 @@ impl Repository for PostgresRepository {
 
     async fn get_route(&self, id: &Uuid) -> Result<Option<Route>, GatewayError> {
         let row = sqlx::query(
-            "SELECT id, service_id, paths, methods, strip_path, created_at, updated_at \
+            "SELECT id, service_id, paths, methods, hosts, strip_path, created_at, updated_at \
              FROM routes WHERE id = $1",
         )
         .bind(id)
@@ -231,7 +231,8 @@ impl Repository for PostgresRepository {
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
         let methods = serde_json::to_value(&route.methods)
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
-        let hosts = serde_json::Value::Array(Vec::new());
+        let hosts = serde_json::to_value(&route.hosts)
+            .map_err(|e| GatewayError::Internal(e.to_string()))?;
 
         sqlx::query(
             "INSERT INTO routes (id, service_id, paths, methods, hosts, strip_path, enabled, created_at, updated_at) \
@@ -255,14 +256,17 @@ impl Repository for PostgresRepository {
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
         let methods = serde_json::to_value(&route.methods)
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
+        let hosts = serde_json::to_value(&route.hosts)
+            .map_err(|e| GatewayError::Internal(e.to_string()))?;
 
         sqlx::query(
-            "UPDATE routes SET service_id = $1, paths = $2, methods = $3, strip_path = $4, updated_at = $5 \
-             WHERE id = $6",
+            "UPDATE routes SET service_id = $1, paths = $2, methods = $3, hosts = $4, strip_path = $5, updated_at = $6 \
+             WHERE id = $7",
         )
         .bind(route.service_id)
         .bind(paths)
         .bind(methods)
+        .bind(hosts)
         .bind(route.strip_path)
         .bind(route.updated_at)
         .bind(id)
@@ -854,6 +858,7 @@ fn row_to_route(row: sqlx::postgres::PgRow) -> Result<Route, GatewayError> {
     let service_id: Uuid = row.try_get("service_id")?;
     let paths: serde_json::Value = row.try_get("paths")?;
     let methods: serde_json::Value = row.try_get("methods")?;
+    let hosts: serde_json::Value = row.try_get("hosts").unwrap_or(serde_json::Value::Array(Vec::new()));
     let strip_path: bool = row.try_get("strip_path")?;
     let created_at: DateTime<Utc> = row.try_get("created_at")?;
     let updated_at: DateTime<Utc> = row.try_get("updated_at")?;
@@ -865,6 +870,7 @@ fn row_to_route(row: sqlx::postgres::PgRow) -> Result<Route, GatewayError> {
             .map_err(|e| GatewayError::Internal(format!("invalid paths json: {e}")))?,
         methods: serde_json::from_value(methods)
             .map_err(|e| GatewayError::Internal(format!("invalid methods json: {e}")))?,
+        hosts: serde_json::from_value(hosts).unwrap_or_default(),
         strip_path,
         created_at,
         updated_at,

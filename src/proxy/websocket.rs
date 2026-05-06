@@ -5,7 +5,17 @@ use axum::extract::FromRequestParts;
 use axum::http::{Request, Response};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
+use std::sync::Arc;
 use tokio_tungstenite::tungstenite::Message as TtMessage;
+
+fn default_tls_config() -> rustls::ClientConfig {
+    let roots = rustls::RootCertStore::from_iter(
+        webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+    );
+    rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+}
 
 /// Bridges a client WebSocket upgrade to an upstream `ws://` server.
 ///
@@ -21,15 +31,15 @@ pub async fn handle_websocket(
     let ws_url = match scheme {
         "ws" => upstream_url.clone(),
         "http" => {
-            // rewrite http -> ws for ergonomic config
             let mut s = upstream_url.clone();
             s.replace_range(0..4, "ws");
             s
         }
-        "wss" | "https" => {
-            return Err(GatewayError::BadRequest(
-                "wss upstream not yet supported, use ws://".into(),
-            ));
+        "wss" => upstream_url.clone(),
+        "https" => {
+            let mut s = upstream_url.clone();
+            s.replace_range(0..5, "wss");
+            s
         }
         other => {
             return Err(GatewayError::BadRequest(format!(
@@ -55,9 +65,22 @@ pub async fn handle_websocket(
 }
 
 async fn bridge(client: WebSocket, upstream_url: String) -> Result<(), String> {
-    let (upstream_ws, _resp) = tokio_tungstenite::connect_async(&upstream_url)
+    let is_tls = upstream_url.starts_with("wss://");
+    let (upstream_ws, _resp) = if is_tls {
+        let connector = tokio_tungstenite::Connector::Rustls(Arc::new(default_tls_config()));
+        tokio_tungstenite::connect_async_tls_with_config(
+            &upstream_url,
+            None,
+            false,
+            Some(connector),
+        )
         .await
-        .map_err(|e| format!("connect upstream ws: {e}"))?;
+        .map_err(|e| format!("connect upstream wss: {e}"))?
+    } else {
+        tokio_tungstenite::connect_async(&upstream_url)
+            .await
+            .map_err(|e| format!("connect upstream ws: {e}"))?
+    };
 
     let (mut client_sink, mut client_stream) = client.split();
     let (mut upstream_sink, mut upstream_stream) = upstream_ws.split();
