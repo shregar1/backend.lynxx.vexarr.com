@@ -67,7 +67,7 @@ jobs:
             ${{ env.REGISTRY }}/lynxx-gateway:latest
           cache-from: type=registry,ref=${{ env.REGISTRY }}/lynxx-gateway:buildcache
           cache-to:   type=registry,ref=${{ env.REGISTRY }}/lynxx-gateway:buildcache,mode=max
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
 
       - name: Build & push ingress controller
         uses: docker/build-push-action@v5
@@ -81,7 +81,7 @@ jobs:
             ${{ env.REGISTRY }}/lynxx-ingress:latest
           cache-from: type=registry,ref=${{ env.REGISTRY }}/lynxx-ingress:buildcache
           cache-to:   type=registry,ref=${{ env.REGISTRY }}/lynxx-ingress:buildcache,mode=max
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
 
       - name: Build & push billing service
         uses: docker/build-push-action@v5
