@@ -1,7 +1,14 @@
 # ---------------------------------------------------------------------------
 # Cloud Run — website (lynxx.dev) and dashboard (app.lynxx.dev).
 # Both are static SPAs served by nginx inside the container.
+#
+# Initial image is a placeholder — the CI/CD pipeline (deploy-gcp.yml)
+# deploys the real images on every push to main.
 # ---------------------------------------------------------------------------
+
+locals {
+  placeholder_image = "us-docker.pkg.dev/cloudrun/container/hello:latest"
+}
 
 resource "google_cloud_run_v2_service" "website" {
   name     = "lynxx-website"
@@ -9,10 +16,10 @@ resource "google_cloud_run_v2_service" "website" {
 
   template {
     containers {
-      image = "${local.registry_base}/lynxx-website:latest"
+      image = local.placeholder_image
 
       ports {
-        container_port = 80
+        container_port = 8080
       }
 
       resources {
@@ -35,6 +42,15 @@ resource "google_cloud_run_v2_service" "website" {
     percent = 100
   }
 
+  # CI/CD owns image and template updates — Terraform only manages the service scaffold.
+  lifecycle {
+    ignore_changes = [
+      template,
+      client,
+      client_version,
+    ]
+  }
+
   depends_on = [google_project_service.apis]
 }
 
@@ -44,10 +60,10 @@ resource "google_cloud_run_v2_service" "dashboard" {
 
   template {
     containers {
-      image = "${local.registry_base}/lynxx-dashboard:latest"
+      image = local.placeholder_image
 
       ports {
-        container_port = 80
+        container_port = 8080
       }
 
       resources {
@@ -68,6 +84,14 @@ resource "google_cloud_run_v2_service" "dashboard" {
   traffic {
     type    = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST"
     percent = 100
+  }
+
+  lifecycle {
+    ignore_changes = [
+      template,
+      client,
+      client_version,
+    ]
   }
 
   depends_on = [google_project_service.apis]

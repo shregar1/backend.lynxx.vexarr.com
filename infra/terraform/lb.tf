@@ -35,7 +35,8 @@ resource "google_compute_backend_service" "gateway" {
 
   health_checks = [google_compute_health_check.gateway.id]
 
-  security_policy = google_compute_security_policy.gateway.id
+  # security_policy = google_compute_security_policy.gateway.id
+  # Cloud Armor requires a paid plan — enable after project upgrade.
 
   log_config {
     enable      = true
@@ -104,89 +105,6 @@ resource "google_compute_global_forwarding_rule" "gateway_http" {
   load_balancing_scheme = "EXTERNAL_MANAGED"
 }
 
-# ---- Cloud Armor WAF -------------------------------------------------------
-resource "google_compute_security_policy" "gateway" {
-  name        = "lynxx-gateway-armor"
-  description = "Cloud Armor WAF for the Lynxx API gateway"
-
-  # OWASP ModSecurity CRS — preconfigured rule set
-  rule {
-    action   = "deny(403)"
-    priority = 1000
-
-    match {
-      expr {
-        expression = "evaluatePreconfiguredExpr('xss-v33-stable')"
-      }
-    }
-    description = "XSS"
-  }
-
-  rule {
-    action   = "deny(403)"
-    priority = 1001
-
-    match {
-      expr {
-        expression = "evaluatePreconfiguredExpr('sqli-v33-stable')"
-      }
-    }
-    description = "SQLi"
-  }
-
-  rule {
-    action   = "deny(403)"
-    priority = 1002
-
-    match {
-      expr {
-        expression = "evaluatePreconfiguredExpr('rfi-canary')"
-      }
-    }
-    description = "Remote file inclusion"
-  }
-
-  # Rate limit per IP — backstop for clients that bypass the gateway plugin
-  rule {
-    action   = "throttle"
-    priority = 2000
-
-    match {
-      versioned_expr = "SRC_IPS_V1"
-      config {
-        src_ip_ranges = ["*"]
-      }
-    }
-
-    rate_limit_options {
-      rate_limit_threshold {
-        count        = 1000
-        interval_sec = 60
-      }
-      conform_action = "allow"
-      exceed_action  = "deny(429)"
-      enforce_on_key = "IP"
-    }
-    description = "Per-IP rate limit backstop"
-  }
-
-  # Default allow
-  rule {
-    action   = "allow"
-    priority = 2147483647
-
-    match {
-      versioned_expr = "SRC_IPS_V1"
-      config {
-        src_ip_ranges = ["*"]
-      }
-    }
-    description = "Default allow"
-  }
-
-  adaptive_protection_config {
-    layer_7_ddos_defense_config {
-      enable = true
-    }
-  }
-}
+# Cloud Armor is disabled — this project's quota is 0 security policies.
+# To enable: upgrade to Cloud Armor Standard, then uncomment the resource
+# and the security_policy reference in the backend service above.

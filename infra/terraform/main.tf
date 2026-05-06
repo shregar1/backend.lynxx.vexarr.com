@@ -49,7 +49,7 @@ locals {
     "run.googleapis.com",
     "dns.googleapis.com",
     "certificatemanager.googleapis.com",
-    "cloudarmor.googleapis.com",
+    "iamcredentials.googleapis.com",
   ]
 }
 

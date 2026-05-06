@@ -38,10 +38,14 @@ output "dashboard_url" {
   value       = google_cloud_run_v2_service.dashboard.uri
 }
 
-output "cicd_sa_key_base64" {
-  description = "Base64-encoded JSON key for the CI/CD service account. Add to GitHub secret GCP_SA_KEY."
-  value       = google_service_account_key.cicd.private_key
-  sensitive   = true
+output "wif_provider" {
+  description = "Workload Identity Federation provider resource name — set as GitHub variable WIF_PROVIDER."
+  value       = google_iam_workload_identity_pool_provider.github.name
+}
+
+output "cicd_sa_email" {
+  description = "CI/CD service account email — set as GitHub variable WIF_SERVICE_ACCOUNT."
+  value       = google_service_account.cicd.email
 }
 
 output "workload_identity_annotation" {

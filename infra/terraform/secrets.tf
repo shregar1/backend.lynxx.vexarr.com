@@ -29,12 +29,16 @@ resource "google_secret_manager_secret_version" "db_url" {
 
 resource "google_secret_manager_secret" "stripe_secret_key" {
   secret_id = "lynxx-stripe-secret-key"
-  replication { auto {} }
+  replication {
+    auto {}
+  }
   depends_on = [google_project_service.apis]
 }
 
 resource "google_secret_manager_secret" "stripe_webhook_secret" {
   secret_id = "lynxx-stripe-webhook-secret"
-  replication { auto {} }
+  replication {
+    auto {}
+  }
   depends_on = [google_project_service.apis]
 }

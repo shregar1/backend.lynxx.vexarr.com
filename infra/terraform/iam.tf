@@ -1,13 +1,9 @@
 # ---------------------------------------------------------------------------
 # Service accounts + Workload Identity bindings.
 #
-# Pattern:
-#   GCP SA lynxx-gateway@PROJECT.iam.gserviceaccount.com
-#     ← bound to →
-#   K8s SA lynxx-gateway in namespace lynxx-system
-#
-# The gateway pod then authenticates to Cloud SQL via the proxy sidecar
-# without any static credentials.
+# Gateway pods authenticate to Cloud SQL via Workload Identity (no static creds).
+# GitHub Actions CI/CD authenticates via Workload Identity Federation (OIDC),
+# removing the need for long-lived SA key files.
 # ---------------------------------------------------------------------------
 
 # ---- Gateway GCP service account ------------------------------------------
@@ -17,33 +13,33 @@ resource "google_service_account" "gateway" {
   display_name = "Lynxx Gateway (GKE Workload Identity)"
 }
 
-# Cloud SQL client — lets the Cloud SQL Auth Proxy connect to the instance.
 resource "google_project_iam_member" "gateway_sql_client" {
   project = var.project_id
   role    = "roles/cloudsql.client"
   member  = "serviceAccount:${google_service_account.gateway.email}"
 }
 
-# Secret Manager accessor — lets the gateway read its own secrets.
 resource "google_project_iam_member" "gateway_secret_accessor" {
   project = var.project_id
   role    = "roles/secretmanager.secretAccessor"
   member  = "serviceAccount:${google_service_account.gateway.email}"
 }
 
-# Workload Identity binding — the K8s SA impersonates the GCP SA.
+# The Workload Identity pool (PROJECT.svc.id.goog) is created automatically
+# when the GKE cluster is provisioned — we must wait for the cluster first.
 resource "google_service_account_iam_member" "gateway_workload_identity" {
   service_account_id = google_service_account.gateway.name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[lynxx-system/lynxx-gateway]"
+
+  depends_on = [google_container_cluster.lynxx]
 }
 
 # ---- CI/CD GCP service account --------------------------------------------
-# Used by GitHub Actions to push images and update the cluster.
 
 resource "google_service_account" "cicd" {
   account_id   = "lynxx-cicd"
-  display_name = "Lynxx CI/CD (GitHub Actions)"
+  display_name = "Lynxx CI/CD (GitHub Actions WIF)"
 }
 
 resource "google_project_iam_member" "cicd_ar_writer" {
@@ -70,8 +66,42 @@ resource "google_project_iam_member" "cicd_sa_user" {
   member  = "serviceAccount:${google_service_account.cicd.email}"
 }
 
-# Create a key for the CI/CD SA. Store this in your GitHub repo secret
-# GCP_SA_KEY as base64(JSON).
-resource "google_service_account_key" "cicd" {
+# ---- Workload Identity Federation — GitHub Actions OIDC -------------------
+# Allows GitHub Actions workflows in this org to impersonate lynxx-cicd
+# without any long-lived service account keys.
+
+resource "google_iam_workload_identity_pool" "github" {
+  workload_identity_pool_id = "lynxx-github"
+  display_name              = "GitHub Actions (Lynxx)"
+  project                   = var.project_id
+
+  depends_on = [google_project_service.apis["iam.googleapis.com"]]
+}
+
+resource "google_iam_workload_identity_pool_provider" "github" {
+  workload_identity_pool_id          = google_iam_workload_identity_pool.github.workload_identity_pool_id
+  workload_identity_pool_provider_id = "github-provider"
+  display_name                       = "GitHub OIDC"
+  project                            = var.project_id
+
+  attribute_mapping = {
+    "google.subject"             = "assertion.sub"
+    "attribute.actor"            = "assertion.actor"
+    "attribute.repository"       = "assertion.repository"
+    "attribute.repository_owner" = "assertion.repository_owner"
+  }
+
+  # Only allow workflows from the correct GitHub org/user.
+  attribute_condition = "assertion.repository_owner == 'shregar1'"
+
+  oidc {
+    issuer_uri = "https://token.actions.githubusercontent.com"
+  }
+}
+
+# Allow any repo in the org to impersonate the CI/CD SA.
+resource "google_service_account_iam_member" "cicd_wif" {
   service_account_id = google_service_account.cicd.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository_owner/shregar1"
 }
