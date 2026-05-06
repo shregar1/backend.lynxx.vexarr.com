@@ -22,6 +22,7 @@ COPY src ./src
 COPY bench ./bench
 COPY migrations ./migrations
 COPY tests ./tests
+COPY scripts ./scripts
 RUN cargo build --release --bin lynx-gateway --bin lynxx-ingress --bin lynxx --bin lynxx-billing
 
 # ---- Shared runtime base ----------------------------------------------------
