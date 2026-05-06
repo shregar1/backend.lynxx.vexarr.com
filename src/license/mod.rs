@@ -8,7 +8,7 @@
 //! ## Verify request
 //!
 //! `GET ${verify_url}?key=<api_key>`  (default `verify_url`:
-//! `https://api.lynxx.dev/v1/license/verify`)
+//! `https://api.lynxx.vexarr.com/v1/license/verify`)
 //!
 //! ## Verify response (200)
 //!
@@ -37,7 +37,7 @@ use std::time::Duration as StdDuration;
 
 use crate::quota::PlanTier;
 
-const DEFAULT_VERIFY_URL: &str = "https://api.lynxx.dev/v1/license/verify";
+const DEFAULT_VERIFY_URL: &str = "https://api.lynxx.vexarr.com/v1/license/verify";
 const VERIFY_TIMEOUT_SECS: u64 = 10;
 const OFFLINE_GRACE_DAYS: i64 = 7;
 

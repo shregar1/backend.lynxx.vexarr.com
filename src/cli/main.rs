@@ -206,6 +206,13 @@ enum Cmd {
         /// Target shell
         shell: Shell,
     },
+    /// Run the Lynxx gateway (execs the lynx-gateway binary in PATH).
+    /// All extra arguments are forwarded.
+    #[command(trailing_var_arg = true, allow_hyphen_values = true)]
+    Start {
+        /// Arguments forwarded to lynx-gateway (e.g. --config /etc/lynxx.toml).
+        args: Vec<String>,
+    },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -3984,6 +3991,7 @@ async fn main() -> ExitCode {
             generate(shell, &mut cmd, bin, &mut io::stdout());
             Ok(())
         }
+        Cmd::Start { args } => cmd_start(args),
     };
 
     match result {
@@ -3993,6 +4001,46 @@ async fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// `lynxx start [...]` — replaces the current process with `lynx-gateway`,
+/// forwarding any extra arguments. We look the gateway binary up next to
+/// the running CLI binary first, then fall back to PATH so users who
+/// installed via the install.sh script get it without extra config.
+fn cmd_start(args: Vec<String>) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    let gateway = locate_gateway()?;
+    let err = Command::new(&gateway).args(&args).exec();
+    Err(anyhow::anyhow!(
+        "failed to exec {}: {}",
+        gateway.display(),
+        err
+    ))
+}
+
+fn locate_gateway() -> Result<PathBuf> {
+    if let Ok(self_path) = std::env::current_exe() {
+        if let Some(dir) = self_path.parent() {
+            let candidate = dir.join("lynx-gateway");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join("lynx-gateway");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "lynx-gateway binary not found next to lynxx or on PATH. \
+         Reinstall via `curl -fsSL https://api.lynxx.vexarr.com/install.sh | bash`."
+    ))
 }
 
 fn print_error(e: &anyhow::Error) {

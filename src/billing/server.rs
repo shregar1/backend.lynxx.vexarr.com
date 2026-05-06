@@ -38,9 +38,28 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/billing/checkout", post(start_checkout))
         .route("/v1/billing/portal", get(billing_portal))
         .route("/v1/stripe/webhook", post(stripe_webhook))
+        .route("/install.sh", get(install_script))
+        .route("/install", get(install_script))
         .route("/healthz", get(|| async { "ok" }))
         .layer(cors)
         .with_state(state)
+}
+
+// install.sh is baked into the binary via include_str! so the billing
+// service can serve it without filesystem access at runtime. Update the
+// script in scripts/install.sh and rebuild to roll a new version.
+const INSTALL_SCRIPT: &str = include_str!("../../scripts/install.sh");
+
+async fn install_script() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=300"),
+        ],
+        INSTALL_SCRIPT,
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
