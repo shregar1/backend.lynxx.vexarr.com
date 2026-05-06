@@ -150,6 +150,7 @@ struct VerifyQuery {
 struct VerifyResponse {
     customer_urn: String,
     tier: String,
+    scopes: Vec<String>,
     expires_at: Option<i64>,
 }
 
@@ -164,10 +165,10 @@ async fn verify_license(
         .await?
         .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid key".into()))?;
 
-    if key.status != "active" {
+    if key.status_code != "active" {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
-            format!("key {}", key.status),
+            format!("key {}", key.status_code),
         ));
     }
     if let Some(exp) = key.expires_at {
@@ -184,16 +185,24 @@ async fn verify_license(
             StatusCode::UNAUTHORIZED,
             "customer missing".into(),
         ))?;
-    if customer.subscription_status != "active" {
+    if customer.subscription_status_code != "active" {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
-            format!("subscription {}", customer.subscription_status),
+            format!("subscription {}", customer.subscription_status_code),
         ));
     }
 
+    // Side effect: touch last_used_at (fire-and-forget; failure is not fatal).
+    let repo = state.repo.clone();
+    let kid = key.id;
+    tokio::spawn(async move {
+        let _ = repo.touch_last_used(kid).await;
+    });
+
     Ok(Json(VerifyResponse {
         customer_urn: customer.urn.to_string(),
-        tier: customer.tier,
+        tier: customer.tier_code,
+        scopes: key.scopes.clone(),
         expires_at: key.expires_at.map(|t| t.timestamp()),
     }))
 }
@@ -256,10 +265,11 @@ async fn signup(
         password_hash: hash,
         name: req.name.filter(|s| !s.is_empty()),
         company: req.company.filter(|s| !s.is_empty()),
-        tier: "free".to_string(),
+        tier_code: "free".to_string(),
         stripe_customer_id: None,
         stripe_subscription_id: None,
-        subscription_status: "active".into(),
+        subscription_status_code: "active".into(),
+        subscription_type_code: "free".into(),
     };
     let customer_id = state.repo.create_customer(&new_customer).await?;
     let session_token = issue_session(customer_id, &state.session_secret);
@@ -272,7 +282,14 @@ async fn signup(
     };
 
     if tier == "free" {
-        let key = mint_key(&state, customer_id, "Default").await?;
+        let key = mint_key(
+            &state,
+            customer_id,
+            "Default",
+            vec!["read".into(), "write".into()],
+            None,
+        )
+        .await?;
         resp.api_key = Some(key);
     } else if let Some(price_id) = state.stripe.price_for_tier(&tier) {
         match stripe::create_checkout_session(
@@ -289,13 +306,27 @@ async fn signup(
             Ok(sess) => resp.checkout_url = sess.url,
             Err(e) => {
                 warn!(error=%e, "stripe checkout failed; account created on free tier");
-                let key = mint_key(&state, customer_id, "Default").await?;
+                let key = mint_key(
+                    &state,
+                    customer_id,
+                    "Default",
+                    vec!["read".into(), "write".into()],
+                    None,
+                )
+                .await?;
                 resp.api_key = Some(key);
             }
         }
     } else {
         warn!(tier=%tier, "stripe price unset; signing up as free tier");
-        let key = mint_key(&state, customer_id, "Default").await?;
+        let key = mint_key(
+            &state,
+            customer_id,
+            "Default",
+            vec!["read".into(), "write".into()],
+            None,
+        )
+        .await?;
         resp.api_key = Some(key);
     }
 
@@ -303,7 +334,23 @@ async fn signup(
     Ok(Json(resp))
 }
 
-async fn mint_key(state: &AppState, customer_id: i64, name: &str) -> Result<String, ApiError> {
+/// Per-tier limit on active API keys.
+fn key_limit_for_tier(tier: &str) -> i64 {
+    match tier {
+        "free" => 2,
+        "pro" => 25,
+        "business" | "enterprise" => 100,
+        _ => 2,
+    }
+}
+
+async fn mint_key(
+    state: &AppState,
+    customer_id: i64,
+    name: &str,
+    scopes: Vec<String>,
+    expires_at: Option<chrono::DateTime<Utc>>,
+) -> Result<String, ApiError> {
     let g = gen_key(false);
     let new_key = NewApiKey {
         urn: Uuid::new_v4(),
@@ -311,8 +358,9 @@ async fn mint_key(state: &AppState, customer_id: i64, name: &str) -> Result<Stri
         name: name.to_string(),
         key_hash: g.hash,
         key_prefix: g.prefix,
-        status: "active".into(),
-        expires_at: None,
+        status_code: "active".into(),
+        scopes,
+        expires_at,
     };
     state.repo.insert_api_key(&new_key).await?;
     Ok(g.raw)
@@ -357,7 +405,7 @@ async fn signin(
     Ok(Json(SigninResp {
         customer_urn: customer.urn.to_string(),
         session_token: token,
-        tier: customer.tier,
+        tier: customer.tier_code,
         name: customer.name,
         company: customer.company,
     }))
@@ -375,6 +423,7 @@ struct MeResp {
     company: Option<String>,
     tier: String,
     subscription_status: String,
+    subscription_type: String,
     has_stripe_customer: bool,
 }
 
@@ -385,8 +434,9 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Me
         email: c.email,
         name: c.name,
         company: c.company,
-        tier: c.tier,
-        subscription_status: c.subscription_status,
+        tier: c.tier_code,
+        subscription_status: c.subscription_status_code,
+        subscription_type: c.subscription_type_code,
         has_stripe_customer: c.stripe_customer_id.is_some(),
     }))
 }
@@ -397,6 +447,7 @@ struct ListedKey {
     name: String,
     prefix: String,
     status: String,
+    scopes: Vec<String>,
     created_at: String,
     last_used_at: Option<String>,
     expires_at: Option<String>,
@@ -414,7 +465,8 @@ async fn list_keys(
             urn: k.urn.to_string(),
             name: k.name,
             prefix: k.key_prefix,
-            status: k.status,
+            status: k.status_code,
+            scopes: k.scopes,
             created_at: k.created_at.to_rfc3339(),
             last_used_at: k.last_used_at.map(|t| t.to_rfc3339()),
             expires_at: k.expires_at.map(|t| t.to_rfc3339()),
@@ -426,6 +478,9 @@ async fn list_keys(
 #[derive(Deserialize)]
 struct CreateKeyReq {
     name: String,
+    #[serde(default)]
+    scopes: Vec<String>,
+    expires_at: Option<String>,
 }
 
 async fn create_key(
@@ -437,7 +492,38 @@ async fn create_key(
     if req.name.trim().is_empty() {
         return Err(bad("name required"));
     }
-    let raw = mint_key(&state, c.id, req.name.trim()).await?;
+
+    // Enforce per-tier limit on active keys.
+    let limit = key_limit_for_tier(&c.tier_code);
+    let active = state.repo.count_active_keys(c.id).await?;
+    if active >= limit {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            format!(
+                "key limit reached ({}/{}); upgrade tier for more",
+                active, limit
+            ),
+        ));
+    }
+
+    // Default scopes if none provided.
+    let scopes = if req.scopes.is_empty() {
+        vec!["read".into(), "write".into()]
+    } else {
+        req.scopes
+    };
+
+    let expires_at = req
+        .expires_at
+        .as_deref()
+        .map(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|_| bad("expires_at must be ISO 8601 / RFC 3339"))
+        })
+        .transpose()?;
+
+    let raw = mint_key(&state, c.id, req.name.trim(), scopes, expires_at).await?;
     Ok(Json(json!({ "key": raw })))
 }
 
@@ -445,14 +531,19 @@ async fn revoke_key(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(urn): Path<String>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<Value>, ApiError> {
     let c = require_session(&state, &headers).await?;
-    let urn = Uuid::parse_str(&urn).map_err(|_| bad("bad urn"))?;
-    let ok = state.repo.revoke_api_key_by_urn(c.id, urn).await?;
+    let urn_parsed = Uuid::parse_str(&urn).map_err(|_| bad("bad urn"))?;
+    let ok = state.repo.revoke_api_key_by_urn(c.id, urn_parsed).await?;
     if ok {
-        Ok(StatusCode::NO_CONTENT)
+        Ok(Json(json!({
+            "urn": urn,
+            "status": "revoked",
+            "revoked_at": Utc::now().to_rfc3339()
+        })))
     } else {
-        Err(ApiError(StatusCode::NOT_FOUND, "not found".into()))
+        // Key exists but is already revoked → 409 Conflict.
+        Err(ApiError(StatusCode::CONFLICT, "key already revoked".into()))
     }
 }
 
@@ -548,29 +639,30 @@ async fn admin_create_internal(
 
     let hash = hash_password(&req.password)?;
     let urn = Uuid::new_v4();
+    // Internal accounts get enterprise tier + internal subscription type
+    // directly — no Stripe involvement.
     let new_customer = NewCustomer {
         urn,
         email: email.clone(),
         password_hash: hash,
         name: req.name.filter(|s| !s.is_empty()),
         company: req.company.filter(|s| !s.is_empty()),
-        tier: "enterprise".to_string(),
+        tier_code: "enterprise".to_string(),
         stripe_customer_id: None,
         stripe_subscription_id: None,
-        subscription_status: "active".into(),
+        subscription_status_code: "active".into(),
+        subscription_type_code: "internal".into(),
     };
     let customer_id = state.repo.create_customer(&new_customer).await?;
 
-    // Lookup-table FK defaults are 1=free / 1=active / 1=free; promote to
-    // enterprise+active here. A dedicated `set_billing_tier` /
-    // `set_subscription_type` would be cleaner — TODO when the FK
-    // columns are made authoritative.
-    state
-        .repo
-        .update_customer_stripe(customer_id, None, None, "enterprise", "active")
-        .await?;
-
-    let raw = mint_key(&state, customer_id, "Internal Default").await?;
+    let raw = mint_key(
+        &state,
+        customer_id,
+        "Internal Default",
+        vec!["read".into(), "write".into(), "admin".into()],
+        None,
+    )
+    .await?;
 
     info!(customer_urn=%urn, "admin provisioned internal customer");
     Ok(Json(AdminCreateInternalResp {
@@ -674,16 +766,24 @@ async fn handle_checkout_completed(state: &AppState, obj: &Value) -> Result<(), 
         )
         .await?;
 
+    // Promote subscription type from "free" to "paid" now that Stripe
+    // checkout succeeded.
+    state
+        .repo
+        .update_customer_subscription_type(customer.id, "paid")
+        .await?;
+
     let existing = state.repo.list_api_keys(customer.id).await?;
-    if !existing.iter().any(|k| k.status == "active") {
+    if !existing.iter().any(|k| k.status_code == "active") {
         let g = gen_key(false);
         let new_key = NewApiKey {
             urn: Uuid::new_v4(),
             customer_id: customer.id,
-            name: "Default".to_string(),
+            name: "Default (auto-provisioned)".to_string(),
             key_hash: g.hash,
             key_prefix: g.prefix,
-            status: "active".into(),
+            status_code: "active".into(),
+            scopes: vec!["read".into(), "write".into()],
             expires_at: None,
         };
         state.repo.insert_api_key(&new_key).await?;
@@ -716,7 +816,7 @@ async fn handle_subscription_event(
             if new_status == "canceled" {
                 "free"
             } else {
-                customer.tier.as_str().into()
+                customer.tier_code.as_str().into()
             }
         });
 
@@ -742,7 +842,7 @@ async fn handle_payment_failed(state: &AppState, obj: &Value) -> Result<(), ApiE
     if let Some(c) = state.repo.find_customer_by_stripe(stripe_customer).await? {
         state
             .repo
-            .update_customer_stripe(c.id, None, None, &c.tier, "past_due")
+            .update_customer_stripe(c.id, None, None, &c.tier_code, "past_due")
             .await?;
         warn!(customer_id=%c.id, "payment failed -> past_due");
     }

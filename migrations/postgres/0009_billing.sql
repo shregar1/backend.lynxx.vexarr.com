@@ -41,9 +41,13 @@ CREATE TABLE IF NOT EXISTS api_keys (
   name              TEXT NOT NULL,
   key_hash          TEXT NOT NULL UNIQUE,
   key_prefix        TEXT NOT NULL,
+  -- Legacy text status column. 0010_drop_text_enums.sql drops it once
+  -- the application has migrated to read api_key_status_id via JOIN.
   status            TEXT NOT NULL DEFAULT 'active',
   -- 1 = active in api_key_status_lk.
   api_key_status_id INTEGER NOT NULL DEFAULT 1 REFERENCES api_key_status_lk(id),
+  -- scopes + revoked_at are added by 0011_api_key_scopes_revoked.sql
+  -- (after this table is created).
   expires_at        TIMESTAMPTZ,
   is_deleted        BOOLEAN NOT NULL DEFAULT FALSE,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),

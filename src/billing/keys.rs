@@ -1,11 +1,17 @@
 //! API key generation. Format: `lnx_live_<28 base32 chars>` (or
 //! `lnx_test_…` if the binary is started with --test-mode). The raw
 //! key is shown to the user once; only its SHA-256 hex is stored.
+//!
+//! Base32 alphabet: RFC 4648 lowercase (a-z, 2-7). 28 chars × 5 bits =
+//! 140 bits of entropy. With 32 symbols and u8 % 32, there is zero
+//! modulo bias (256 / 32 = 8 exactly).
 
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
-const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+/// RFC 4648 base32 alphabet, lowercased. 32 symbols = zero modulo bias
+/// when selecting via `u8 % 32`.
+const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz234567";
 const KEY_LEN: usize = 28;
 
 pub struct GeneratedKey {
@@ -50,6 +56,20 @@ mod tests {
         assert_eq!(k.hash.len(), 64);
         assert_eq!(k.prefix.len(), 16);
         assert_eq!(hash_key(&k.raw), k.hash);
+    }
+
+    #[test]
+    fn key_uses_base32_alphabet() {
+        let k = generate(false);
+        // After the prefix, all chars must be in the base32 set
+        let body = &k.raw["lnx_live_".len()..];
+        for ch in body.chars() {
+            assert!(
+                ALPHABET.contains(&(ch as u8)),
+                "char '{}' not in base32 alphabet",
+                ch
+            );
+        }
     }
 
     #[test]
