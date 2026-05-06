@@ -116,30 +116,46 @@ fn read_id(row: &sqlx::any::AnyRow) -> Result<i64> {
         .map_err(|e| anyhow!("read id: {e}"))
 }
 
-// SELECT column lists — postgres TIMESTAMPTZ columns are cast to TEXT
-// because sqlx::Any can't decode chrono types. Sqlite columns are
-// already TEXT. The aliases preserve the column name for `try_get`.
-fn select_customer_cols(is_pg: bool) -> &'static str {
+// SELECT column lists — postgres TIMESTAMPTZ columns are formatted to
+// RFC-3339 TEXT via to_char so chrono::DateTime::parse_from_rfc3339
+// accepts them. (`::text` would produce '2026-05-06 22:34:32+00' which
+// is NOT RFC-3339 and parse_from_rfc3339 rejects it.) Sqlite columns
+// are stored as TEXT and read directly.
+const PG_DT_FMT: &str = "YYYY-MM-DD\"T\"HH24:MI:SS.US\"+00:00\"";
+
+fn select_customer_cols(is_pg: bool) -> String {
     if is_pg {
-        "id, urn, email, password_hash, name, company, tier, \
-         stripe_customer_id, stripe_subscription_id, subscription_status, \
-         is_deleted, created_at::text AS created_at, updated_at::text AS updated_at"
+        format!(
+            "id, urn, email, password_hash, name, company, tier, \
+             stripe_customer_id, stripe_subscription_id, subscription_status, \
+             is_deleted, \
+             to_char(created_at AT TIME ZONE 'UTC', '{f}') AS created_at, \
+             to_char(updated_at AT TIME ZONE 'UTC', '{f}') AS updated_at",
+            f = PG_DT_FMT,
+        )
     } else {
         "id, urn, email, password_hash, name, company, tier, \
          stripe_customer_id, stripe_subscription_id, subscription_status, \
          is_deleted, created_at, updated_at"
+            .to_string()
     }
 }
 
-fn select_api_key_cols(is_pg: bool) -> &'static str {
+fn select_api_key_cols(is_pg: bool) -> String {
     if is_pg {
-        "id, urn, customer_id, name, key_hash, key_prefix, status, \
-         expires_at::text AS expires_at, is_deleted, \
-         created_at::text AS created_at, updated_at::text AS updated_at, \
-         last_used_at::text AS last_used_at"
+        format!(
+            "id, urn, customer_id, name, key_hash, key_prefix, status, \
+             to_char(expires_at AT TIME ZONE 'UTC', '{f}') AS expires_at, \
+             is_deleted, \
+             to_char(created_at AT TIME ZONE 'UTC', '{f}') AS created_at, \
+             to_char(updated_at AT TIME ZONE 'UTC', '{f}') AS updated_at, \
+             to_char(last_used_at AT TIME ZONE 'UTC', '{f}') AS last_used_at",
+            f = PG_DT_FMT,
+        )
     } else {
         "id, urn, customer_id, name, key_hash, key_prefix, status, \
          expires_at, is_deleted, created_at, updated_at, last_used_at"
+            .to_string()
     }
 }
 
