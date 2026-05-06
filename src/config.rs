@@ -10,6 +10,17 @@ pub struct GatewayConfig {
     pub routes: Vec<RouteConfig>,
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
+    /// Subscription licence — required at startup. Set the `token` here
+    /// or via the `LYNXX_LICENSE` env var. Without a valid token the
+    /// gateway refuses to start. See `src/license/mod.rs`.
+    #[serde(default)]
+    pub license: LicenseSettings,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct LicenseSettings {
+    #[serde(default)]
+    pub token: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -153,6 +164,7 @@ impl Default for GatewayConfig {
             services: Vec::new(),
             routes: Vec::new(),
             plugins: Vec::new(),
+            license: LicenseSettings::default(),
         }
     }
 }

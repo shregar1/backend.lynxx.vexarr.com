@@ -15,6 +15,7 @@ mod config;
 mod db;
 mod error;
 mod health;
+mod license;
 mod metrics;
 mod models;
 mod plugins;
@@ -139,9 +140,36 @@ async fn async_main() -> anyhow::Result<()> {
     let mut config = load_config(&config_path)?;
     apply_cli_overrides(&mut config, &args);
 
+    // ---------- licence gate ----------
+    // Verify the subscription token before doing any other startup work.
+    // Refuses to start without a valid signed token; the embedded pubkey
+    // (src/license/mod.rs) must match the issuer's private key on the
+    // licence server. The token's tier overrides config.gateway.plan_tier.
+    let license = match crate::license::License::load(Some(&config.license.token)) {
+        Ok(lic) => {
+            tracing::info!(
+                customer_id = %lic.customer_id,
+                tier = %lic.tier.as_str(),
+                expires_at = %lic.expires_at,
+                days_remaining = lic.days_remaining(),
+                "licence verified"
+            );
+            config.gateway.plan_tier = lic.tier.as_str().to_string();
+            lic
+        }
+        Err(err) => {
+            eprintln!("licence verification failed: {err}");
+            eprintln!("This Lynxx binary requires an active subscription.");
+            eprintln!("Set LYNXX_LICENSE=<token> or [license].token in config.toml.");
+            eprintln!("Get a token at https://lynxx.dev/account/license");
+            return Err(anyhow::anyhow!("licence required: {err}"));
+        }
+    };
+
     tracing::info!(
         proxy_port = config.gateway.proxy_port,
         admin_port = config.gateway.admin_port,
+        customer = %license.customer_id,
         "starting lynx gateway"
     );
 

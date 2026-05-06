@@ -570,6 +570,21 @@ mod tests {
             unimplemented!("test stub")
         }
 
+        async fn get_quota_usage(
+            &self,
+            _period: &str,
+        ) -> Result<Option<(u64, u64)>, GatewayError> {
+            Ok(None)
+        }
+        async fn upsert_quota_usage(
+            &self,
+            _period: &str,
+            _calls_total: u64,
+            _calls_rejected: u64,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+
         async fn append_recording(
             &self,
             _row: &RecordingIndexRow,

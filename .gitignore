@@ -20,3 +20,6 @@ infra/terraform/terraform.tfstate.backup
 infra/terraform/terraform.tfstate.*.backup
 infra/terraform/terraform.tfvars
 infra/terraform/tfplan
+
+# Lynxx license signing private key — NEVER commit
+license_private_key.hex
