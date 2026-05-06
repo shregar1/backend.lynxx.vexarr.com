@@ -15,8 +15,8 @@ CREATE TABLE IF NOT EXISTS services (
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   lb_strategy TEXT NOT NULL DEFAULT 'round-robin',
   is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
+  updated_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
 );
 CREATE TABLE IF NOT EXISTS routes (
   id TEXT PRIMARY KEY,
@@ -28,8 +28,8 @@ CREATE TABLE IF NOT EXISTS routes (
   strip_path BOOLEAN NOT NULL DEFAULT TRUE,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
+  updated_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
 );
 CREATE TABLE IF NOT EXISTS plugins (
   id TEXT PRIMARY KEY,
@@ -40,8 +40,8 @@ CREATE TABLE IF NOT EXISTS plugins (
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   config JSONB NOT NULL,
   is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
+  updated_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
 );
 CREATE TABLE IF NOT EXISTS consumers (
   id TEXT PRIMARY KEY,
@@ -50,8 +50,8 @@ CREATE TABLE IF NOT EXISTS consumers (
   custom_id TEXT,
   api_key TEXT UNIQUE,
   is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
+  updated_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
 );
 CREATE TABLE IF NOT EXISTS targets (
   id TEXT PRIMARY KEY,
@@ -61,8 +61,8 @@ CREATE TABLE IF NOT EXISTS targets (
   weight BIGINT NOT NULL DEFAULT 1,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
+  updated_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
 );
 CREATE INDEX IF NOT EXISTS idx_routes_service ON routes(service_id);
 CREATE INDEX IF NOT EXISTS idx_plugins_service ON plugins(service_id);

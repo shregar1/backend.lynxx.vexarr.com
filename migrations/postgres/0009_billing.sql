@@ -14,8 +14,8 @@ CREATE TABLE IF NOT EXISTS customers (
   stripe_subscription_id TEXT,
   subscription_status    TEXT NOT NULL DEFAULT 'active',
   is_deleted             BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at             TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
+  updated_at             TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_customers_stripe_customer ON customers(stripe_customer_id);
@@ -30,11 +30,11 @@ CREATE TABLE IF NOT EXISTS api_keys (
   key_hash      TEXT NOT NULL UNIQUE,
   key_prefix    TEXT NOT NULL,
   status        TEXT NOT NULL DEFAULT 'active',
-  expires_at    TIMESTAMPTZ,
+  expires_at    TEXT,
   is_deleted    BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  last_used_at  TIMESTAMPTZ
+  created_at    TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
+  updated_at    TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
+  last_used_at  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_customer ON api_keys(customer_id);
