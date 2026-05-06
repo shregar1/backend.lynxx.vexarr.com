@@ -109,7 +109,9 @@ openapiv3 = "2"
 # for offline restarts. See src/license/mod.rs.
 
 # Password hashing for the billing service (lynxx-billing binary).
-# argon2id is the OWASP-recommended algorithm in 2026.
+# argon2id is the OWASP-recommended password hashing algorithm in 2026
+# — memory-hard (resistant to GPU/ASIC attacks) and has no 72-byte
+# truncation limit that bcrypt suffers from.
 argon2 = "0.5"
 hex = "0.4"
 
