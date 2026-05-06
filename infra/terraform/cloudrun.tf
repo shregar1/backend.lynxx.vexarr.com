@@ -117,6 +117,18 @@ resource "google_cloud_run_v2_service" "billing" {
       max_instance_count = 10
     }
 
+    # Direct VPC egress so the service can reach Cloud SQL via its
+    # private IP. PRIVATE_RANGES_ONLY keeps internet egress off the VPC
+    # path (cheaper, faster) — the Stripe HTTP client still goes out the
+    # default Cloud Run NAT.
+    vpc_access {
+      network_interfaces {
+        network    = google_compute_network.lynxx.id
+        subnetwork = google_compute_subnetwork.lynxx.id
+      }
+      egress = "PRIVATE_RANGES_ONLY"
+    }
+
     containers {
       image = local.placeholder_image
 
@@ -133,14 +145,12 @@ resource "google_cloud_run_v2_service" "billing" {
       }
 
       env {
-        # libpq URL form for Unix-socket connections: empty host + `host=`
-        # query param. Cloud Run mounts the Cloud SQL socket at
-        # /cloudsql/<connection-name> when the volume below is declared.
-        # The standard `postgres://user:pwd@localhost/db?host=/cloudsql/...`
-        # form makes sqlx try TCP localhost first and fail the pool
-        # acquire timeout, which is what we hit on the first deploy.
+        # Plain TCP to Cloud SQL's private IP. Reaches the database over
+        # the VPC via direct egress (configured below). Simpler than
+        # Cloud Run's Unix-socket integration and avoids a sqlx URL
+        # parsing rabbit hole.
         name  = "DATABASE_URL"
-        value = "postgres:///lynxx?user=lynxx&password=${var.db_password}&host=/cloudsql/${google_sql_database_instance.lynxx.connection_name}"
+        value = "postgres://lynxx:${var.db_password}@${google_sql_database_instance.lynxx.private_ip_address}:5432/lynxx"
       }
       env {
         name  = "LYNXX_BILLING_BIND"
@@ -196,13 +206,6 @@ resource "google_cloud_run_v2_service" "billing" {
       env {
         name  = "STRIPE_PRICE_BUSINESS"
         value = var.stripe_price_business
-      }
-    }
-
-    volumes {
-      name = "cloudsql"
-      cloud_sql_instance {
-        instances = [google_sql_database_instance.lynxx.connection_name]
       }
     }
   }
