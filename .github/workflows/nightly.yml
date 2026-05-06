@@ -6,8 +6,6 @@ name: nightly
 # binaries without waiting for the next tag.
 
 on:
-  schedule:
-    - cron: "17 4 * * *"   # 04:17 UTC daily — off the top-of-hour stampede
   workflow_dispatch:
 
 permissions:
