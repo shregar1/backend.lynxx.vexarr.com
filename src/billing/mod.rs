@@ -22,6 +22,7 @@ pub mod server;
 pub mod signing;
 pub mod stripe;
 
+use axum::http::HeaderValue;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -34,6 +35,11 @@ pub struct AppState {
     pub admin_api_key: String,
     pub stripe: stripe::StripeConfig,
     pub website_origin: String,
+    /// Browser origins permitted to send credentialed (cookie-bearing)
+    /// requests. CORS reflects the request Origin only when it appears
+    /// here; everything else is rejected by the browser. CLI / curl
+    /// users bypass this entirely (no Origin header).
+    pub allowed_origins: Vec<HeaderValue>,
     /// GCS V4 signed-URL minter for the binaries bucket. None when the
     /// service runs locally without a GCS bucket configured (`/v1/install/binary`
     /// returns 503 in that mode).

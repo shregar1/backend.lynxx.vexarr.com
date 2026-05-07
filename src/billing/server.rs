@@ -3,7 +3,7 @@
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderName, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -12,7 +12,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -22,16 +22,59 @@ use super::models::{Customer, NewApiKey, NewCustomer};
 use super::stripe;
 use super::AppState;
 
+/// Cookie name used for the browser session. The CLI / curl flow uses
+/// `Authorization: Bearer <token>` — both paths resolve to the same
+/// session token under the hood.
+const SESSION_COOKIE: &str = "lynx_session";
+
+/// Custom CSRF header. Browser fetches from the website include it so
+/// the request triggers a CORS preflight, which our allowlist gates.
+/// Cookie-authed mutating endpoints reject requests that omit it AND
+/// don't carry a Bearer token, so a forged cross-origin form POST can't
+/// piggyback on the session cookie.
+const CSRF_HEADER: &str = "x-lynxx-web";
+
+/// Session lifetime — 30 days. Keep in sync with the
+/// `auth::issue_session` TTL when that becomes configurable.
+const SESSION_MAX_AGE_SECS: i64 = 30 * 24 * 60 * 60;
+
 pub fn router(state: AppState) -> Router {
+    // Browser origins allowed to send cookies. CLI / curl users have no
+    // Origin header, so this layer is a no-op for them — bearer-token
+    // auth keeps working unchanged. The list comes from
+    // `state.allowed_origins` which is populated from
+    // LYNXX_ALLOWED_ORIGINS at startup; defaults cover the production
+    // website + the Cloud Run URL + local dev.
+    //
+    // `allow_credentials(true)` turns the wildcard `*` reply into a
+    // mirror of the request Origin (browsers reject credentialed
+    // requests against `*`). That means an origin must be explicitly
+    // allowlisted for cookies to flow.
+    //
+    // Mutating endpoints expect `Content-Type: application/json` AND
+    // the `X-Lynxx-Web` header, both of which trigger a preflight that
+    // this CORS gate runs through — so a cross-origin form-POST attack
+    // can't piggyback on the session cookie.
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_origin(state.allowed_origins.clone())
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            HeaderName::from_static(CSRF_HEADER),
+        ])
+        .allow_credentials(true)
+        .max_age(std::time::Duration::from_secs(600));
 
     Router::new()
         .route("/v1/license/verify", get(verify_license))
         .route("/v1/auth/signup", post(signup))
         .route("/v1/auth/signin", post(signin))
+        .route("/v1/auth/logout", post(logout))
         .route("/v1/account/me", get(me))
         .route("/v1/account/keys", get(list_keys).post(create_key))
         .route("/v1/account/keys/:urn/revoke", post(revoke_key))
@@ -45,8 +88,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/customers/internal", post(admin_create_internal))
         .route("/install.sh", get(install_script))
         .route("/install", get(install_script))
-        // Returns a short-lived V4 signed URL for the requested binary.
-        // The install.sh script calls this once per binary it needs.
+        // Streams the requested binary back through the api domain;
+        // see `install_binary` for the GCS plumbing.
         .route("/v1/install/binary", get(install_binary))
         // /healthz on *.run.app is intercepted by Google's edge (returns
         // a generic 404 HTML page before the request reaches the
@@ -55,6 +98,42 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .layer(cors)
         .with_state(state)
+}
+
+// ---------------------------------------------------------------------------
+// Session cookie helpers
+// ---------------------------------------------------------------------------
+
+/// Build the `Set-Cookie` header value for an active session. Scoped
+/// to `/`, `HttpOnly`, `Secure`, and `SameSite=None` so the website on
+/// `lynxx.dev` can use it across the cross-origin boundary to
+/// `api.lynxx.vexarr.com`.
+fn session_cookie(token: &str) -> String {
+    format!(
+        "{name}={token}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age={age}",
+        name = SESSION_COOKIE,
+        token = token,
+        age = SESSION_MAX_AGE_SECS,
+    )
+}
+
+/// `Set-Cookie` value that immediately expires the session cookie.
+/// The browser drops it on receipt.
+fn clear_session_cookie() -> String {
+    format!(
+        "{name}=; HttpOnly; Secure; SameSite=None; Path=/; Max-Age=0",
+        name = SESSION_COOKIE,
+    )
+}
+
+/// Pull the session token out of the `Cookie` header, if present.
+/// Tolerates multiple cookies separated by `; `.
+fn cookie_session_token(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    raw.split(';')
+        .map(str::trim)
+        .find_map(|kv| kv.strip_prefix(&format!("{}=", SESSION_COOKIE)))
+        .map(|s| s.to_string())
 }
 
 // install.sh is baked into the binary via include_str! so the billing
@@ -182,17 +261,45 @@ fn unauthorized() -> ApiError {
 // ---------------------------------------------------------------------------
 
 async fn require_session(state: &AppState, headers: &HeaderMap) -> Result<Customer, ApiError> {
-    let token = headers
+    let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
-        .ok_or_else(unauthorized)?;
-    let customer_id = verify_session(token, &state.session_secret).ok_or_else(unauthorized)?;
+        .map(|s| s.to_string());
+
+    // Cookie path: present, but a forged cross-origin POST could
+    // include it without the website's knowledge. Require the
+    // X-Lynxx-Web header alongside the cookie — that header forces a
+    // CORS preflight, which our origin allowlist gates. Bearer tokens
+    // are not subject to this since they can't be picked up by a
+    // browser without explicit script access.
+    let cookie = cookie_session_token(headers).filter(|_| {
+        headers
+            .get(CSRF_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    });
+
+    let token = bearer.or(cookie).ok_or_else(unauthorized)?;
+    let customer_id = verify_session(&token, &state.session_secret).ok_or_else(unauthorized)?;
     state
         .repo
         .find_customer(customer_id)
         .await?
         .ok_or_else(unauthorized)
+}
+
+/// `POST /v1/auth/logout` — clears the session cookie. Always returns
+/// 204 even if the caller had no cookie (idempotent). The cookie's
+/// HttpOnly flag means JS can't clear it from the website on its own;
+/// that's the whole point of having this endpoint.
+async fn logout() -> Response {
+    (
+        StatusCode::NO_CONTENT,
+        [(header::SET_COOKIE, clear_session_cookie())],
+    )
+        .into_response()
 }
 
 /// Constant-time bearer-token check against the master admin secret.
@@ -321,7 +428,7 @@ struct SignupResp {
 async fn signup(
     State(state): State<AppState>,
     Json(req): Json<SignupReq>,
-) -> Result<Json<SignupResp>, ApiError> {
+) -> Result<Response, ApiError> {
     let email = req.email.trim().to_lowercase();
     if !email.contains('@') {
         return Err(bad("invalid email"));
@@ -359,7 +466,7 @@ async fn signup(
 
     let mut resp = SignupResp {
         customer_urn: urn.to_string(),
-        session_token,
+        session_token: session_token.clone(),
         api_key: None,
         checkout_url: None,
     };
@@ -414,7 +521,12 @@ async fn signup(
     }
 
     info!(customer_urn=%urn, tier=%tier, "customer created");
-    Ok(Json(resp))
+    Ok((
+        StatusCode::OK,
+        [(header::SET_COOKIE, session_cookie(&session_token))],
+        Json(resp),
+    )
+        .into_response())
 }
 
 /// Per-tier limit on active API keys.
@@ -471,7 +583,7 @@ struct SigninResp {
 async fn signin(
     State(state): State<AppState>,
     Json(req): Json<SigninReq>,
-) -> Result<Json<SigninResp>, ApiError> {
+) -> Result<Response, ApiError> {
     let email = req.email.trim().to_lowercase();
     let customer = state
         .repo
@@ -485,13 +597,19 @@ async fn signin(
         ));
     }
     let token = issue_session(customer.id, &state.session_secret);
-    Ok(Json(SigninResp {
+    let body = Json(SigninResp {
         customer_urn: customer.urn.to_string(),
-        session_token: token,
+        session_token: token.clone(),
         tier: customer.tier_code,
         name: customer.name,
         company: customer.company,
-    }))
+    });
+    Ok((
+        StatusCode::OK,
+        [(header::SET_COOKIE, session_cookie(&token))],
+        body,
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------

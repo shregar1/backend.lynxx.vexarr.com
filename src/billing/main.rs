@@ -3,6 +3,7 @@
 //! configuration from environment variables.
 
 use anyhow::{anyhow, Context, Result};
+use axum::http::HeaderValue;
 use lynx_gateway::billing::{
     repo::{BillingRepo, SqlBillingRepo},
     server,
@@ -127,12 +128,55 @@ async fn main() -> Result<()> {
         tracing::warn!("BINARIES_BUCKET not set — /v1/install/binary disabled");
     }
 
+    // Browser origins allowed to send the session cookie. Comma-separated
+    // list of full origins (scheme://host[:port]). Defaults cover the
+    // production website + Cloud Run URL + local Vite dev. The
+    // `website_origin` is always included so a typo'd env var doesn't
+    // break the production site.
+    let mut origins: Vec<String> = env::var("LYNXX_ALLOWED_ORIGINS")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            s.split(',')
+                .map(|o| o.trim().trim_end_matches('/').to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            vec![
+                "https://lynxx.dev".into(),
+                "https://www.lynxx.dev".into(),
+                "https://app.lynxx.dev".into(),
+                "https://lynxx-website-588755157227.us-central1.run.app".into(),
+                "https://lynxx-website-7jnb4axmhq-uc.a.run.app".into(),
+                "http://localhost:5173".into(),
+                "http://127.0.0.1:5173".into(),
+                "http://localhost:4173".into(),
+            ]
+        });
+    let normalized = website_origin.trim_end_matches('/').to_string();
+    if !origins.iter().any(|o| o == &normalized) {
+        origins.push(normalized);
+    }
+    let allowed_origins: Vec<HeaderValue> = origins
+        .iter()
+        .filter_map(|o| match HeaderValue::from_str(o) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                tracing::warn!(origin=%o, error=%e, "ignoring invalid CORS origin");
+                None
+            }
+        })
+        .collect();
+    tracing::info!(origins = ?origins, "CORS allowlist");
+
     let state = AppState {
         repo,
         session_secret,
         admin_api_key,
         stripe,
         website_origin,
+        allowed_origins,
         gcs,
     };
 
