@@ -120,7 +120,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-release-
 
       - name: cargo build --release
-        run: cargo build --release --bin lynx-gateway --bin lynxx-ingress
+        run: cargo build --release --bin lynxx-gateway --bin lynxx-ingress
 
       - name: cargo build --release (bench)
         run: cargo build --release -p lynxx-bench
@@ -130,7 +130,7 @@ jobs:
         with:
           name: lynxx-${{ github.ref_name }}-linux-amd64
           path: |
-            target/release/lynx-gateway
+            target/release/lynxx-gateway
             target/release/lynxx-ingress
             target/release/lynxx-bench
           if-no-files-found: error
@@ -165,7 +165,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-release-
 
       - name: build gateway + bench
-        run: cargo build --release --bin lynx-gateway && cargo build --release -p lynxx-bench
+        run: cargo build --release --bin lynxx-gateway && cargo build --release -p lynxx-bench
 
       - name: Start static upstream (python http.server)
         run: |
@@ -202,7 +202,7 @@ jobs:
       - name: Start gateway in background
         run: |
           LYNXX_CONFIG=/tmp/lynxx-smoke.toml \
-            nohup ./target/release/lynx-gateway >/tmp/gw.log 2>&1 &
+            nohup ./target/release/lynxx-gateway >/tmp/gw.log 2>&1 &
           for i in $(seq 1 60); do
             curl -fsS http://127.0.0.1:9001/status && break || sleep 1
           done

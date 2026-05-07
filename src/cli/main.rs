@@ -206,11 +206,11 @@ enum Cmd {
         /// Target shell
         shell: Shell,
     },
-    /// Run the Lynxx gateway (execs the lynx-gateway binary in PATH).
+    /// Run the Lynxx gateway (execs the lynxx-gateway binary in PATH).
     /// All extra arguments are forwarded.
     #[command(trailing_var_arg = true, allow_hyphen_values = true)]
     Start {
-        /// Arguments forwarded to lynx-gateway (e.g. --config /etc/lynxx.toml).
+        /// Arguments forwarded to lynxx-gateway (e.g. --config /etc/lynxx.toml).
         args: Vec<String>,
     },
 }
@@ -4003,7 +4003,7 @@ async fn main() -> ExitCode {
     }
 }
 
-/// `lynxx start [...]` — replaces the current process with `lynx-gateway`,
+/// `lynxx start [...]` — replaces the current process with `lynxx-gateway`,
 /// forwarding any extra arguments. We look the gateway binary up next to
 /// the running CLI binary first, then fall back to PATH so users who
 /// installed via the install.sh script get it without extra config.
@@ -4023,7 +4023,7 @@ fn cmd_start(args: Vec<String>) -> Result<()> {
 fn locate_gateway() -> Result<PathBuf> {
     if let Ok(self_path) = std::env::current_exe() {
         if let Some(dir) = self_path.parent() {
-            let candidate = dir.join("lynx-gateway");
+            let candidate = dir.join("lynxx-gateway");
             if candidate.is_file() {
                 return Ok(candidate);
             }
@@ -4031,14 +4031,14 @@ fn locate_gateway() -> Result<PathBuf> {
     }
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join("lynx-gateway");
+            let candidate = dir.join("lynxx-gateway");
             if candidate.is_file() {
                 return Ok(candidate);
             }
         }
     }
     Err(anyhow::anyhow!(
-        "lynx-gateway binary not found next to lynxx or on PATH. \
+        "lynxx-gateway binary not found next to lynxx or on PATH. \
          Reinstall via `curl -fsSL https://api.lynxx.vexarr.com/install.sh | bash`."
     ))
 }

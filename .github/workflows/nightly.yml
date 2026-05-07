@@ -49,7 +49,7 @@ jobs:
       - name: Build
         run: |
           cargo build --release --target x86_64-unknown-linux-gnu \
-            --bin lynx-gateway --bin lynxx-ingress --bin lynxx
+            --bin lynxx-gateway --bin lynxx-ingress --bin lynxx
 
       - name: Stage artifact tree
         id: stage
@@ -58,10 +58,10 @@ jobs:
           name="lynxx-nightly-${{ steps.stamp.outputs.date }}-${{ steps.stamp.outputs.sha }}-x86_64-unknown-linux-gnu"
           stage="dist/${name}"
           mkdir -p "${stage}/migrations"
-          cp target/x86_64-unknown-linux-gnu/release/lynx-gateway  "${stage}/"
+          cp target/x86_64-unknown-linux-gnu/release/lynxx-gateway  "${stage}/"
           cp target/x86_64-unknown-linux-gnu/release/lynxx-ingress "${stage}/"
           cp target/x86_64-unknown-linux-gnu/release/lynxx         "${stage}/"
-          chmod +x "${stage}"/lynx-gateway "${stage}"/lynxx-ingress "${stage}"/lynxx
+          chmod +x "${stage}"/lynxx-gateway "${stage}"/lynxx-ingress "${stage}"/lynxx
           [[ -f LICENSE ]] && cp LICENSE "${stage}/" || echo "no LICENSE file" > "${stage}/LICENSE"
           cp README.md "${stage}/"
           cp -R migrations/. "${stage}/migrations/"

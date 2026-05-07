@@ -74,10 +74,17 @@ pub enum LicenseError {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct VerifyResponse {
-    customer_id: String,
+    /// Server-side identifier — the licence service emits `customer_urn`
+    /// (the cross-cutting URN convention). The `alias` keeps older
+    /// licence-server deployments + offline caches written by older
+    /// binaries usable.
+    #[serde(alias = "customer_id")]
+    customer_urn: String,
     tier: String,
     #[serde(default)]
     expires_at: Option<i64>,
+    #[serde(default)]
+    scopes: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -117,7 +124,7 @@ impl License {
         match verify_online(&api_key, &verify_url).await {
             Ok(resp) => {
                 let lic = License {
-                    customer_id: resp.customer_id.clone(),
+                    customer_id: resp.customer_urn.clone(),
                     tier: PlanTier::from_str(&resp.tier),
                     expires_at: resp
                         .expires_at
@@ -334,7 +341,7 @@ fn write_cache(api_key: &str, resp: &VerifyResponse) -> Result<(), std::io::Erro
     };
     let entry = CacheEntry {
         api_key_hash: key_fingerprint(api_key),
-        customer_id: resp.customer_id.clone(),
+        customer_id: resp.customer_urn.clone(),
         tier: resp.tier.clone(),
         expires_at: resp.expires_at,
         verified_at: Utc::now().timestamp(),

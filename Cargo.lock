@@ -2903,7 +2903,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
-name = "lynx-gateway"
+name = "lynxx-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures-util",
+ "hdrhistogram",
+ "libc",
+ "rand 0.8.6",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "lynxx-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2970,27 +2991,6 @@ dependencies = [
  "webpki-roots 0.26.11",
  "wiremock",
  "x509-parser",
-]
-
-[[package]]
-name = "lynxx-bench"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "futures-util",
- "hdrhistogram",
- "libc",
- "rand 0.8.6",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

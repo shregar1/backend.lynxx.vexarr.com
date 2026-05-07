@@ -1,6 +1,6 @@
 # lynxx-ebpf — kernel-level TCP observability sidecar
 
-> **Beyond-Kong feature #7**, and the only one in the lynx tree that lives
+> **Beyond-Kong feature #7**, and the only one in the lynxx tree that lives
 > outside the main gateway workspace. nginx-based gateways like Kong cannot
 > see TCP retransmits or socket state transitions because they're entirely
 > userspace. lynxx-ebpf is a privileged sidecar binary that loads a small

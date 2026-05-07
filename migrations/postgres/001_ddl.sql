@@ -1,22 +1,24 @@
 -- Lynxx schema — PostgreSQL DDL.
 --
--- Standard columns on every business table:
+-- Lookup tables (`*_lk`) and billing tables (customers, api_keys) follow
+-- the standard column convention:
 --   id          BIGSERIAL primary key (internal, never exposed externally)
 --   urn         external identifier (UUID4 string, used by every API)
 --   created_at  TIMESTAMPTZ at insert
 --   updated_at  TIMESTAMPTZ refreshed on every UPDATE (via trigger)
 --   is_deleted  BOOLEAN soft-delete flag; reads filter by `is_deleted = false`
 --
--- Lookup tables (`*_lk`) live at the top of this file so business tables
--- below can reference them with NOT NULL FK columns. Row IDs in lookup
--- tables are stable (1, 2, …) — defaults below assume they were seeded
--- in order by 002_seed.sql.
+-- Gateway business tables (services, routes, plugins, consumers, targets,
+-- admin_tokens, audit_log, recordings) use `id UUID PRIMARY KEY` minted
+-- in Rust as the external id — the gateway repository binds Uuid
+-- directly. The cross-cutting urn convention does not apply here.
 --
 -- Triggers (defined at the bottom):
 --   set_urn          fills NEW.urn with a UUID4 if NULL/empty on INSERT
+--                    (lookup + billing tables only)
 --   bump_updated_at  refreshes NEW.updated_at to now() on UPDATE
--- Both are attached to every standard business + lookup table, except
--- audit_log (append-only, no updated_at) and quota_usage (single-row PK).
+-- audit_log (append-only, no updated_at) and quota_usage (single-row PK)
+-- are exempt.
 
 -- ---------------------------------------------------------------------------
 -- Trigger functions (idempotent — safe to re-run during recovery)
@@ -118,8 +120,7 @@ CREATE TABLE IF NOT EXISTS lb_strategy_lk (
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS services (
-  id                   BIGSERIAL PRIMARY KEY,
-  urn                  TEXT NOT NULL UNIQUE,
+  id                   UUID PRIMARY KEY,
   name                 TEXT NOT NULL UNIQUE,
   url                  TEXT NOT NULL,
   retries              BIGINT NOT NULL DEFAULT 3,
@@ -141,9 +142,8 @@ CREATE TABLE IF NOT EXISTS services (
 );
 
 CREATE TABLE IF NOT EXISTS routes (
-  id         BIGSERIAL PRIMARY KEY,
-  urn        TEXT NOT NULL UNIQUE,
-  service_id BIGINT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  id         UUID PRIMARY KEY,
+  service_id UUID NOT NULL REFERENCES services(id) ON DELETE CASCADE,
   paths      JSONB NOT NULL,
   methods    JSONB NOT NULL,
   hosts      JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -155,11 +155,10 @@ CREATE TABLE IF NOT EXISTS routes (
 );
 
 CREATE TABLE IF NOT EXISTS plugins (
-  id         BIGSERIAL PRIMARY KEY,
-  urn        TEXT NOT NULL UNIQUE,
+  id         UUID PRIMARY KEY,
   name       TEXT NOT NULL,
-  service_id BIGINT REFERENCES services(id) ON DELETE CASCADE,
-  route_id   BIGINT REFERENCES routes(id) ON DELETE CASCADE,
+  service_id UUID REFERENCES services(id) ON DELETE CASCADE,
+  route_id   UUID REFERENCES routes(id) ON DELETE CASCADE,
   enabled    BOOLEAN NOT NULL DEFAULT TRUE,
   config     JSONB NOT NULL,
   is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
@@ -168,8 +167,7 @@ CREATE TABLE IF NOT EXISTS plugins (
 );
 
 CREATE TABLE IF NOT EXISTS consumers (
-  id         BIGSERIAL PRIMARY KEY,
-  urn        TEXT NOT NULL UNIQUE,
+  id         UUID PRIMARY KEY,
   username   TEXT NOT NULL UNIQUE,
   custom_id  TEXT,
   api_key    TEXT UNIQUE,
@@ -179,9 +177,8 @@ CREATE TABLE IF NOT EXISTS consumers (
 );
 
 CREATE TABLE IF NOT EXISTS targets (
-  id         BIGSERIAL PRIMARY KEY,
-  urn        TEXT NOT NULL UNIQUE,
-  service_id BIGINT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  id         UUID PRIMARY KEY,
+  service_id UUID NOT NULL REFERENCES services(id) ON DELETE CASCADE,
   url        TEXT NOT NULL,
   weight     BIGINT NOT NULL DEFAULT 1,
   enabled    BOOLEAN NOT NULL DEFAULT TRUE,
@@ -191,8 +188,7 @@ CREATE TABLE IF NOT EXISTS targets (
 );
 
 CREATE TABLE IF NOT EXISTS admin_tokens (
-  id           BIGSERIAL PRIMARY KEY,
-  urn          TEXT NOT NULL UNIQUE,
+  id           UUID PRIMARY KEY,
   name         TEXT NOT NULL,
   token_hash   TEXT NOT NULL UNIQUE,
   role         TEXT NOT NULL,
@@ -208,13 +204,13 @@ CREATE TABLE IF NOT EXISTS admin_tokens (
 
 -- audit_log is append-only with a hash chain — no is_deleted, no
 -- updated_at (entries can't be modified without invalidating the chain).
--- urn lets external consumers reference a row without exposing the
--- monotonically-increasing internal id.
+-- `id` is a monotonic BIGSERIAL; external consumers walk the chain by
+-- timestamp / hash rather than by exposed row id.
 CREATE TABLE IF NOT EXISTS audit_log (
   id            BIGSERIAL PRIMARY KEY,
-  urn           TEXT NOT NULL UNIQUE,
   ts            TIMESTAMPTZ NOT NULL,
-  actor_id      BIGINT,
+  -- UUID of the actor's admin_tokens.id (the gateway uses UUIDs here too).
+  actor_id      UUID,
   actor_name    TEXT,
   actor_role    TEXT,
   action        TEXT NOT NULL,
@@ -227,15 +223,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 CREATE TABLE IF NOT EXISTS recordings (
-  id             BIGSERIAL PRIMARY KEY,
-  urn            TEXT NOT NULL UNIQUE,
+  id             TEXT PRIMARY KEY,
   ts             TIMESTAMPTZ NOT NULL,
   method         TEXT NOT NULL,
   path           TEXT NOT NULL,
   status         SMALLINT NOT NULL,
   duration_ms    BIGINT NOT NULL,
-  service_id     BIGINT,
-  route_id       BIGINT,
+  service_id     UUID,
+  route_id       UUID,
   consumer       TEXT,
   bytes_request  BIGINT NOT NULL,
   bytes_response BIGINT NOT NULL,
@@ -324,23 +319,30 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_urn                      ON api_keys(urn
 CREATE INDEX IF NOT EXISTS idx_api_keys_status                   ON api_keys(api_key_status_id);
 
 -- ---------------------------------------------------------------------------
--- Triggers — set urn on insert, bump updated_at on update.
--- audit_log gets only set_urn (no updated_at column).
--- quota_usage is opted out (single-row PK, no urn/updated_at convention).
+-- Triggers
+--
+-- set_urn applies to lookup + billing tables only (the gateway business
+-- tables key on UUID id, no separate urn column). bump_updated_at applies
+-- to every table with an updated_at column. audit_log + quota_usage are
+-- opted out.
 -- ---------------------------------------------------------------------------
 
 DO $$
 DECLARE
   t TEXT;
-  -- Tables that have both urn + updated_at columns.
-  standard_tables TEXT[] := ARRAY[
+  -- Tables that carry both urn + updated_at columns.
+  urn_tables TEXT[] := ARRAY[
     'user_type_lk', 'billing_tier_lk', 'subscription_status_lk',
     'subscription_type_lk', 'api_key_status_lk', 'lb_strategy_lk',
+    'customers', 'api_keys'
+  ];
+  -- Gateway business tables: bump_updated_at only.
+  gateway_tables TEXT[] := ARRAY[
     'services', 'routes', 'plugins', 'consumers', 'targets',
-    'admin_tokens', 'recordings', 'customers', 'api_keys'
+    'admin_tokens', 'recordings'
   ];
 BEGIN
-  FOREACH t IN ARRAY standard_tables LOOP
+  FOREACH t IN ARRAY urn_tables LOOP
     EXECUTE format('DROP TRIGGER IF EXISTS trg_%I_set_urn ON %I', t, t);
     EXECUTE format('CREATE TRIGGER trg_%I_set_urn BEFORE INSERT ON %I
                     FOR EACH ROW EXECUTE FUNCTION set_urn()', t, t);
@@ -349,8 +351,9 @@ BEGIN
                     FOR EACH ROW EXECUTE FUNCTION bump_updated_at()', t, t);
   END LOOP;
 
-  -- audit_log: urn-only (append-only, no updated_at).
-  EXECUTE 'DROP TRIGGER IF EXISTS trg_audit_log_set_urn ON audit_log';
-  EXECUTE 'CREATE TRIGGER trg_audit_log_set_urn BEFORE INSERT ON audit_log
-           FOR EACH ROW EXECUTE FUNCTION set_urn()';
+  FOREACH t IN ARRAY gateway_tables LOOP
+    EXECUTE format('DROP TRIGGER IF EXISTS trg_%I_bump_updated_at ON %I', t, t);
+    EXECUTE format('CREATE TRIGGER trg_%I_bump_updated_at BEFORE UPDATE ON %I
+                    FOR EACH ROW EXECUTE FUNCTION bump_updated_at()', t, t);
+  END LOOP;
 END $$;

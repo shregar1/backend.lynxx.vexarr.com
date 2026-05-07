@@ -1,6 +1,6 @@
 //! End-to-end integration test for the admin API.
 //!
-//! Spawns `lynx-gateway` as a child process pointed at a freshly minted
+//! Spawns `lynxx-gateway` as a child process pointed at a freshly minted
 //! temp directory + `config.toml`, waits for `:admin/status` to come up,
 //! then exercises a service create/get/delete cycle. The Postgres variant
 //! runs the same flow against a Postgres URL and is gated on the
@@ -154,16 +154,16 @@ async fn launch_gateway(db_url: &str) -> (GatewayGuard, u16) {
     let admin_port = pick_free_port();
     let config = write_config(&dir_path, proxy_port, admin_port, db_url);
 
-    let bin = env!("CARGO_BIN_EXE_lynx-gateway");
+    let bin = env!("CARGO_BIN_EXE_lynxx-gateway");
     let child = Command::new(bin)
         .env("LYNXX_CONFIG", &config)
-        .env("RUST_LOG", "lynx_gateway=warn")
+        .env("RUST_LOG", "lynxx_gateway=warn")
         .current_dir(&dir_path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn lynx-gateway");
+        .expect("spawn lynxx-gateway");
 
     let guard = GatewayGuard::new(child);
     let up = wait_for_status(admin_port, Duration::from_secs(30)).await;

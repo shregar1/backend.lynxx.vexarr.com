@@ -493,7 +493,7 @@ pub fn fmt_count(n: u64) -> String {
 /// Used by `memory` and `malformed` for RSS sampling.
 pub fn find_gateway_pid() -> Option<u32> {
     let out = std::process::Command::new("pgrep")
-        .args(["-f", "lynx-gateway"])
+        .args(["-f", "lynxx-gateway"])
         .output()
         .ok()?;
     if !out.status.success() {

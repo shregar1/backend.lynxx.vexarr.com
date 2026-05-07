@@ -28,7 +28,7 @@ services:
       - lynxx-data:/var/lib/lynxx
       - ./quickstart-config.toml:/etc/lynxx/config.toml:ro
     healthcheck:
-      test: ["CMD", "/usr/local/bin/lynx-gateway", "healthcheck", "--addr", "127.0.0.1:9001"]
+      test: ["CMD", "/usr/local/bin/lynxx-gateway", "healthcheck", "--addr", "127.0.0.1:9001"]
       interval: 10s
       timeout: 3s
       retries: 5

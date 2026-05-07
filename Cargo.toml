@@ -2,7 +2,7 @@
 members = [".", "bench"]
 
 [package]
-name = "lynx-gateway"
+name = "lynxx-gateway"
 version = "0.1.0"
 edition = "2021"
 # Proprietary — see LICENSE. Not published to crates.io.
@@ -122,11 +122,11 @@ hex = "0.4"
 rcgen = { version = "0.13", features = ["pem"] }
 
 [lib]
-name = "lynx_gateway"
+name = "lynxx_gateway"
 path = "src/lib.rs"
 
 [[bin]]
-name = "lynx-gateway"
+name = "lynxx-gateway"
 path = "src/main.rs"
 
 [[bin]]

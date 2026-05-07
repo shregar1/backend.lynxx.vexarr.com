@@ -7,9 +7,9 @@
 
 use axum::body::Body;
 use axum::http::Request;
-use lynx_gateway::error::PluginError;
-use lynx_gateway::plugins::graphql_guard::GraphqlGuardPlugin;
-use lynx_gateway::plugins::Plugin;
+use lynxx_gateway::error::PluginError;
+use lynxx_gateway::plugins::graphql_guard::GraphqlGuardPlugin;
+use lynxx_gateway::plugins::Plugin;
 use serde_json::json;
 
 fn req_with_body(body: serde_json::Value) -> Request<Body> {

@@ -1,6 +1,6 @@
 # Lynxx Gateway
 
-API gateway in Rust. Three binaries: `lynx-gateway` (proxy + admin :9000/:9001), `lynxx-ingress` (K8s controller), `lynxx` (admin CLI).
+API gateway in Rust. Three binaries: `lynxx-gateway` (proxy + admin :9000/:9001), `lynxx-ingress` (K8s controller), `lynxx` (admin CLI).
 
 ## Quickstart (Docker Compose)
 
@@ -18,7 +18,7 @@ helm install lynxx ./deploy/helm/lynxx
 ## Local dev
 
 ```sh
-cargo run --bin lynx-gateway
+cargo run --bin lynxx-gateway
 ```
 
 ## CLI
@@ -74,6 +74,6 @@ The gateway accepts CLI flags as the highest-precedence config layer
 (`flag > env > config.toml > default`):
 
 ```sh
-lynx-gateway --config /etc/lynxx/config.toml --proxy-port 9000 --admin-port 9001
+lynxx-gateway --config /etc/lynxx/config.toml --proxy-port 9000 --admin-port 9001
 ```
 

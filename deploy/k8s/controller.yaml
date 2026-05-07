@@ -58,7 +58,7 @@ spec:
           command: ["lynxx-ingress"]
           env:
             - name: LYNXX_ADMIN_URL
-              value: "http://lynx-gateway.lynxx-system.svc.cluster.local:9001"
+              value: "http://lynxx-gateway.lynxx-system.svc.cluster.local:9001"
             - name: RUST_LOG
               value: "info,lynxx_ingress=debug"
           resources:

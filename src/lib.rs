@@ -1,6 +1,6 @@
 //! Library face of the Lynxx gateway.
 //!
-//! The crate is primarily a collection of binaries (`lynx-gateway`,
+//! The crate is primarily a collection of binaries (`lynxx-gateway`,
 //! `lynxx-ingress`, `lynxx`) but a thin `lib.rs` is also exposed so that
 //! integration tests under `tests/` and the `bench` workspace member can
 //! reach into the same module tree without spawning a subprocess.

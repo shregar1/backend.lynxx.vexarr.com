@@ -30,9 +30,9 @@ COPY scripts ./scripts
 # before the layer ends or they'd be discarded.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
-    cargo build --release --bin lynx-gateway --bin lynxx-ingress --bin lynxx --bin lynxx-billing && \
+    cargo build --release --bin lynxx-gateway --bin lynxx-ingress --bin lynxx --bin lynxx-billing && \
     mkdir -p /out && \
-    cp target/release/lynx-gateway target/release/lynxx-ingress target/release/lynxx target/release/lynxx-billing /out/
+    cp target/release/lynxx-gateway target/release/lynxx-ingress target/release/lynxx target/release/lynxx-billing /out/
 
 # ---- Shared runtime base ----------------------------------------------------
 FROM debian:bookworm-slim AS runtime-base
@@ -51,13 +51,13 @@ ENTRYPOINT ["/usr/local/bin/lynxx-billing"]
 
 # ---- Gateway image ----------------------------------------------------------
 FROM runtime-base AS gateway
-COPY --from=builder /out/lynx-gateway /usr/local/bin/
+COPY --from=builder /out/lynxx-gateway /usr/local/bin/
 COPY --from=builder /build/migrations /etc/lynxx/migrations
 COPY config.toml /etc/lynxx/config.toml
 USER lynxx
 WORKDIR /etc/lynxx
 EXPOSE 9000 9001
-ENTRYPOINT ["/usr/local/bin/lynx-gateway"]
+ENTRYPOINT ["/usr/local/bin/lynxx-gateway"]
 
 # ---- Ingress controller image ----------------------------------------------
 FROM runtime-base AS ingress

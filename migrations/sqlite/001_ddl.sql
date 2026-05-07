@@ -12,6 +12,14 @@
 -- so we keep the inline DEFAULT expression here. Application code is
 -- the source of truth for urn generation — this just gives sqlite a
 -- safe fallback when a row is inserted without one.
+--
+-- Gateway tables (services, routes, plugins, consumers, targets,
+-- admin_tokens, audit_log, recordings) use `id TEXT PRIMARY KEY`
+-- holding a UUID4 string — the gateway's repository layer mints a
+-- Uuid in Rust and binds it as the row's external id. This is the
+-- pre-consolidation behaviour; the cross-cutting `urn` convention
+-- only applies to lookup (`*_lk`) and billing (customers, api_keys)
+-- tables. See `src/db/sqlite.rs` for the binding code.
 
 -- ---------------------------------------------------------------------------
 -- Lookup tables
@@ -131,15 +139,7 @@ CREATE TABLE IF NOT EXISTS lb_strategy_lk (
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS services (
-  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-  urn                  TEXT NOT NULL UNIQUE DEFAULT (
-    lower(hex(randomblob(4))) || '-' ||
-    lower(hex(randomblob(2))) || '-4' ||
-    substr(lower(hex(randomblob(2))),2) || '-' ||
-    substr('89ab', abs(random()) % 4 + 1, 1) ||
-    substr(lower(hex(randomblob(2))),2) || '-' ||
-    lower(hex(randomblob(6)))
-  ),
+  id                   TEXT PRIMARY KEY,
   name                 TEXT NOT NULL UNIQUE,
   url                  TEXT NOT NULL,
   retries              INTEGER NOT NULL DEFAULT 3,
@@ -158,16 +158,8 @@ CREATE TABLE IF NOT EXISTS services (
 );
 
 CREATE TABLE IF NOT EXISTS routes (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  urn        TEXT NOT NULL UNIQUE DEFAULT (
-    lower(hex(randomblob(4))) || '-' ||
-    lower(hex(randomblob(2))) || '-4' ||
-    substr(lower(hex(randomblob(2))),2) || '-' ||
-    substr('89ab', abs(random()) % 4 + 1, 1) ||
-    substr(lower(hex(randomblob(2))),2) || '-' ||
-    lower(hex(randomblob(6)))
-  ),
-  service_id INTEGER NOT NULL,
+  id         TEXT PRIMARY KEY,
+  service_id TEXT NOT NULL,
   paths      TEXT NOT NULL,
   methods    TEXT NOT NULL,
   hosts      TEXT NOT NULL DEFAULT '[]',
@@ -180,18 +172,10 @@ CREATE TABLE IF NOT EXISTS routes (
 );
 
 CREATE TABLE IF NOT EXISTS plugins (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  urn        TEXT NOT NULL UNIQUE DEFAULT (
-    lower(hex(randomblob(4))) || '-' ||
-    lower(hex(randomblob(2))) || '-4' ||
-    substr(lower(hex(randomblob(2))),2) || '-' ||
-    substr('89ab', abs(random()) % 4 + 1, 1) ||
-    substr(lower(hex(randomblob(2))),2) || '-' ||
-    lower(hex(randomblob(6)))
-  ),
+  id         TEXT PRIMARY KEY,
   name       TEXT NOT NULL,
-  service_id INTEGER,
-  route_id   INTEGER,
+  service_id TEXT,
+  route_id   TEXT,
   enabled    INTEGER NOT NULL DEFAULT 1,
   config     TEXT NOT NULL,
   is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -202,15 +186,7 @@ CREATE TABLE IF NOT EXISTS plugins (
 );
 
 CREATE TABLE IF NOT EXISTS consumers (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  urn        TEXT NOT NULL UNIQUE DEFAULT (
-    lower(hex(randomblob(4))) || '-' ||
-    lower(hex(randomblob(2))) || '-4' ||
-    substr(lower(hex(randomblob(2))),2) || '-' ||
-    substr('89ab', abs(random()) % 4 + 1, 1) ||
-    substr(lower(hex(randomblob(2))),2) || '-' ||
-    lower(hex(randomblob(6)))
-  ),
+  id         TEXT PRIMARY KEY,
   username   TEXT NOT NULL UNIQUE,
   custom_id  TEXT,
   api_key    TEXT,
@@ -220,16 +196,8 @@ CREATE TABLE IF NOT EXISTS consumers (
 );
 
 CREATE TABLE IF NOT EXISTS targets (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  urn        TEXT NOT NULL UNIQUE DEFAULT (
-    lower(hex(randomblob(4))) || '-' ||
-    lower(hex(randomblob(2))) || '-4' ||
-    substr(lower(hex(randomblob(2))),2) || '-' ||
-    substr('89ab', abs(random()) % 4 + 1, 1) ||
-    substr(lower(hex(randomblob(2))),2) || '-' ||
-    lower(hex(randomblob(6)))
-  ),
-  service_id INTEGER NOT NULL,
+  id         TEXT PRIMARY KEY,
+  service_id TEXT NOT NULL,
   url        TEXT NOT NULL,
   weight     INTEGER NOT NULL DEFAULT 1,
   enabled    INTEGER NOT NULL DEFAULT 1,
@@ -240,15 +208,7 @@ CREATE TABLE IF NOT EXISTS targets (
 );
 
 CREATE TABLE IF NOT EXISTS admin_tokens (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  urn          TEXT NOT NULL UNIQUE DEFAULT (
-    lower(hex(randomblob(4))) || '-' ||
-    lower(hex(randomblob(2))) || '-4' ||
-    substr(lower(hex(randomblob(2))),2) || '-' ||
-    substr('89ab', abs(random()) % 4 + 1, 1) ||
-    substr(lower(hex(randomblob(2))),2) || '-' ||
-    lower(hex(randomblob(6)))
-  ),
+  id           TEXT PRIMARY KEY,
   name         TEXT NOT NULL,
   token_hash   TEXT NOT NULL UNIQUE,
   role         TEXT NOT NULL,
@@ -264,16 +224,9 @@ CREATE TABLE IF NOT EXISTS admin_tokens (
 
 CREATE TABLE IF NOT EXISTS audit_log (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  urn           TEXT NOT NULL UNIQUE DEFAULT (
-    lower(hex(randomblob(4))) || '-' ||
-    lower(hex(randomblob(2))) || '-4' ||
-    substr(lower(hex(randomblob(2))),2) || '-' ||
-    substr('89ab', abs(random()) % 4 + 1, 1) ||
-    substr(lower(hex(randomblob(2))),2) || '-' ||
-    lower(hex(randomblob(6)))
-  ),
   ts            TEXT NOT NULL,
-  actor_id      INTEGER,
+  -- Holds the actor's admin_tokens.id (UUID string), not a numeric id.
+  actor_id      TEXT,
   actor_name    TEXT,
   actor_role    TEXT,
   action        TEXT NOT NULL,
@@ -287,14 +240,6 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE TABLE IF NOT EXISTS recordings (
   id             TEXT PRIMARY KEY,
-  urn            TEXT NOT NULL UNIQUE DEFAULT (
-    lower(hex(randomblob(4))) || '-' ||
-    lower(hex(randomblob(2))) || '-4' ||
-    substr(lower(hex(randomblob(2))),2) || '-' ||
-    substr('89ab', abs(random()) % 4 + 1, 1) ||
-    substr(lower(hex(randomblob(2))),2) || '-' ||
-    lower(hex(randomblob(6)))
-  ),
   ts             TEXT NOT NULL,
   method         TEXT NOT NULL,
   path           TEXT NOT NULL,
@@ -410,8 +355,10 @@ CREATE INDEX        IF NOT EXISTS idx_api_keys_status               ON api_keys(
 
 -- ---------------------------------------------------------------------------
 -- Triggers — bump updated_at on UPDATE for every standard table.
--- urn is set inline via column DEFAULT; no trigger needed for that.
--- audit_log + quota_usage + _sync_log are exempt (no updated_at).
+-- For the gateway business tables, `id` is a TEXT UUID minted in Rust
+-- (no urn column). For lookup + billing tables, urn is set inline via
+-- column DEFAULT. audit_log + quota_usage + _sync_log are exempt
+-- (no updated_at).
 -- ---------------------------------------------------------------------------
 
 CREATE TRIGGER IF NOT EXISTS trg_user_type_lk_bump_updated_at

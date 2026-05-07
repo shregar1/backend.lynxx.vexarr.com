@@ -66,7 +66,7 @@ docker run -d --name bench-kong --network bench-net \
   -v /tmp:/etc/kong -p 18000:18000 kong:3.8
 
 # lynxx
-cargo run --release --bin lynx-gateway &
+cargo run --release --bin lynxx-gateway &
 lynxx services create --name local-bench --url http://127.0.0.1:18080
 lynxx routes create --service local-bench --paths /bench --strip-path
 ```
@@ -139,7 +139,7 @@ lynxx-chaos churn --duration-secs 120
 lynxx-chaos plugin-chain --rps 1000 --duration-secs 60
 lynxx-chaos ws-flood --duration-secs 60
 lynxx-chaos memory --rps 1000 --duration-secs 600
-lynxx-chaos pg-restart --pg-container lynx-postgres
+lynxx-chaos pg-restart --pg-container lynxx-postgres
 lynxx-chaos malformed
 lynxx-chaos all                                # short-default all 10 in <15min
 ```
@@ -168,7 +168,7 @@ into CI.
 ### Notes
 
 - `memory` and `malformed` sample the gateway's RSS via
-  `pgrep -f lynx-gateway` + `ps -o rss=`. They will fail (cleanly) if no
+  `pgrep -f lynxx-gateway` + `ps -o rss=`. They will fail (cleanly) if no
   matching process is found.
 - `pg-restart` requires `--pg-container <name>` and a working `docker` CLI
   in PATH. Without it the scenario reports "skipped" and `all` carries on.

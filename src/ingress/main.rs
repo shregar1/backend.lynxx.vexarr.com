@@ -1,5 +1,5 @@
 //! lynxx-ingress: a Kubernetes controller that reconciles LynxxService /
-//! LynxxRoute / LynxxPlugin custom resources into the lynx-gateway admin API.
+//! LynxxRoute / LynxxPlugin custom resources into the lynxx-gateway admin API.
 
 mod crds;
 mod gateway_client;

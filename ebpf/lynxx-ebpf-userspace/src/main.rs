@@ -79,7 +79,7 @@ const PLACEHOLDER_MARKER: &[u8] = b"LYNXX_EBPF_PLACEHOLDER_NOT_A_REAL_BPF_OBJECT
 #[command(
     name = "lynxx-ebpf",
     version,
-    about = "Kernel-level TCP observability sidecar for the lynx gateway"
+    about = "Kernel-level TCP observability sidecar for the lynxx gateway"
 )]
 struct Cli {
     /// Address to serve Prometheus metrics on. The endpoint is `/metrics`.

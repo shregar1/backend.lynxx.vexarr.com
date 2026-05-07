@@ -4,7 +4,7 @@ name: release
 #   1. Cross-platform release tarballs (linux x86_64/aarch64, darwin x86_64/aarch64,
 #      windows x86_64) attached to a GitHub Release.
 #   2. SHA256SUMS for every artifact.
-#   3. Raw binaries (lynxx, lynx-gateway) uploaded to gs://<project>-binaries/
+#   3. Raw binaries (lynxx, lynxx-gateway) uploaded to gs://<project>-binaries/
 #      under <os>/<arch>/<binary> — what the install.sh + /v1/install/binary
 #      flow streams to end users via short-lived V4 signed URLs.
 #   4. Multi-arch Docker images for gateway/ingress/cli pushed to GHCR.
@@ -99,14 +99,14 @@ jobs:
         if: matrix.use_cross
         run: |
           cross build --release --target ${{ matrix.target }} \
-            --bin lynx-gateway --bin lynxx-ingress --bin lynxx
+            --bin lynxx-gateway --bin lynxx-ingress --bin lynxx
 
       - name: Build (cargo)
         if: '!matrix.use_cross'
         shell: bash
         run: |
           cargo build --release --target ${{ matrix.target }} \
-            --bin lynx-gateway --bin lynxx-ingress --bin lynxx
+            --bin lynxx-gateway --bin lynxx-ingress --bin lynxx
 
       - name: Stage artifact tree
         id: stage
@@ -120,14 +120,14 @@ jobs:
           mkdir -p "${stage}/migrations"
 
           if [[ "${target}" == *windows* ]]; then
-            cp "target/${target}/release/lynx-gateway.exe"  "${stage}/"
+            cp "target/${target}/release/lynxx-gateway.exe"  "${stage}/"
             cp "target/${target}/release/lynxx-ingress.exe" "${stage}/"
             cp "target/${target}/release/lynxx.exe"         "${stage}/"
           else
-            cp "target/${target}/release/lynx-gateway"  "${stage}/"
+            cp "target/${target}/release/lynxx-gateway"  "${stage}/"
             cp "target/${target}/release/lynxx-ingress" "${stage}/"
             cp "target/${target}/release/lynxx"         "${stage}/"
-            chmod +x "${stage}"/lynx-gateway "${stage}"/lynxx-ingress "${stage}"/lynxx
+            chmod +x "${stage}"/lynxx-gateway "${stage}"/lynxx-ingress "${stage}"/lynxx
           fi
 
           [[ -f LICENSE ]] && cp LICENSE "${stage}/" || echo "no LICENSE file" > "${stage}/LICENSE"
@@ -208,7 +208,7 @@ jobs:
           bucket="gs://${{ vars.BINARIES_BUCKET || 'vexarr-com' }}"
           prefix="${{ vars.BINARIES_PREFIX || 'lynxx/binaries' }}"
 
-          for bin in lynxx lynx-gateway; do
+          for bin in lynxx lynxx-gateway; do
             src="target/${target}/release/${bin}"
             [[ -f "${src}" ]] || { echo "missing ${src}"; exit 1; }
             gsutil -h "Content-Type:application/octet-stream" \

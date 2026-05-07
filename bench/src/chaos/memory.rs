@@ -25,7 +25,7 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
         None => {
             return Ok(Report::fail(
                 SCENARIO,
-                "could not locate lynx-gateway via pgrep",
+                "could not locate lynxx-gateway via pgrep",
             ))
         }
     };

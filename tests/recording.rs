@@ -1,6 +1,6 @@
 //! End-to-end integration test for Time-Travel Debug.
 //!
-//! Spins up a wiremock upstream, a real `lynx-gateway` subprocess, wires
+//! Spins up a wiremock upstream, a real `lynxx-gateway` subprocess, wires
 //! a service + route + the `request-recorder` plugin (with sample_rate=1
 //! so every hit is captured), drives a few requests through the proxy,
 //! then exercises the new admin endpoints: list, fetch, replay (against
@@ -94,16 +94,16 @@ async fn launch_gateway(
     let dir_path = dir.keep();
     let config = write_config(&dir_path, proxy_port, admin_port, db_url, recordings_dir);
 
-    let bin = env!("CARGO_BIN_EXE_lynx-gateway");
+    let bin = env!("CARGO_BIN_EXE_lynxx-gateway");
     let child = Command::new(bin)
         .env("LYNXX_CONFIG", &config)
-        .env("RUST_LOG", "lynx_gateway=warn")
+        .env("RUST_LOG", "lynxx_gateway=warn")
         .current_dir(&dir_path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
-        .expect("spawn lynx-gateway");
+        .expect("spawn lynxx-gateway");
 
     let guard = GatewayGuard::new(child);
     let up = wait_for_status(admin_port, Duration::from_secs(30)).await;

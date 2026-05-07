@@ -5,10 +5,10 @@
 //! `src/plugins/openapi_*` cover the logic, and the in-binary tests inside
 //! the CLI's `openapi_import_tests` cover the spec→state conversion.
 
-use lynx_gateway::error::PluginError;
-use lynx_gateway::plugins::openapi_drift::OpenApiDriftPlugin;
-use lynx_gateway::plugins::openapi_mock::OpenApiMockPlugin;
-use lynx_gateway::plugins::Plugin;
+use lynxx_gateway::error::PluginError;
+use lynxx_gateway::plugins::openapi_drift::OpenApiDriftPlugin;
+use lynxx_gateway::plugins::openapi_mock::OpenApiMockPlugin;
+use lynxx_gateway::plugins::Plugin;
 
 const SPEC: &str = r#"
 openapi: 3.0.3

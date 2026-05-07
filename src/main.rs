@@ -129,7 +129,7 @@ async fn async_main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("lynx_gateway=info,tower_http=info")),
+                .unwrap_or_else(|_| EnvFilter::new("lynxx_gateway=info,tower_http=info")),
         )
         .init();
 
@@ -170,7 +170,7 @@ async fn async_main() -> anyhow::Result<()> {
         proxy_port = config.gateway.proxy_port,
         admin_port = config.gateway.admin_port,
         customer = %license.customer_id,
-        "starting lynx gateway"
+        "starting lynxx gateway"
     );
 
     let repo: Arc<dyn Repository> = crate::db::connect(&config.gateway.database_url).await?;
@@ -194,7 +194,7 @@ async fn async_main() -> anyhow::Result<()> {
         };
         repo.create_admin_token(&new).await?;
         eprintln!(
-            "lynx-bootstrap-admin-token id={} name={} role=admin token={}",
+            "lynxx-bootstrap-admin-token id={} name={} role=admin token={}",
             new.id, name, raw
         );
         if args.bootstrap_only {
