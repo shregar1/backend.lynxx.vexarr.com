@@ -59,6 +59,11 @@ pub struct AdminState {
     /// Monthly quota tracker. Shared with the proxy handler; the admin API
     /// exposes a read-only snapshot at GET /quota.
     pub quota: Arc<QuotaTracker>,
+    /// ACME / cert manager. `None` when `[gateway.acme].enabled = false`.
+    /// When present, the `/acme/*` admin endpoints delegate challenge
+    /// registration here so HTTP-01 *and* TLS-ALPN-01 validators can
+    /// run against the live gateway without a restart.
+    pub acme: Option<Arc<crate::proxy::acme::AcmeManager>>,
 }
 
 /// Convenience: extract the optional actor from request extensions.
@@ -1153,4 +1158,109 @@ pub async fn quota_snapshot(
     State(state): State<AdminState>,
 ) -> Result<impl IntoResponse, GatewayError> {
     Ok(Json(state.quota.snapshot()))
+}
+
+// ============================================================================
+// ACME challenge admin endpoints
+// ============================================================================
+//
+// External ACME orchestrators (lego, custom clients, certbot --manual)
+// drive validation by:
+//   1. Asking the ACME directory for a token + key authorization.
+//   2. POSTing it to the running gateway here.
+//   3. Telling the directory "go validate now".
+//   4. DELETEing the challenge to free the slot.
+//
+// HTTP-01 and TLS-ALPN-01 share the shape; the only difference is the
+// resource the validator hits (a path on port 80 vs. a TLS handshake on
+// port 443). The same gateway process serves both without any restart.
+
+#[derive(Debug, Deserialize)]
+pub struct Http01ChallengeReq {
+    pub token: String,
+    pub key_authorization: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TlsAlpnChallengeReq {
+    pub domain: String,
+    pub key_authorization: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AcmeStatus {
+    pub enabled: bool,
+    pub has_cert: bool,
+    pub http01_challenges: usize,
+    pub tls_alpn01_challenges: usize,
+}
+
+fn require_acme(state: &AdminState) -> Result<&Arc<crate::proxy::acme::AcmeManager>, GatewayError> {
+    state
+        .acme
+        .as_ref()
+        .ok_or_else(|| GatewayError::Internal("acme is disabled in gateway config".into()))
+}
+
+pub async fn set_http01_challenge(
+    State(state): State<AdminState>,
+    Json(req): Json<Http01ChallengeReq>,
+) -> Result<StatusCode, GatewayError> {
+    let mgr = require_acme(&state)?;
+    if req.token.is_empty() || req.key_authorization.is_empty() {
+        return Err(GatewayError::ConfigError(
+            "token and key_authorization are required".into(),
+        ));
+    }
+    mgr.set_challenge(req.token, req.key_authorization);
+    Ok(StatusCode::CREATED)
+}
+
+pub async fn clear_http01_challenge(
+    State(state): State<AdminState>,
+    Path(token): Path<String>,
+) -> Result<StatusCode, GatewayError> {
+    let mgr = require_acme(&state)?;
+    mgr.clear_challenge(&token);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn set_tls_alpn_challenge(
+    State(state): State<AdminState>,
+    Json(req): Json<TlsAlpnChallengeReq>,
+) -> Result<StatusCode, GatewayError> {
+    let mgr = require_acme(&state)?;
+    if req.domain.is_empty() || req.key_authorization.is_empty() {
+        return Err(GatewayError::ConfigError(
+            "domain and key_authorization are required".into(),
+        ));
+    }
+    mgr.set_tls_alpn_challenge(req.domain, req.key_authorization)?;
+    Ok(StatusCode::CREATED)
+}
+
+pub async fn clear_tls_alpn_challenge(
+    State(state): State<AdminState>,
+    Path(domain): Path<String>,
+) -> Result<StatusCode, GatewayError> {
+    let mgr = require_acme(&state)?;
+    mgr.clear_tls_alpn_challenge(&domain);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn acme_status(State(state): State<AdminState>) -> Json<AcmeStatus> {
+    match state.acme.as_ref() {
+        None => Json(AcmeStatus {
+            enabled: false,
+            has_cert: false,
+            http01_challenges: 0,
+            tls_alpn01_challenges: 0,
+        }),
+        Some(mgr) => Json(AcmeStatus {
+            enabled: true,
+            has_cert: mgr.has_cert().await,
+            http01_challenges: mgr.http01_challenge_count(),
+            tls_alpn01_challenges: mgr.tls_alpn_challenge_count(),
+        }),
+    }
 }

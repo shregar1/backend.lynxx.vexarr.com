@@ -52,10 +52,19 @@ pub struct GatewaySettings {
 
     /// ACME / automatic certificate provisioning. When enabled, the
     /// gateway manages its own TLS certificates — loading from disk,
-    /// generating self-signed certs for dev, serving HTTP-01 challenges,
-    /// and hot-reloading on renewal. See [`AcmeConfig`].
+    /// generating self-signed certs for dev, serving HTTP-01 +
+    /// TLS-ALPN-01 challenges, and hot-reloading on renewal. See
+    /// [`AcmeConfig`].
     #[serde(default)]
     pub acme: AcmeConfig,
+
+    /// External service-discovery providers (Docker today, Kubernetes
+    /// next). Each provider is a no-op until its `enabled` flag is
+    /// flipped. The Docker provider watches the Docker socket and
+    /// registers services + routes from container labels; see
+    /// `crate::discovery::docker`.
+    #[serde(default)]
+    pub providers: ProvidersConfig,
 
     /// Background connection pre-warmer interval in seconds. `0` disables
     /// pre-warming. Pre-warm respects circuit-breaker state — services
@@ -140,6 +149,12 @@ pub struct AcmeConfig {
     /// behind Docker port mapping (e.g. host 443 → container 8443).
     #[serde(default = "default_acme_external_port")]
     pub external_https_port: u16,
+
+    /// ACME challenge type: `"http-01"`, `"tls-alpn-01"`, or `"auto"`.
+    /// `auto` tries TLS-ALPN-01 first and falls back to HTTP-01.
+    /// Defaults to `"auto"`.
+    #[serde(default = "default_acme_challenge_type")]
+    pub challenge_type: String,
 }
 
 impl Default for AcmeConfig {
@@ -153,6 +168,7 @@ impl Default for AcmeConfig {
             self_signed: false,
             http_port: default_acme_http_port(),
             external_https_port: default_acme_external_port(),
+            challenge_type: default_acme_challenge_type(),
         }
     }
 }
@@ -167,6 +183,19 @@ fn default_acme_external_port() -> u16 {
 
 fn default_acme_directory_url() -> String {
     "https://acme-v02.api.letsencrypt.org/directory".to_string()
+}
+
+fn default_acme_challenge_type() -> String {
+    "auto".to_string()
+}
+
+/// External service-discovery providers. Today only `docker` is
+/// implemented; future providers (Kubernetes, Consul, Nomad) plug in
+/// here with their own config blocks.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ProvidersConfig {
+    #[serde(default)]
+    pub docker: crate::discovery::docker::DockerProviderConfig,
 }
 
 /// Inbound TLS termination knobs. When `enabled = false` (the default)
@@ -272,6 +301,7 @@ fn default_gateway() -> GatewaySettings {
         health_circuit_open_duration_ms: default_hc_open_duration(),
         tls: TlsSettings::default(),
         acme: AcmeConfig::default(),
+        providers: ProvidersConfig::default(),
         prewarm_interval_secs: default_prewarm_interval(),
         prewarm_concurrency: default_prewarm_concurrency(),
         auth_required: false,

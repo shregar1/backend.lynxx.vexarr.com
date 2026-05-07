@@ -13,6 +13,7 @@ mod auth;
 mod cluster;
 mod config;
 mod db;
+mod discovery;
 mod error;
 mod health;
 mod license;
@@ -432,6 +433,37 @@ async fn async_main() -> anyhow::Result<()> {
     );
     reload::install_sighup_handler(reload_handle.clone());
 
+    // ---------- Docker provider ----------
+    // Optional. When enabled, watches the Docker socket and registers
+    // services + routes from container labels — same shape as
+    // Traefik's Docker provider. Failure here logs and continues —
+    // gateway should still serve config-defined routes even if the
+    // Docker socket isn't reachable.
+    if config.gateway.providers.docker.enabled {
+        let docker_cfg = config.gateway.providers.docker.clone();
+        let docker_repo = repo.clone();
+        let docker_bus = bus.clone();
+        match crate::discovery::docker::DockerProvider::connect(
+            docker_cfg,
+            docker_repo,
+            docker_bus,
+            node_id,
+        )
+        .await
+        {
+            Ok(provider) => {
+                tracing::info!("docker provider connected; watching Docker socket");
+                provider.spawn();
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "docker provider connect failed; continuing without docker discovery"
+                );
+            }
+        }
+    }
+
     // Recording store + replay HTTP client. Both are owned by AdminState
     // for the recording API; the request-recorder plugin builds its own
     // store independently from its plugin config so the two don't share
@@ -469,6 +501,7 @@ async fn async_main() -> anyhow::Result<()> {
         admin_http_client,
         config.gateway.proxy_port,
         quota.clone(),
+        acme_manager.clone(),
     );
 
     let proxy_addr = format!("0.0.0.0:{}", config.gateway.proxy_port);

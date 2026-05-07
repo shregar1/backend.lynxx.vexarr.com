@@ -26,7 +26,7 @@ tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "5"
 jsonwebtoken = "9"
@@ -118,8 +118,22 @@ hex = "0.4"
 # Self-signed certificate generation for the ACME/cert-manager module.
 # Used when `[gateway.acme].self_signed = true` to create a dev/test cert
 # on startup when no real cert exists on disk. Also generates the CSR for
-# future full-ACME flows.
+# future full-ACME flows and TLS-ALPN-01 challenge certs.
 rcgen = { version = "0.13", features = ["pem"] }
+
+# Async pure-Rust ACME client. Used by the built-in ACME module to
+# register accounts, create orders, and finalize certificates with
+# Let's Encrypt (or any RFC 8555 CA). Handles nonces, JWS signing,
+# and the order state machine so we only implement challenge logic.
+instant-acme = "0.7"
+
+# Docker Engine API client. Powers the optional Docker provider: when
+# `[gateway.providers.docker].enabled = true` the gateway watches the
+# Docker socket for container start/stop events and registers services
+# + routes from container labels — same shape as Traefik's Docker
+# provider. Default features pull in unix-socket + http transport;
+# anything beyond that (TLS, swarm, etc.) is opt-in per call site.
+bollard = "0.17"
 
 [lib]
 name = "lynxx_gateway"

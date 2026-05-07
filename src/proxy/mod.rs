@@ -6,4 +6,5 @@ pub mod loadbalancer;
 pub mod prewarm;
 pub mod router;
 pub mod tls;
+pub mod tls_alpn;
 pub mod websocket;

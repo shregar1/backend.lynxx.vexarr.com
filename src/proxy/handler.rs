@@ -107,11 +107,15 @@ pub async fn proxy_handler(
     let start = Instant::now();
     let path = req.uri().path().to_string();
     let method = req.method().as_str().to_string();
+    // HTTP/1.1 sends the hostname in the `Host` header; HTTP/2 uses the
+    // `:authority` pseudo-header which hyper maps into `req.uri().host()`.
+    // Check both so route matching works regardless of protocol version.
     let host = req
         .headers()
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
-        .map(|h| h.split(':').next().unwrap_or(h).to_string());
+        .map(|h| h.split(':').next().unwrap_or(h).to_string())
+        .or_else(|| req.uri().host().map(|h| h.to_string()));
 
     let (route, service) = match state
         .route_table

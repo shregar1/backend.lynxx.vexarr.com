@@ -18,6 +18,7 @@ pub mod billing;
 pub mod cluster;
 pub mod config;
 pub mod db;
+pub mod discovery;
 pub mod error;
 pub mod health;
 pub mod license;

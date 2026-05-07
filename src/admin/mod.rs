@@ -40,6 +40,7 @@ pub fn admin_router(
     http_client: reqwest::Client,
     proxy_port: u16,
     quota: Arc<QuotaTracker>,
+    acme: Option<Arc<crate::proxy::acme::AcmeManager>>,
 ) -> Router {
     let audit = AuditLog::new(repo.clone());
     let state = AdminState {
@@ -60,6 +61,7 @@ pub fn admin_router(
         http_client,
         proxy_port,
         quota,
+        acme,
     };
 
     // Routes that mutate live state require Operator or higher; token
@@ -120,6 +122,27 @@ pub fn admin_router(
             get(routes::get_recording).delete(routes::delete_recording_handler),
         )
         .route("/recordings/:id/replay", post(routes::replay_recording))
+        // ACME challenge endpoints — let an external orchestrator
+        // (lego, certbot --manual, custom client) push HTTP-01 and
+        // TLS-ALPN-01 challenges into the running gateway without
+        // restarting it.
+        .route(
+            "/acme/http-01-challenges",
+            post(routes::set_http01_challenge),
+        )
+        .route(
+            "/acme/http-01-challenges/:token",
+            axum::routing::delete(routes::clear_http01_challenge),
+        )
+        .route(
+            "/acme/tls-alpn-01-challenges",
+            post(routes::set_tls_alpn_challenge),
+        )
+        .route(
+            "/acme/tls-alpn-01-challenges/:domain",
+            axum::routing::delete(routes::clear_tls_alpn_challenge),
+        )
+        .route("/acme/status", get(routes::acme_status))
         .route_layer(middleware::from_fn(operator));
 
     // ---- token management (admin) ----
