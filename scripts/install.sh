@@ -155,7 +155,7 @@ for bin in "${BINARIES[@]}"; do
 done
 echo
 title "Next steps:"
-info "1. Get an API key at https://lynxx.dev/account/api-keys"
+info "1. Get an API key at https://lynxx.vexarr.com/account/api-keys"
 info "2. Export it:    export LYNXX_API_KEY=lnx_live_..."
 info "3. Start:        ${C_BOLD}lynxx start${C_RESET}"
 echo

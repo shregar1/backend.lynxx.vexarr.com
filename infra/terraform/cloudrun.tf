@@ -1,6 +1,7 @@
 # ---------------------------------------------------------------------------
-# Cloud Run — website (lynxx.dev) and dashboard (app.lynxx.dev).
-# Both are static SPAs served by nginx inside the container.
+# Cloud Run — website (lynxx.vexarr.com) and dashboard
+# (app.lynxx.vexarr.com). Both are static SPAs served by nginx inside
+# the container.
 #
 # Initial image is a placeholder — the CI/CD pipeline (deploy-gcp.yml)
 # deploys the real images on every push to main.
@@ -98,7 +99,7 @@ resource "google_cloud_run_v2_service" "dashboard" {
 }
 
 # ---------------------------------------------------------------------------
-# Billing / licence service (api.lynxx.dev). Hosts:
+# Billing / licence service (api.lynxx.vexarr.com). Hosts:
 #   /v1/auth/*, /v1/account/*, /v1/license/verify, /v1/billing/*, /v1/stripe/webhook
 # Connects to the shared Cloud SQL instance (`vexarr-com`) via Cloud Run's
 # built-in Auth Proxy: a Unix socket at /cloudsql/<connection-name>/.s.PGSQL.5432.
@@ -149,21 +150,41 @@ resource "google_cloud_run_v2_service" "billing" {
         mount_path = "/cloudsql"
       }
 
-      # The binary builds DATABASE_URL from these DB_* vars when
-      # DATABASE_URL itself is unset. DB_HOST is the Auth Proxy Unix
-      # socket dir mounted via `volume_mounts.cloudsql`; sqlx connects
-      # via that socket so no TCP/private-IP/VPC plumbing is needed.
+      # All non-trivial config lives in Secret Manager — that gives us
+      # one place to look up production values, audit changes, and
+      # rotate without redeploying. The only literal here is the bind
+      # address, which is internal to the container.
       env {
-        name  = "DB_HOST"
-        value = "/cloudsql/${data.google_sql_database_instance.shared.connection_name}"
+        name  = "LYNXX_BILLING_BIND"
+        value = "0.0.0.0:9100"
+      }
+      # ----- Database --------------------------------------------------------
+      env {
+        name = "DB_HOST"
+        value_source {
+          secret_key_ref {
+            secret  = "LYNXX_DB_HOST"
+            version = "latest"
+          }
+        }
       }
       env {
-        name  = "DB_USER"
-        value = "lynxx"
+        name = "DB_USER"
+        value_source {
+          secret_key_ref {
+            secret  = "LYNXX_DB_USER"
+            version = "latest"
+          }
+        }
       }
       env {
-        name  = "DB_NAME"
-        value = "lynxx"
+        name = "DB_NAME"
+        value_source {
+          secret_key_ref {
+            secret  = "LYNXX_DB_NAME"
+            version = "latest"
+          }
+        }
       }
       env {
         name = "DB_PASSWORD"
@@ -174,26 +195,44 @@ resource "google_cloud_run_v2_service" "billing" {
           }
         }
       }
+      # ----- Public website + Stripe redirect targets ------------------------
       env {
-        name  = "LYNXX_BILLING_BIND"
-        value = "0.0.0.0:9100"
+        name = "WEBSITE_ORIGIN"
+        value_source {
+          secret_key_ref {
+            secret  = "LYNXX_WEBSITE_ORIGIN"
+            version = "latest"
+          }
+        }
       }
       env {
-        name  = "WEBSITE_ORIGIN"
-        value = "https://${var.website_domain}"
+        name = "STRIPE_SUCCESS_URL"
+        value_source {
+          secret_key_ref {
+            secret  = "LYNXX_STRIPE_SUCCESS_URL"
+            version = "latest"
+          }
+        }
       }
       env {
-        name  = "STRIPE_SUCCESS_URL"
-        value = "https://${var.website_domain}/account/api-keys"
+        name = "STRIPE_CANCEL_URL"
+        value_source {
+          secret_key_ref {
+            secret  = "LYNXX_STRIPE_CANCEL_URL"
+            version = "latest"
+          }
+        }
       }
       env {
-        name  = "STRIPE_CANCEL_URL"
-        value = "https://${var.website_domain}/pricing"
+        name = "STRIPE_PORTAL_RETURN_URL"
+        value_source {
+          secret_key_ref {
+            secret  = "LYNXX_STRIPE_PORTAL_RETURN_URL"
+            version = "latest"
+          }
+        }
       }
-      env {
-        name  = "STRIPE_PORTAL_RETURN_URL"
-        value = "https://${var.website_domain}/account/billing"
-      }
+      # ----- App secrets -----------------------------------------------------
       env {
         name = "LYNXX_SESSION_SECRET"
         value_source {
@@ -213,6 +252,16 @@ resource "google_cloud_run_v2_service" "billing" {
         }
       }
       env {
+        name = "LYNXX_ALLOWED_ORIGINS"
+        value_source {
+          secret_key_ref {
+            secret  = "LYNXX_ALLOWED_ORIGINS"
+            version = "latest"
+          }
+        }
+      }
+      # ----- Stripe ----------------------------------------------------------
+      env {
         name = "STRIPE_SECRET_KEY"
         value_source {
           secret_key_ref {
@@ -231,20 +280,41 @@ resource "google_cloud_run_v2_service" "billing" {
         }
       }
       env {
-        name  = "STRIPE_PRICE_PRO"
-        value = var.stripe_price_pro
+        name = "STRIPE_PRICE_PRO"
+        value_source {
+          secret_key_ref {
+            secret  = "LYNXX_STRIPE_PRICE_PRO"
+            version = "latest"
+          }
+        }
       }
       env {
-        name  = "STRIPE_PRICE_BUSINESS"
-        value = var.stripe_price_business
+        name = "STRIPE_PRICE_BUSINESS"
+        value_source {
+          secret_key_ref {
+            secret  = "LYNXX_STRIPE_PRICE_BUSINESS"
+            version = "latest"
+          }
+        }
+      }
+      # ----- Binaries bucket -------------------------------------------------
+      env {
+        name = "BINARIES_BUCKET"
+        value_source {
+          secret_key_ref {
+            secret  = "LYNXX_BINARIES_BUCKET"
+            version = "latest"
+          }
+        }
       }
       env {
-        name  = "BINARIES_BUCKET"
-        value = data.google_storage_bucket.vexarr_com.name
-      }
-      env {
-        name  = "BINARIES_PREFIX"
-        value = "lynxx/binaries"
+        name = "BINARIES_PREFIX"
+        value_source {
+          secret_key_ref {
+            secret  = "LYNXX_BINARIES_PREFIX"
+            version = "latest"
+          }
+        }
       }
       # OAuth Client ID for Sign-in with Google. Treated as a secret
       # only for central management — the value is public and the
@@ -327,4 +397,49 @@ resource "google_cloud_run_domain_mapping" "billing" {
   }
 
   depends_on = [google_cloud_run_v2_service.billing]
+}
+
+# ---------------------------------------------------------------------------
+# Custom domain — lynxx.vexarr.com → lynxx-website
+# Requires `lynxx.vexarr.com` (or `vexarr.com`) to be verified in
+# Google Search Console under the same Google account that owns this
+# project. The output `website_domain_dns` lists the DNS records to
+# add at the authoritative DNS provider.
+# ---------------------------------------------------------------------------
+
+resource "google_cloud_run_domain_mapping" "website" {
+  name     = var.website_domain
+  location = var.region
+
+  metadata {
+    namespace = var.project_id
+  }
+
+  spec {
+    route_name = google_cloud_run_v2_service.website.name
+  }
+
+  depends_on = [google_cloud_run_v2_service.website]
+}
+
+# ---------------------------------------------------------------------------
+# Custom domain — app.lynxx.vexarr.com → lynxx-dashboard
+# Same prerequisites as the website domain. The dashboard is currently
+# a placeholder image; the mapping reserves the hostname for once the
+# real customer dashboard ships.
+# ---------------------------------------------------------------------------
+
+resource "google_cloud_run_domain_mapping" "dashboard" {
+  name     = var.dashboard_domain
+  location = var.region
+
+  metadata {
+    namespace = var.project_id
+  }
+
+  spec {
+    route_name = google_cloud_run_v2_service.dashboard.name
+  }
+
+  depends_on = [google_cloud_run_v2_service.dashboard]
 }

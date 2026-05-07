@@ -1,6 +1,6 @@
 //! Lynxx billing service binary — runs the licence/auth/Stripe API.
-//! Hosted on api.lynxx.dev (Cloud Run) in production. Reads its
-//! configuration from environment variables.
+//! Hosted on api.lynxx.vexarr.com (Cloud Run) in production. Reads
+//! its configuration from environment variables.
 
 use anyhow::{anyhow, Context, Result};
 use axum::http::HeaderValue;
@@ -76,13 +76,14 @@ async fn main() -> Result<()> {
         price_pro: env::var("STRIPE_PRICE_PRO").unwrap_or_default(),
         price_business: env::var("STRIPE_PRICE_BUSINESS").unwrap_or_default(),
         success_url: env::var("STRIPE_SUCCESS_URL")
-            .unwrap_or_else(|_| "https://lynxx.dev/account/api-keys".into()),
+            .unwrap_or_else(|_| "https://lynxx.vexarr.com/account/api-keys".into()),
         cancel_url: env::var("STRIPE_CANCEL_URL")
-            .unwrap_or_else(|_| "https://lynxx.dev/pricing".into()),
+            .unwrap_or_else(|_| "https://lynxx.vexarr.com/pricing".into()),
         portal_return_url: env::var("STRIPE_PORTAL_RETURN_URL")
-            .unwrap_or_else(|_| "https://lynxx.dev/account/billing".into()),
+            .unwrap_or_else(|_| "https://lynxx.vexarr.com/account/billing".into()),
     };
-    let website_origin = env::var("WEBSITE_ORIGIN").unwrap_or_else(|_| "https://lynxx.dev".into());
+    let website_origin =
+        env::var("WEBSITE_ORIGIN").unwrap_or_else(|_| "https://lynxx.vexarr.com".into());
 
     if !stripe.enabled() {
         tracing::warn!(
@@ -145,11 +146,19 @@ async fn main() -> Result<()> {
         })
         .unwrap_or_else(|| {
             vec![
+                // Canonical website origin.
+                "https://lynxx.vexarr.com".into(),
+                "https://www.lynxx.vexarr.com".into(),
+                "https://app.lynxx.vexarr.com".into(),
+                // Legacy lynxx.dev — kept while DNS / Stripe redirects
+                // still point there so existing tabs don't break.
                 "https://lynxx.dev".into(),
                 "https://www.lynxx.dev".into(),
                 "https://app.lynxx.dev".into(),
+                // Cloud Run direct URLs (used when no custom domain).
                 "https://lynxx-website-588755157227.us-central1.run.app".into(),
                 "https://lynxx-website-7jnb4axmhq-uc.a.run.app".into(),
+                // Local dev.
                 "http://localhost:5173".into(),
                 "http://127.0.0.1:5173".into(),
                 "http://localhost:4173".into(),

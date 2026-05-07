@@ -43,6 +43,16 @@ output "billing_domain_dns" {
   value       = google_cloud_run_domain_mapping.billing.status[0].resource_records
 }
 
+output "website_domain_dns" {
+  description = "DNS records to add at the authoritative DNS provider for the website custom domain (lynxx.vexarr.com)."
+  value       = google_cloud_run_domain_mapping.website.status[0].resource_records
+}
+
+output "dashboard_domain_dns" {
+  description = "DNS records to add at the authoritative DNS provider for the dashboard custom domain (app.lynxx.vexarr.com)."
+  value       = google_cloud_run_domain_mapping.dashboard.status[0].resource_records
+}
+
 output "wif_provider" {
   description = "Workload Identity Federation provider resource name — set as GitHub variable WIF_PROVIDER."
   value       = google_iam_workload_identity_pool_provider.github.name

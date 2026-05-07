@@ -38,12 +38,12 @@ variable "domain" {
 }
 
 variable "website_domain" {
-  description = "Marketing website domain (e.g. lynxx.dev)."
+  description = "Marketing website domain (e.g. lynxx.vexarr.com)."
   type        = string
 }
 
 variable "dashboard_domain" {
-  description = "Dashboard domain (e.g. app.lynxx.dev)."
+  description = "Dashboard domain (e.g. app.lynxx.vexarr.com)."
   type        = string
 }
 

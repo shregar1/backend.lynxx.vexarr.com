@@ -85,15 +85,28 @@ echo "Registry   : $REGISTRY"
 
 ## Step 5 — DNS records
 
-Point these DNS records at the gateway IP and Cloud Run URLs:
+Cloud Run domain mappings for `api.`, `lynxx.vexarr.com`, and
+`app.lynxx.vexarr.com` populate the records that need to be added at
+the authoritative DNS provider for `lynxx.vexarr.com`. Pull them via:
+
+```bash
+terraform output -json billing_domain_dns
+terraform output -json website_domain_dns
+terraform output -json dashboard_domain_dns
+```
+
+Each entry is `{ name, type, rrdata }` — add the matching record set
+(typically a CNAME pointing at `ghs.googlehosted.com.` for subdomains).
+The gateway LB stays on its own A record:
 
 | Record | Type | Value |
 |--------|------|-------|
-| `api.lynxx.dev` | A | `$GATEWAY_IP` |
-| `lynxx.dev` | CNAME | Cloud Run URL from `terraform output website_url` |
-| `app.lynxx.dev` | CNAME | Cloud Run URL from `terraform output dashboard_url` |
+| `api.lynxx.vexarr.com` | A/AAAA | from `billing_domain_dns` |
+| `lynxx.vexarr.com` | A/AAAA | from `website_domain_dns` |
+| `app.lynxx.vexarr.com` | A/AAAA | from `dashboard_domain_dns` |
 
-TLS certificates are Google-managed and provision automatically once DNS resolves (up to 24 h for first issuance).
+TLS certificates are Google-managed and provision automatically once
+DNS resolves (up to 24 h for first issuance).
 
 ---
 

@@ -17,7 +17,7 @@ Google account can sign in:
 - App name: `Lynxx`
 - User support email: `support@lynxx.dev`
 - Developer contact: your email
-- Authorized domains: `lynxx.dev`, `lynxx.vexarr.com`
+- Authorized domains: `lynxx.vexarr.com`, `vexarr.com`
 - Scopes: leave at the defaults (`openid`, `email`, `profile`)
 
 ## 2. Create the OAuth Client ID
@@ -27,13 +27,13 @@ Google account can sign in:
 - Application type: **Web application**
 - Name: `Lynxx Web`
 - Authorized JavaScript origins:
-  - `https://lynxx.dev`
-  - `https://www.lynxx.dev`
+  - `https://lynxx.vexarr.com`
+  - `https://www.lynxx.vexarr.com`
   - `https://lynxx-website-588755157227.us-central1.run.app`
   - `https://lynxx-website-7jnb4axmhq-uc.a.run.app`
   - `http://localhost:5173` (dev)
 - Authorized redirect URIs:
-  - `https://lynxx.dev`
+  - `https://lynxx.vexarr.com`
   - `https://lynxx-website-588755157227.us-central1.run.app`
   - `http://localhost:5173`
 - Click **Create** and copy the Client ID (looks like

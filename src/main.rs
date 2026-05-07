@@ -161,7 +161,7 @@ async fn async_main() -> anyhow::Result<()> {
             eprintln!("licence verification failed: {err}");
             eprintln!("This Lynxx binary requires an active subscription.");
             eprintln!("Set LYNXX_API_KEY=<key> or [license].api_key in config.toml.");
-            eprintln!("Get a key at https://lynxx.dev/account/api-keys");
+            eprintln!("Get a key at https://lynxx.vexarr.com/account/api-keys");
             return Err(anyhow::anyhow!("licence required: {err}"));
         }
     };

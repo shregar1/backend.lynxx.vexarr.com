@@ -108,7 +108,7 @@ pub fn router(state: AppState) -> Router {
 
 /// Build the `Set-Cookie` header value for an active session. Scoped
 /// to `/`, `HttpOnly`, `Secure`, and `SameSite=None` so the website on
-/// `lynxx.dev` can use it across the cross-origin boundary to
+/// `lynxx.vexarr.com` can use it across the cross-origin boundary to
 /// `api.lynxx.vexarr.com`.
 fn session_cookie(token: &str) -> String {
     format!(
