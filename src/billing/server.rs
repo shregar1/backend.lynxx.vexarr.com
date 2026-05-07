@@ -436,6 +436,12 @@ async fn signup(
     State(state): State<AppState>,
     Json(req): Json<SignupReq>,
 ) -> Result<Response, ApiError> {
+    if !state.public_signup_enabled {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Lynxx is in private beta — public signup is closed. Email hi@lynxx.dev to request access.".into(),
+        ));
+    }
     let email = req.email.trim().to_lowercase();
     if !email.contains('@') {
         return Err(bad("invalid email"));
@@ -694,6 +700,13 @@ async fn google_signin(
                 )
             }
             None => {
+                if !state.public_signup_enabled {
+                    warn!(email=%email, "google signin rejected — public signup closed");
+                    return Err(ApiError(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Lynxx is in private beta — new accounts are invite-only. Email hi@lynxx.dev to request access.".into(),
+                    ));
+                }
                 let urn = Uuid::new_v4();
                 let pw_hash = hash_password(&random_password())?;
                 let new_customer = NewCustomer {

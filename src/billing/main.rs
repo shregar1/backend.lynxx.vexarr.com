@@ -4,7 +4,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use axum::http::HeaderValue;
-use lynx_gateway::billing::{
+use lynxx_gateway::billing::{
     google_oauth::GoogleVerifier,
     repo::{BillingRepo, SqlBillingRepo},
     server,
@@ -21,14 +21,14 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    // The handler code lives in the `lynx_gateway` library crate, not in
+    // The handler code lives in the `lynxx_gateway` library crate, not in
     // the `lynxx_billing` binary, so include both targets in the default
-    // filter. Without `lynx_gateway=info` we'd silently drop every
+    // filter. Without `lynxx_gateway=info` we'd silently drop every
     // `tracing::info/warn/error!` from the request handlers.
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                EnvFilter::new("lynxx_billing=info,lynx_gateway=info,tower_http=info")
+                EnvFilter::new("lynxx_billing=info,lynxx_gateway=info,tower_http=info")
             }),
         )
         .init();
@@ -193,6 +193,23 @@ async fn main() -> Result<()> {
         tracing::warn!("GOOGLE_OAUTH_CLIENT_ID unset — /v1/auth/google disabled");
     }
 
+    // Public-signup gate. Defaults to true so existing deployments
+    // don't change behaviour after an upgrade. In private beta we set
+    // LYNXX_PUBLIC_SIGNUP_ENABLED=false on Cloud Run; /v1/auth/signup
+    // and the new-customer branch of /v1/auth/google then return 503.
+    let public_signup_enabled = env::var("LYNXX_PUBLIC_SIGNUP_ENABLED")
+        .ok()
+        .map(|s| {
+            let v = s.trim().to_ascii_lowercase();
+            !matches!(v.as_str(), "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(true);
+    if public_signup_enabled {
+        tracing::info!("public signup enabled");
+    } else {
+        tracing::warn!("public signup disabled — /v1/auth/signup + new google signups return 503");
+    }
+
     let state = AppState {
         repo,
         session_secret,
@@ -202,6 +219,7 @@ async fn main() -> Result<()> {
         allowed_origins,
         gcs,
         google,
+        public_signup_enabled,
     };
 
     let app = server::router(state);

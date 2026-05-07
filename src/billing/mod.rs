@@ -49,4 +49,12 @@ pub struct AppState {
     /// is unset; in that case `/v1/auth/google` returns 503 and the
     /// frontend's Google button hides itself.
     pub google: Option<google_oauth::GoogleVerifier>,
+    /// When false, /v1/auth/signup and /v1/auth/google reject new
+    /// account creation with 503. Existing customers keep working
+    /// through /v1/auth/signin and the cookie flow. The /v1/admin/*
+    /// internal-customer endpoint stays open (it's already gated by
+    /// LYNXX_ADMIN_API_KEY). Set via the LYNXX_PUBLIC_SIGNUP_ENABLED
+    /// env var; defaults to true so older deployments don't change
+    /// behaviour after an upgrade.
+    pub public_signup_enabled: bool,
 }
