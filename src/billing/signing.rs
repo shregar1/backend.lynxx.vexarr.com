@@ -63,8 +63,11 @@ struct SignBlobResponse {
 
 impl GcsSigner {
     pub fn new(bucket: impl Into<String>, prefix: impl Into<String>) -> Self {
-        let mut prefix = prefix.into();
-        // Trim trailing slash so we always join with a single '/' below.
+        // Whitespace-only prefixes ("" isn't allowed in Secret Manager,
+        // so a deployment that wants bucket-root sets the secret to a
+        // single space) collapse to bucket-root. Trailing slashes are
+        // trimmed so we always join with exactly one '/' below.
+        let mut prefix: String = prefix.into().trim().to_string();
         while prefix.ends_with('/') {
             prefix.pop();
         }

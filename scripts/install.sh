@@ -4,22 +4,26 @@
 #   curl -fsSL https://get.lynxx.vexarr.com | sh
 #
 # 1. Detects OS + architecture.
-# 2. Streams each binary through the licence/billing service, which
-#    pulls it from the private GCS bucket and pipes the bytes back
-#    over the api.lynxx.vexarr.com domain — customers never talk to
-#    storage.googleapis.com directly.
-# 3. Installs into /usr/local/bin (with sudo if needed) or ~/.local/bin
-#    (fallback). After install, set your API key and run `lynxx start`.
+# 2. Streams each binary through api.lynxx.vexarr.com (which reads
+#    them from the private release bucket as the gateway service
+#    account). Customers never talk to a storage hostname directly.
+# 3. Installs into /usr/local/bin if writable / sudo runs without a
+#    prompt, otherwise ~/.local/bin. After install, set your API key
+#    (LYNXX_API_KEY) and run `lynxx start` — the binary refuses to
+#    run without a valid key tied to an active subscription.
 
 set -euo pipefail
 
-# Where the API lives. Override with LYNXX_API_BASE for staging / self-host.
+# Where the API lives. Both the binary download (/v1/install/binary)
+# and the licence verifier (/v1/license/verify) live here. Override
+# with LYNXX_API_BASE for staging / self-host.
 API_BASE="${LYNXX_API_BASE:-https://api.lynxx.vexarr.com}"
 INSTALL_DIR="${LYNXX_INSTALL_DIR:-}"
-BINARIES=("lynxx" "lynx-gateway")
+BINARIES=("lynxx" "lynxx-gateway")
 
-# Older releases used LYNXX_RELEASE_BASE_URL — accept it as an explicit
-# direct-download override, bypassing the API.
+# Air-gapped / mirror install: set LYNXX_RELEASE_BASE_URL to a static
+# host (e.g. an internal CDN) holding the same os/arch/binary layout
+# and the script will pull from there instead of the API.
 RELEASE_BASE_URL="${LYNXX_RELEASE_BASE_URL:-}"
 
 # ---- coloured output (only on TTY) -----------------------------------------
@@ -60,6 +64,14 @@ OS=$(detect_os)
 ARCH=$(detect_arch)
 
 # ---- pick install dir ------------------------------------------------------
+# Prefer /usr/local/bin when we can write to it directly, OR when we
+# can sudo without prompting (passwordless / cached creds). When piped
+# from `curl ... | sh` there's no tty, so a sudo password prompt would
+# wedge — fall back to ~/.local/bin in that case.
+sudo_noninteractive_ok() {
+  command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1
+}
+
 choose_install_dir() {
   if [ -n "${INSTALL_DIR}" ]; then
     echo "${INSTALL_DIR}"
@@ -67,8 +79,8 @@ choose_install_dir() {
   fi
   if [ -w "/usr/local/bin" ]; then
     echo "/usr/local/bin"
-  elif command -v sudo >/dev/null 2>&1 && [ -d "/usr/local/bin" ]; then
-    echo "/usr/local/bin"  # will sudo-install
+  elif [ -d "/usr/local/bin" ] && sudo_noninteractive_ok; then
+    echo "/usr/local/bin"  # will sudo-install non-interactively
   else
     mkdir -p "$HOME/.local/bin"
     echo "$HOME/.local/bin"
@@ -78,10 +90,11 @@ choose_install_dir() {
 DEST_DIR=$(choose_install_dir)
 USE_SUDO=""
 if [ "${DEST_DIR}" = "/usr/local/bin" ] && [ ! -w "/usr/local/bin" ]; then
-  if ! command -v sudo >/dev/null 2>&1; then
-    err "no write access to /usr/local/bin and sudo is unavailable. Set LYNXX_INSTALL_DIR to override."
+  if sudo_noninteractive_ok; then
+    USE_SUDO="sudo -n"
+  else
+    err "no write access to /usr/local/bin and sudo isn't available without a prompt. Set LYNXX_INSTALL_DIR to override."
   fi
-  USE_SUDO="sudo"
 fi
 
 # ---- already installed? ----------------------------------------------------
@@ -93,7 +106,7 @@ for bin in "${BINARIES[@]}"; do
   fi
 done
 if [ "${all_installed}" -eq 1 ] && [ -z "${LYNXX_FORCE:-}" ]; then
-  warn "lynxx and lynx-gateway already installed. Set LYNXX_FORCE=1 to reinstall."
+  warn "lynxx and lynxx-gateway already installed. Set LYNXX_FORCE=1 to reinstall."
   echo
   for bin in "${BINARIES[@]}"; do
     info "$(command -v "${bin}")"
@@ -102,8 +115,11 @@ if [ "${all_installed}" -eq 1 ] && [ -z "${LYNXX_FORCE:-}" ]; then
 fi
 
 # ---- pick a download URL ---------------------------------------------------
-# Default: stream through the billing service so every byte flows over
-# the api domain. LYNXX_RELEASE_BASE_URL overrides for self-host / mirror.
+# Default: stream through the API so every byte flows over the api
+# domain (single hostname, no third-party storage host visible to the
+# customer). LYNXX_RELEASE_BASE_URL overrides for self-host / mirror.
+# License server still gates runtime — a downloaded binary won't
+# actually run without a valid LYNXX_API_KEY tied to an active sub.
 download_url() {
   local bin="$1"
   if [ -n "${RELEASE_BASE_URL}" ]; then

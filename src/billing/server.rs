@@ -26,7 +26,7 @@ use rand::RngCore;
 /// Cookie name used for the browser session. The CLI / curl flow uses
 /// `Authorization: Bearer <token>` — both paths resolve to the same
 /// session token under the hood.
-const SESSION_COOKIE: &str = "lynx_session";
+const SESSION_COOKIE: &str = "lynxx_session";
 
 /// Custom CSRF header. Browser fetches from the website include it so
 /// the request triggers a CORS preflight, which our allowlist gates.
@@ -161,15 +161,20 @@ async fn install_script() -> Response {
 }
 
 // ---------------------------------------------------------------------------
-// Install: binary downloads streamed through the billing service
+// Install: binary download — mint a short-lived signed URL + 302 redirect
 // ---------------------------------------------------------------------------
 
 /// Allowlist of (binary, os, arch) triples we serve. Anything outside
 /// this list returns 404 — prevents the endpoint from being abused as
-/// a generic GCS reader for arbitrary objects in the bucket.
-const ALLOWED_BINARIES: &[&str] = &["lynxx", "lynx-gateway"];
+/// a generic signed-URL minter for arbitrary objects in the bucket.
+const ALLOWED_BINARIES: &[&str] = &["lynxx", "lynxx-gateway"];
 const ALLOWED_OS: &[&str] = &["linux", "darwin"];
 const ALLOWED_ARCH: &[&str] = &["amd64", "arm64"];
+
+/// Lifetime of the signed URL we hand the client. Five minutes is more
+/// than enough for any reasonable download; even the 50 MB lynxx-gateway
+/// finishes in well under a minute on a residential connection.
+const SIGNED_URL_TTL_SECS: i64 = 5 * 60;
 
 #[derive(Deserialize)]
 struct InstallBinaryQuery {
@@ -178,11 +183,16 @@ struct InstallBinaryQuery {
     arch: String,
 }
 
-/// Streams the requested binary directly from GCS through this service
-/// to the client. The customer never talks to `storage.googleapis.com`
-/// directly — every byte flows through `api.lynxx.vexarr.com`, which
-/// keeps the install path on a single hostname and gives us a future
-/// chokepoint for licence-key auth, rate limits, or download metering.
+/// Public endpoint. The bucket itself is private; this handler asks
+/// GCS to mint a V4 signed URL for the requested object and 302-
+/// redirects the caller to it. Bytes then flow direct from GCS to
+/// the client — no Cloud Run egress, no instance held busy for the
+/// duration of the download, but customers still see only
+/// `api.lynxx.vexarr.com` in their install command.
+///
+/// Open by design — install.sh is meant to be `curl | sh`-able by
+/// anyone. The downloaded binary refuses to run without an active
+/// licence key, which is the actual revenue gate.
 async fn install_binary(
     State(state): State<AppState>,
     Query(q): Query<InstallBinaryQuery>,
@@ -196,6 +206,7 @@ async fn install_binary(
     if !ALLOWED_ARCH.contains(&q.arch.as_str()) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "unsupported arch".into()));
     }
+
     let signer = state.gcs.as_ref().ok_or_else(|| {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -206,34 +217,23 @@ async fn install_binary(
         "{os}/{arch}/{name}",
         os = q.os,
         arch = q.arch,
-        name = q.name
+        name = q.name,
     );
-    let upstream = signer.stream_get(&object).await.map_err(|e| {
-        error!(error=%e, object=%object, "gcs stream_get failed");
+    let signed_url = signer.sign_get(&object, SIGNED_URL_TTL_SECS).await.map_err(|e| {
+        error!(error = %e, object = %object, "gcs signed-url mint failed");
         ApiError(
             StatusCode::BAD_GATEWAY,
-            "could not fetch binary from storage".into(),
+            "could not sign download URL".into(),
         )
     })?;
 
-    // Cloud Run caps non-streaming responses at 32 MiB. The 43 MB
-    // lynx-gateway binary trips that cap when Content-Length is set,
-    // because the front-end then treats the response as buffered.
-    // Omitting Content-Length forces chunked transfer-encoding via
-    // axum's stream body, which has no size limit. The trade-off is
-    // that `curl` can't show a percentage progress bar — only bytes
-    // received — which we accept.
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{}\"", q.name).parse().unwrap(),
-    );
+    headers.insert(header::LOCATION, signed_url.parse().map_err(|e| {
+        error!(error = %e, "signed url is not a valid header value");
+        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal".into())
+    })?);
     headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
-
-    let stream = upstream.bytes_stream();
-    let body = axum::body::Body::from_stream(stream);
-    Ok((StatusCode::OK, headers, body).into_response())
+    Ok((StatusCode::FOUND, headers).into_response())
 }
 
 // ---------------------------------------------------------------------------
