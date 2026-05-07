@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Lynxx installer.
 #
-#   curl -fsSL https://api.lynxx.vexarr.com/install.sh | bash
+#   curl -fsSL https://get.lynxx.vexarr.com | sh
 #
 # 1. Detects OS + architecture.
 # 2. Streams each binary through the licence/billing service, which

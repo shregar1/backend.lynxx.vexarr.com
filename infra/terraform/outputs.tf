@@ -43,6 +43,11 @@ output "billing_domain_dns" {
   value       = google_cloud_run_domain_mapping.billing.status[0].resource_records
 }
 
+output "get_domain_dns" {
+  description = "DNS records to add for the installer host (get.<website_domain>) — typically a single CNAME pointing at ghs.googlehosted.com."
+  value       = google_cloud_run_domain_mapping.get.status[0].resource_records
+}
+
 output "website_domain_dns" {
   description = "DNS records to add at the authoritative DNS provider for the website custom domain (lynxx.vexarr.com)."
   value       = google_cloud_run_domain_mapping.website.status[0].resource_records

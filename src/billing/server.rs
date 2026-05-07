@@ -90,6 +90,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/admin/customers/internal", post(admin_create_internal))
         .route("/install.sh", get(install_script))
         .route("/install", get(install_script))
+        // Bare `/` so `curl -fsSL https://get.lynxx.vexarr.com | sh`
+        // works without a path. Same handler as /install.sh — the
+        // domain mapping is what makes this hostname dedicated to
+        // the installer.
+        .route("/", get(install_script))
         // Streams the requested binary back through the api domain;
         // see `install_binary` for the GCS plumbing.
         .route("/v1/install/binary", get(install_binary))

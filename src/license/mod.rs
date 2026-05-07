@@ -40,6 +40,10 @@ use crate::quota::PlanTier;
 const DEFAULT_VERIFY_URL: &str = "https://api.lynxx.vexarr.com/v1/license/verify";
 const VERIFY_TIMEOUT_SECS: u64 = 10;
 const OFFLINE_GRACE_DAYS: i64 = 7;
+/// How often the running gateway re-verifies the licence. The startup
+/// check is hard-fail; this background check switches the kill-switch
+/// off when the server says the key is no longer active.
+const REVERIFY_INTERVAL_SECS: u64 = 6 * 60 * 60; // 6 hours
 
 /// A verified, ready-to-use licence.
 #[derive(Debug, Clone)]
@@ -153,6 +157,107 @@ impl License {
         self.expires_at
             .map(|exp| (exp - Utc::now()).num_days().max(0))
     }
+}
+
+/// Live licence state shared across the gateway. Wraps an
+/// `AtomicBool` kill-switch that the periodic re-verifier flips off
+/// when the licence server reports the key is no longer active —
+/// a customer cancellation kicks in within `REVERIFY_INTERVAL_SECS`
+/// instead of waiting `OFFLINE_GRACE_DAYS` for the cache to expire.
+#[derive(Clone)]
+pub struct LicenseState {
+    inner: std::sync::Arc<LicenseStateInner>,
+}
+
+struct LicenseStateInner {
+    api_key: String,
+    verify_url: String,
+    /// `true` while the licence is good. Flipped to `false` on
+    /// confirmed rejection from the licence server. Network failures
+    /// and parse errors do NOT flip it — the offline cache plus the
+    /// 7-day grace already cover transient outages.
+    active: std::sync::atomic::AtomicBool,
+    /// Latest known tier. Loaded at startup; refreshed on every
+    /// successful re-verify so a tier upgrade / downgrade applies
+    /// without a restart.
+    tier: std::sync::RwLock<PlanTier>,
+}
+
+impl LicenseState {
+    pub fn new(api_key: impl Into<String>, verify_url: impl Into<String>, tier: PlanTier) -> Self {
+        Self {
+            inner: std::sync::Arc::new(LicenseStateInner {
+                api_key: api_key.into(),
+                verify_url: verify_url.into(),
+                active: std::sync::atomic::AtomicBool::new(true),
+                tier: std::sync::RwLock::new(tier),
+            }),
+        }
+    }
+
+    /// Cheap check used in the proxy hot path. Returns `false` after
+    /// the re-verifier sees a rejection.
+    pub fn is_active(&self) -> bool {
+        self.inner.active.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Latest tier from the most recent successful re-verify.
+    pub fn tier(&self) -> PlanTier {
+        *self.inner.tier.read().expect("tier lock poisoned")
+    }
+
+    fn flip_inactive(&self, reason: &str) {
+        self.inner
+            .active
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        tracing::error!(reason, "licence revoked — gateway is in kill-switch mode; all requests will return 402");
+    }
+
+    fn update_tier(&self, new_tier: PlanTier) {
+        let mut t = self.inner.tier.write().expect("tier lock poisoned");
+        if *t != new_tier {
+            tracing::info!(old = %t.as_str(), new = %new_tier.as_str(), "licence tier updated");
+            *t = new_tier;
+        }
+    }
+}
+
+/// Spawn the background re-verifier. Hits the licence server every
+/// `REVERIFY_INTERVAL_SECS` and:
+///   - On success → updates the tier and refreshes the offline cache.
+///   - On rejection → flips the kill-switch off; the proxy starts
+///     returning 402 Payment Required for every request.
+///   - On network failure → logs a warning, leaves the switch alone.
+///     The 7-day cache still covers extended outages.
+pub fn spawn_license_refresher(state: LicenseState) {
+    // Skip the background loop entirely for dev keys (only present
+    // in debug builds). They're not registered server-side and a
+    // re-verify would always fail.
+    if state.inner.api_key.starts_with("lnx_dev_") {
+        return;
+    }
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(StdDuration::from_secs(REVERIFY_INTERVAL_SECS));
+        // The first tick fires immediately; skip it because the
+        // startup verify already ran a few seconds ago.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            match verify_online(&state.inner.api_key, &state.inner.verify_url).await {
+                Ok(resp) => {
+                    state.update_tier(PlanTier::from_str(&resp.tier));
+                    let _ = write_cache(&state.inner.api_key, &resp);
+                }
+                Err(LicenseError::Rejected(msg)) => {
+                    state.flip_inactive(&msg);
+                }
+                Err(other) => {
+                    tracing::warn!(error = %other, "licence re-verify failed; keeping current state");
+                }
+            }
+        }
+    });
 }
 
 fn is_valid_format(key: &str) -> bool {

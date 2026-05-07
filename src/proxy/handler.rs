@@ -45,6 +45,10 @@ pub struct ProxyState {
     pub health: Arc<HealthRegistry>,
     pub lb: Arc<LoadBalancerRegistry>,
     pub quota: Arc<QuotaTracker>,
+    /// Live licence state. The proxy hot path checks `is_active()`
+    /// before serving — flipped off by the periodic re-verifier when
+    /// the licence server reports the key is no longer active.
+    pub license: crate::license::LicenseState,
 }
 
 /// Hop-by-hop headers that must not be forwarded to the upstream. RFC 7230 §6.1.
@@ -149,6 +153,23 @@ pub async fn proxy_handler(
             "service {} circuit breaker open",
             service.name
         )));
+    }
+
+    // Licence kill-switch — flipped off by the background re-verifier
+    // when the licence server reports the key is cancelled / invalid.
+    // Returns 402 Payment Required so customers see a clear billing
+    // signal rather than a generic 5xx.
+    if !state.license.is_active() {
+        metrics::counter!(
+            "lynxx_requests_total",
+            "service" => svc_name.clone(),
+            "route" => route_id.clone(),
+            "method" => method.clone(),
+            "status" => "license_revoked",
+            "target" => "-",
+        )
+        .increment(1);
+        return Err(GatewayError::LicenseRevoked);
     }
 
     // Quota check — counts the call and rejects with 429 if the monthly limit

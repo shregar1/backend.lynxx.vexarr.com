@@ -400,6 +400,30 @@ resource "google_cloud_run_domain_mapping" "billing" {
 }
 
 # ---------------------------------------------------------------------------
+# Custom domain — get.lynxx.vexarr.com → lynxx-billing
+# Dedicated host for the installer so the customer-facing command is
+# `curl -fsSL https://get.lynxx.vexarr.com | sh` (matching the
+# get.docker.com / sh.rustup.rs convention). The billing service
+# answers `/` with the install script, plus the existing
+# /install + /install.sh + /v1/install/binary endpoints.
+# ---------------------------------------------------------------------------
+
+resource "google_cloud_run_domain_mapping" "get" {
+  name     = "get.${var.website_domain}"
+  location = var.region
+
+  metadata {
+    namespace = var.project_id
+  }
+
+  spec {
+    route_name = google_cloud_run_v2_service.billing.name
+  }
+
+  depends_on = [google_cloud_run_v2_service.billing]
+}
+
+# ---------------------------------------------------------------------------
 # Custom domain — lynxx.vexarr.com → lynxx-website
 # Requires `lynxx.vexarr.com` (or `vexarr.com`) to be verified in
 # Google Search Console under the same Google account that owns this

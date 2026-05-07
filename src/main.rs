@@ -289,6 +289,23 @@ async fn async_main() -> anyhow::Result<()> {
     let quota = crate::quota::QuotaTracker::load(plan_tier, repo.clone()).await?;
     crate::quota::spawn_quota_flusher(quota.clone());
 
+    // Live licence state + periodic re-verifier. The startup verify
+    // above is hard-fail; this background loop catches mid-run
+    // cancellations within REVERIFY_INTERVAL_SECS instead of waiting
+    // for the offline cache to expire (7 days).
+    let license_verify_url = std::env::var("LYNXX_LICENSE_VERIFY_URL")
+        .unwrap_or_else(|_| "https://api.lynxx.vexarr.com/v1/license/verify".to_string());
+    let license_api_key = std::env::var("LYNXX_API_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| config.license.api_key.clone());
+    let license_state = crate::license::LicenseState::new(
+        license_api_key,
+        license_verify_url,
+        plan_tier,
+    );
+    crate::license::spawn_license_refresher(license_state.clone());
+
     let proxy_state = ProxyState {
         route_table: route_table.clone(),
         plugins: plugin_exec.clone(),
@@ -298,6 +315,7 @@ async fn async_main() -> anyhow::Result<()> {
         health: health.clone(),
         lb: lb.clone(),
         quota: quota.clone(),
+        license: license_state.clone(),
     };
 
     // Background connection pre-warmer. Keeps the upstream pool hot so

@@ -19,6 +19,9 @@ pub enum GatewayError {
     #[error("monthly quota exceeded — upgrade your plan to continue")]
     QuotaExceeded,
 
+    #[error("subscription is no longer active — renew your plan to continue")]
+    LicenseRevoked,
+
     #[error("plugin error: {0}")]
     PluginError(PluginError),
 
@@ -104,6 +107,7 @@ impl IntoResponse for GatewayError {
                 (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
             }
             GatewayError::QuotaExceeded => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
+            GatewayError::LicenseRevoked => (StatusCode::PAYMENT_REQUIRED, self.to_string()),
             GatewayError::PluginError(e) => match e {
                 PluginError::RateLimited => {
                     (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded".into())
