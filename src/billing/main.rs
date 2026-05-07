@@ -91,15 +91,19 @@ async fn main() -> Result<()> {
 
     let repo: Arc<dyn BillingRepo> = Arc::new(sql_repo);
 
-    // GCS bucket for downloadable binaries. Optional — when unset, the
-    // /v1/install/binary endpoint returns 503. Set BINARIES_BUCKET in
-    // production (Terraform output `binaries_bucket`).
+    // GCS bucket + prefix for downloadable binaries. Optional — when
+    // unset, /v1/install/binary returns 503. Production sets:
+    //   BINARIES_BUCKET=vexarr-com
+    //   BINARIES_PREFIX=lynxx/binaries
     let gcs = env::var("BINARIES_BUCKET")
         .ok()
         .filter(|s| !s.is_empty())
-        .map(GcsSigner::new);
+        .map(|bucket| {
+            let prefix = env::var("BINARIES_PREFIX").unwrap_or_default();
+            GcsSigner::new(bucket, prefix)
+        });
     if let Some(s) = &gcs {
-        tracing::info!(bucket = %s.bucket(), "binaries bucket configured");
+        tracing::info!(bucket = %s.bucket(), prefix = %s.prefix(), "binaries bucket configured");
     } else {
         tracing::warn!("BINARIES_BUCKET not set — /v1/install/binary disabled");
     }

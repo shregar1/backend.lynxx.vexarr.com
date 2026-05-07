@@ -1,10 +1,13 @@
 name: release
 
-# Triggered on annotated `v*` tags. Produces:
+# Manual-only. Produces:
 #   1. Cross-platform release tarballs (linux x86_64/aarch64, darwin x86_64/aarch64,
 #      windows x86_64) attached to a GitHub Release.
 #   2. SHA256SUMS for every artifact.
-#   3. Multi-arch Docker images for gateway/ingress/cli pushed to GHCR.
+#   3. Raw binaries (lynxx, lynx-gateway) uploaded to gs://<project>-binaries/
+#      under <os>/<arch>/<binary> — what the install.sh + /v1/install/binary
+#      flow streams to end users via short-lived V4 signed URLs.
+#   4. Multi-arch Docker images for gateway/ingress/cli pushed to GHCR.
 #
 # The release body is taken from the tag's annotated message.
 
@@ -19,6 +22,7 @@ on:
 permissions:
   contents: write    # create release + upload assets
   packages: write    # push to ghcr.io
+  id-token: write    # WIF for GCS upload
 
 env:
   CARGO_TERM_COLOR: always
@@ -163,6 +167,54 @@ jobs:
             dist/lynxx-${{ steps.version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive }}.sha256
           if-no-files-found: error
           retention-days: 7
+
+      # ---------------------------------------------------------------------
+      # Push raw binaries to gs://<project>-binaries/<os>/<arch>/<bin>.
+      # The install.sh + /v1/install/binary flow streams from this bucket
+      # via 5-min signed URLs. Skipped on windows (only linux+darwin are
+      # supported by the install script).
+      # ---------------------------------------------------------------------
+      - name: Map target → os/arch
+        if: matrix.archive == 'tar.gz'
+        id: osarch
+        shell: bash
+        run: |
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-gnu)  os=linux;  arch=amd64 ;;
+            aarch64-unknown-linux-gnu) os=linux;  arch=arm64 ;;
+            x86_64-apple-darwin)       os=darwin; arch=amd64 ;;
+            aarch64-apple-darwin)      os=darwin; arch=arm64 ;;
+            *) echo "skip os/arch upload for ${{ matrix.target }}"; exit 0 ;;
+          esac
+          echo "os=$os"     >> "$GITHUB_OUTPUT"
+          echo "arch=$arch" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to GCP (WIF)
+        if: matrix.archive == 'tar.gz' && steps.osarch.outputs.os != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account:            ${{ vars.WIF_SERVICE_ACCOUNT }}
+
+      - name: Upload binaries to GCS
+        if: matrix.archive == 'tar.gz' && steps.osarch.outputs.os != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          os="${{ steps.osarch.outputs.os }}"
+          arch="${{ steps.osarch.outputs.arch }}"
+          # Shared bucket convention: gs://<bucket>/<project>/binaries/<os>/<arch>/<bin>.
+          bucket="gs://${{ vars.BINARIES_BUCKET || 'vexarr-com' }}"
+          prefix="${{ vars.BINARIES_PREFIX || 'lynxx/binaries' }}"
+
+          for bin in lynxx lynx-gateway; do
+            src="target/${target}/release/${bin}"
+            [[ -f "${src}" ]] || { echo "missing ${src}"; exit 1; }
+            gsutil -h "Content-Type:application/octet-stream" \
+                   -h "Cache-Control:no-store" \
+                   cp "${src}" "${bucket}/${prefix}/${os}/${arch}/${bin}"
+          done
 
   # ---------------------------------------------------------------------------
   # Aggregate, sign, and publish the GitHub Release.

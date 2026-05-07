@@ -29,6 +29,9 @@ const SIGN_BLOB_URL: &str =
 #[derive(Clone)]
 pub struct GcsSigner {
     bucket: String,
+    /// Path prefix inside the bucket prepended to every signed object
+    /// path (e.g. `lynxx/binaries`). Empty means the bucket root.
+    prefix: String,
     /// In-process cache for the SA email + bearer token, refreshed
     /// shortly before the metadata-server token expires.
     state: std::sync::Arc<tokio::sync::Mutex<TokenState>>,
@@ -59,15 +62,25 @@ struct SignBlobResponse {
 }
 
 impl GcsSigner {
-    pub fn new(bucket: impl Into<String>) -> Self {
+    pub fn new(bucket: impl Into<String>, prefix: impl Into<String>) -> Self {
+        let mut prefix = prefix.into();
+        // Trim trailing slash so we always join with a single '/' below.
+        while prefix.ends_with('/') {
+            prefix.pop();
+        }
         Self {
             bucket: bucket.into(),
+            prefix,
             state: std::sync::Arc::new(tokio::sync::Mutex::new(TokenState::default())),
         }
     }
 
     pub fn bucket(&self) -> &str {
         &self.bucket
+    }
+
+    pub fn prefix(&self) -> &str {
+        &self.prefix
     }
 
     /// Build a V4 signed URL for `GET <bucket>/<object>` valid for
@@ -81,11 +94,17 @@ impl GcsSigner {
         let credential_scope = format!("{datestamp}/auto/storage/goog4_request");
         let credential = format!("{email}/{credential_scope}");
 
-        // Object path needs URL-encoding — only the segments, not the
-        // slashes between them.
-        let encoded_object: String = object
+        // Prepend the configured prefix to the requested object, then
+        // URL-encode each path segment (slashes between segments stay
+        // as is — they're structural, not data).
+        let full_object = if self.prefix.is_empty() {
+            object.to_string()
+        } else {
+            format!("{}/{}", self.prefix, object)
+        };
+        let encoded_object: String = full_object
             .split('/')
-            .map(|seg| url_encode_path(seg))
+            .map(url_encode_path)
             .collect::<Vec<_>>()
             .join("/");
         let canonical_uri = format!("/{}/{}", self.bucket, encoded_object);

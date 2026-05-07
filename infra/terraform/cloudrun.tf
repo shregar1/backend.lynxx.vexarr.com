@@ -218,7 +218,11 @@ resource "google_cloud_run_v2_service" "billing" {
       }
       env {
         name  = "BINARIES_BUCKET"
-        value = google_storage_bucket.binaries.name
+        value = data.google_storage_bucket.vexarr_com.name
+      }
+      env {
+        name  = "BINARIES_PREFIX"
+        value = "lynxx/binaries"
       }
     }
   }
