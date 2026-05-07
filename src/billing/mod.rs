@@ -15,6 +15,7 @@
 //! No licence gating on this binary itself (it's the licence server).
 
 pub mod auth;
+pub mod google_oauth;
 pub mod keys;
 pub mod models;
 pub mod repo;
@@ -44,4 +45,8 @@ pub struct AppState {
     /// service runs locally without a GCS bucket configured (`/v1/install/binary`
     /// returns 503 in that mode).
     pub gcs: Option<signing::GcsSigner>,
+    /// Sign-in with Google verifier. None when GOOGLE_OAUTH_CLIENT_ID
+    /// is unset; in that case `/v1/auth/google` returns 503 and the
+    /// frontend's Google button hides itself.
+    pub google: Option<google_oauth::GoogleVerifier>,
 }

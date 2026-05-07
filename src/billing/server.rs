@@ -21,6 +21,7 @@ use super::keys::{generate as gen_key, hash_key};
 use super::models::{Customer, NewApiKey, NewCustomer};
 use super::stripe;
 use super::AppState;
+use rand::RngCore;
 
 /// Cookie name used for the browser session. The CLI / curl flow uses
 /// `Authorization: Bearer <token>` — both paths resolve to the same
@@ -74,6 +75,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/license/verify", get(verify_license))
         .route("/v1/auth/signup", post(signup))
         .route("/v1/auth/signin", post(signin))
+        .route("/v1/auth/google", post(google_signin))
         .route("/v1/auth/logout", post(logout))
         .route("/v1/account/me", get(me))
         .route("/v1/account/keys", get(list_keys).post(create_key))
@@ -610,6 +612,141 @@ async fn signin(
         body,
     )
         .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Sign in with Google
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct GoogleAuthReq {
+    /// JWT ID token returned by Google Identity Services on the
+    /// website. The website should not parse it — just relay it.
+    id_token: String,
+}
+
+#[derive(Serialize)]
+struct GoogleAuthResp {
+    customer_urn: String,
+    session_token: String,
+    tier: String,
+    name: Option<String>,
+    company: Option<String>,
+    /// Present for first-time Google signups (a free-tier API key
+    /// minted on the spot). None for existing customers signing in.
+    api_key: Option<String>,
+    /// True when this request created a new customer row.
+    created: bool,
+}
+
+async fn google_signin(
+    State(state): State<AppState>,
+    Json(req): Json<GoogleAuthReq>,
+) -> Result<Response, ApiError> {
+    let google = state.google.as_ref().ok_or_else(|| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "google sign-in disabled (GOOGLE_OAUTH_CLIENT_ID unset)".into(),
+        )
+    })?;
+
+    let claims = google.verify(&req.id_token).await.map_err(|e| {
+        warn!(error=%e, "google id_token rejected");
+        ApiError(StatusCode::UNAUTHORIZED, "invalid Google credentials".into())
+    })?;
+
+    let email = claims.email.trim().to_lowercase();
+    let display_name = claims
+        .name
+        .clone()
+        .or_else(|| match (&claims.given_name, &claims.family_name) {
+            (Some(g), Some(f)) => Some(format!("{g} {f}")),
+            (Some(g), None) => Some(g.clone()),
+            _ => None,
+        });
+
+    // Lookup or create. The customers table has password_hash NOT NULL
+    // so we mint a random argon2 hash on first sign-up — Google is the
+    // only way back in until the user requests a password reset, and
+    // that reset flow generates a new hash.
+    let (customer_id, customer_urn, name, company, tier_code, created, api_key) =
+        match state.repo.find_customer_by_email(&email).await? {
+            Some(existing) => {
+                info!(
+                    customer_urn = %existing.urn,
+                    email = %existing.email,
+                    sub = %claims.sub,
+                    "google signin (existing customer)"
+                );
+                (
+                    existing.id,
+                    existing.urn,
+                    existing.name,
+                    existing.company,
+                    existing.tier_code,
+                    false,
+                    None,
+                )
+            }
+            None => {
+                let urn = Uuid::new_v4();
+                let pw_hash = hash_password(&random_password())?;
+                let new_customer = NewCustomer {
+                    urn,
+                    email: email.clone(),
+                    password_hash: pw_hash,
+                    name: display_name.clone(),
+                    company: None,
+                    tier_code: "free".to_string(),
+                    stripe_customer_id: None,
+                    stripe_subscription_id: None,
+                    subscription_status_code: "active".into(),
+                    subscription_type_code: "free".into(),
+                };
+                let id = state.repo.create_customer(&new_customer).await?;
+                let key = mint_key(
+                    &state,
+                    id,
+                    "Default",
+                    vec!["read".into(), "write".into()],
+                    None,
+                )
+                .await?;
+                info!(
+                    customer_urn = %urn,
+                    email = %email,
+                    sub = %claims.sub,
+                    "google signin (new customer)"
+                );
+                (id, urn, display_name, None, "free".to_string(), true, Some(key))
+            }
+        };
+
+    let token = issue_session(customer_id, &state.session_secret);
+    let body = Json(GoogleAuthResp {
+        customer_urn: customer_urn.to_string(),
+        session_token: token.clone(),
+        tier: tier_code,
+        name,
+        company,
+        api_key,
+        created,
+    });
+    Ok((
+        StatusCode::OK,
+        [(header::SET_COOKIE, session_cookie(&token))],
+        body,
+    )
+        .into_response())
+}
+
+/// Generate a 32-byte hex string. Used to satisfy `password_hash NOT NULL`
+/// for Google-signin customers — they never use it directly, and a
+/// password reset replaces it with the user's chosen hash.
+fn random_password() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // ---------------------------------------------------------------------------

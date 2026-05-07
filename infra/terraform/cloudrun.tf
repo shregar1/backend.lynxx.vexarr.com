@@ -246,6 +246,18 @@ resource "google_cloud_run_v2_service" "billing" {
         name  = "BINARIES_PREFIX"
         value = "lynxx/binaries"
       }
+      # OAuth Client ID for Sign-in with Google. Treated as a secret
+      # only for central management — the value is public and the
+      # website ships the same string in its JS bundle.
+      env {
+        name = "GOOGLE_OAUTH_CLIENT_ID"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.google_oauth_client_id.secret_id
+            version = "latest"
+          }
+        }
+      }
     }
   }
 

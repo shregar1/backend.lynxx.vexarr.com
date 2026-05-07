@@ -5,6 +5,7 @@
 use anyhow::{anyhow, Context, Result};
 use axum::http::HeaderValue;
 use lynx_gateway::billing::{
+    google_oauth::GoogleVerifier,
     repo::{BillingRepo, SqlBillingRepo},
     server,
     signing::GcsSigner,
@@ -170,6 +171,19 @@ async fn main() -> Result<()> {
         .collect();
     tracing::info!(origins = ?origins, "CORS allowlist");
 
+    // Optional Sign-in with Google. The OAuth Client ID is created in
+    // GCP Console (see deploy/gcp/google-oauth-setup.md). When unset,
+    // /v1/auth/google returns 503 and the website hides the button.
+    let google = env::var("GOOGLE_OAUTH_CLIENT_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(GoogleVerifier::new);
+    if let Some(g) = &google {
+        tracing::info!(client_id = %g.client_id(), "google sign-in enabled");
+    } else {
+        tracing::warn!("GOOGLE_OAUTH_CLIENT_ID unset — /v1/auth/google disabled");
+    }
+
     let state = AppState {
         repo,
         session_secret,
@@ -178,6 +192,7 @@ async fn main() -> Result<()> {
         website_origin,
         allowed_origins,
         gcs,
+        google,
     };
 
     let app = server::router(state);

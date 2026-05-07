@@ -93,3 +93,29 @@ resource "google_secret_manager_secret_version" "admin_api_key" {
     ignore_changes = [secret_data]
   }
 }
+
+# OAuth Client ID for "Sign in with Google". Created manually in the
+# Cloud Console — see deploy/gcp/google-oauth-setup.md. The Client ID
+# is public (it's shipped in the website's JS bundle), so storing it
+# in Secret Manager is for centralised configuration, not secrecy.
+# When unset, /v1/auth/google returns 503 and the website hides the
+# Google button.
+resource "google_secret_manager_secret" "google_oauth_client_id" {
+  secret_id = "LYNXX_GOOGLE_OAUTH_CLIENT_ID"
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.apis]
+}
+
+# Empty placeholder so Cloud Run's `versions/latest` reference resolves
+# even before the user has pasted the real Client ID in. Replace via:
+#   echo -n "<id>.apps.googleusercontent.com" | \
+#     gcloud secrets versions add LYNXX_GOOGLE_OAUTH_CLIENT_ID --data-file=-
+resource "google_secret_manager_secret_version" "google_oauth_client_id_placeholder" {
+  secret      = google_secret_manager_secret.google_oauth_client_id.id
+  secret_data = "PLACEHOLDER_NOT_CONFIGURED"
+  lifecycle {
+    ignore_changes = [secret_data, enabled]
+  }
+}
