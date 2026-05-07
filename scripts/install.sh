@@ -4,12 +4,12 @@
 #   curl -fsSL https://api.lynxx.vexarr.com/install.sh | bash
 #
 # 1. Detects OS + architecture.
-# 2. For each required binary, asks the licence/billing service for a
-#    short-lived V4 signed URL (the binaries themselves live in a private
-#    GCS bucket; only the billing service can mint download URLs).
-# 3. Downloads each binary into /usr/local/bin (with sudo if needed)
-#    or ~/.local/bin (fallback). After install, the user only needs
-#    to set their API key and run `lynxx start`.
+# 2. Streams each binary through the licence/billing service, which
+#    pulls it from the private GCS bucket and pipes the bytes back
+#    over the api.lynxx.vexarr.com domain — customers never talk to
+#    storage.googleapis.com directly.
+# 3. Installs into /usr/local/bin (with sudo if needed) or ~/.local/bin
+#    (fallback). After install, set your API key and run `lynxx start`.
 
 set -euo pipefail
 
@@ -19,7 +19,7 @@ INSTALL_DIR="${LYNXX_INSTALL_DIR:-}"
 BINARIES=("lynxx" "lynx-gateway")
 
 # Older releases used LYNXX_RELEASE_BASE_URL — accept it as an explicit
-# direct-download override, bypassing the signed-URL flow.
+# direct-download override, bypassing the API.
 RELEASE_BASE_URL="${LYNXX_RELEASE_BASE_URL:-}"
 
 # ---- coloured output (only on TTY) -----------------------------------------
@@ -101,28 +101,16 @@ if [ "${all_installed}" -eq 1 ] && [ -z "${LYNXX_FORCE:-}" ]; then
   exit 0
 fi
 
-# ---- resolve a download URL for one binary ---------------------------------
-# If LYNXX_RELEASE_BASE_URL is set, use it as a direct prefix.
-# Otherwise call the billing service for a short-lived signed URL.
-resolve_url() {
+# ---- pick a download URL ---------------------------------------------------
+# Default: stream through the billing service so every byte flows over
+# the api domain. LYNXX_RELEASE_BASE_URL overrides for self-host / mirror.
+download_url() {
   local bin="$1"
   if [ -n "${RELEASE_BASE_URL}" ]; then
     echo "${RELEASE_BASE_URL}/${OS}/${ARCH}/${bin}"
-    return
+  else
+    echo "${API_BASE}/v1/install/binary?name=${bin}&os=${OS}&arch=${ARCH}"
   fi
-  local resp
-  resp=$(curl -fsSL --retry 3 \
-    --get \
-    --data-urlencode "name=${bin}" \
-    --data-urlencode "os=${OS}" \
-    --data-urlencode "arch=${ARCH}" \
-    "${API_BASE}/v1/install/binary") || \
-    err "failed to fetch signed URL for ${bin} from ${API_BASE}"
-  # Parse the {"url":"..."} field without jq dep.
-  local url
-  url=$(printf '%s' "${resp}" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-  [ -n "${url}" ] || err "could not parse signed URL from API response: ${resp}"
-  echo "${url}"
 }
 
 # ---- download + install ----------------------------------------------------
@@ -134,8 +122,8 @@ info "API: ${API_BASE}"
 
 for bin in "${BINARIES[@]}"; do
   info "↓ ${bin}"
-  url=$(resolve_url "${bin}")
-  if ! curl -fsSL --retry 3 -o "${TMP}/${bin}" "${url}"; then
+  url=$(download_url "${bin}")
+  if ! curl -fL --retry 3 -o "${TMP}/${bin}" "${url}"; then
     err "download failed for ${bin}"
   fi
   chmod +x "${TMP}/${bin}"

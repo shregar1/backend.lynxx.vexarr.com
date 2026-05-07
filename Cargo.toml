@@ -18,7 +18,7 @@ axum = { version = "0.7", features = ["macros", "ws"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "webpki-tokio", "native-tokio"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 num_cpus = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

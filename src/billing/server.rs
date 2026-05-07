@@ -75,16 +75,15 @@ async fn install_script() -> Response {
 }
 
 // ---------------------------------------------------------------------------
-// Install: signed URL for binary downloads
+// Install: binary downloads streamed through the billing service
 // ---------------------------------------------------------------------------
 
 /// Allowlist of (binary, os, arch) triples we serve. Anything outside
 /// this list returns 404 — prevents the endpoint from being abused as
-/// a generic GCS signer for arbitrary objects in the bucket.
+/// a generic GCS reader for arbitrary objects in the bucket.
 const ALLOWED_BINARIES: &[&str] = &["lynxx", "lynx-gateway"];
 const ALLOWED_OS: &[&str] = &["linux", "darwin"];
 const ALLOWED_ARCH: &[&str] = &["amd64", "arm64"];
-const SIGNED_URL_TTL_SECS: i64 = 300; // 5 minutes
 
 #[derive(Deserialize)]
 struct InstallBinaryQuery {
@@ -93,16 +92,15 @@ struct InstallBinaryQuery {
     arch: String,
 }
 
-#[derive(Serialize)]
-struct InstallBinaryResponse {
-    url: String,
-    expires_at: i64,
-}
-
+/// Streams the requested binary directly from GCS through this service
+/// to the client. The customer never talks to `storage.googleapis.com`
+/// directly — every byte flows through `api.lynxx.vexarr.com`, which
+/// keeps the install path on a single hostname and gives us a future
+/// chokepoint for licence-key auth, rate limits, or download metering.
 async fn install_binary(
     State(state): State<AppState>,
     Query(q): Query<InstallBinaryQuery>,
-) -> Result<Json<InstallBinaryResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     if !ALLOWED_BINARIES.contains(&q.name.as_str()) {
         return Err(ApiError(StatusCode::NOT_FOUND, "unknown binary".into()));
     }
@@ -124,20 +122,32 @@ async fn install_binary(
         arch = q.arch,
         name = q.name
     );
-    let url = signer
-        .sign_get(&object, SIGNED_URL_TTL_SECS)
-        .await
-        .map_err(|e| {
-            error!(error=%e, "sign GCS URL failed");
-            ApiError(
-                StatusCode::BAD_GATEWAY,
-                "could not sign download URL".into(),
-            )
-        })?;
-    Ok(Json(InstallBinaryResponse {
-        url,
-        expires_at: Utc::now().timestamp() + SIGNED_URL_TTL_SECS,
-    }))
+    let upstream = signer.stream_get(&object).await.map_err(|e| {
+        error!(error=%e, object=%object, "gcs stream_get failed");
+        ApiError(
+            StatusCode::BAD_GATEWAY,
+            "could not fetch binary from storage".into(),
+        )
+    })?;
+
+    // Cloud Run caps non-streaming responses at 32 MiB. The 43 MB
+    // lynx-gateway binary trips that cap when Content-Length is set,
+    // because the front-end then treats the response as buffered.
+    // Omitting Content-Length forces chunked transfer-encoding via
+    // axum's stream body, which has no size limit. The trade-off is
+    // that `curl` can't show a percentage progress bar — only bytes
+    // received — which we accept.
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{}\"", q.name).parse().unwrap(),
+    );
+    headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+
+    let stream = upstream.bytes_stream();
+    let body = axum::body::Body::from_stream(stream);
+    Ok((StatusCode::OK, headers, body).into_response())
 }
 
 // ---------------------------------------------------------------------------

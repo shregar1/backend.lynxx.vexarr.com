@@ -148,6 +148,48 @@ impl GcsSigner {
         ))
     }
 
+    /// Open a streaming GET against `<bucket>/<prefix>/<object>` using the
+    /// service-account bearer token. Returns the live `reqwest::Response`
+    /// — callers stream `bytes_stream()` straight to the HTTP client. No
+    /// signed URL is minted; the SA's `roles/storage.objectViewer` on the
+    /// bucket is what authorizes the read.
+    ///
+    /// Used by the `/v1/install/binary` endpoint so binary downloads
+    /// flow through the billing service instead of pointing customers at
+    /// `storage.googleapis.com`. That keeps the install flow on a single
+    /// hostname (`api.lynxx.vexarr.com`) and lets future revisions add
+    /// licence-key auth, rate limiting, or download metering without
+    /// touching the install script.
+    pub async fn stream_get(&self, object: &str) -> Result<reqwest::Response> {
+        let (_, token) = self.identity().await?;
+        let full_object = if self.prefix.is_empty() {
+            object.to_string()
+        } else {
+            format!("{}/{}", self.prefix, object)
+        };
+        // The JSON API expects the entire object path encoded as one
+        // path segment (slashes themselves get %2F). url_encode_path
+        // already handles that since it treats `/` as non-reserved.
+        let encoded = url_encode_object_path(&full_object);
+        let url = format!(
+            "https://storage.googleapis.com/storage/v1/b/{}/o/{}?alt=media",
+            self.bucket, encoded
+        );
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| anyhow!("gcs stream_get connect: {e}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("gcs stream_get {status}: {text}"));
+        }
+        Ok(resp)
+    }
+
     async fn identity(&self) -> Result<(String, String)> {
         let mut state = self.state.lock().await;
         let now = Utc::now();
@@ -228,6 +270,22 @@ fn bytes_to_hex(b: &[u8]) -> String {
         s.push_str(&format!("{byte:02x}"));
     }
     s
+}
+
+/// Percent-encode an object path for the JSON API. Slashes are escaped
+/// as `%2F` since the JSON API treats the entire object path as one
+/// path segment of the URL.
+fn url_encode_object_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len() * 2);
+    for b in path.as_bytes() {
+        let c = *b;
+        if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'~') {
+            out.push(c as char);
+        } else {
+            out.push_str(&format!("%{c:02X}"));
+        }
+    }
+    out
 }
 
 /// Percent-encode a path segment per RFC 3986. Letters / digits /
