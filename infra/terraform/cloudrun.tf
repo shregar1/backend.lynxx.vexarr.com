@@ -100,8 +100,9 @@ resource "google_cloud_run_v2_service" "dashboard" {
 # ---------------------------------------------------------------------------
 # Billing / licence service (api.lynxx.dev). Hosts:
 #   /v1/auth/*, /v1/account/*, /v1/license/verify, /v1/billing/*, /v1/stripe/webhook
-# Connects to Cloud SQL via the built-in Cloud Run sql_connections; reads
-# session and Stripe secrets from Secret Manager. Public ingress; auth is
+# Connects to the shared Cloud SQL instance (`vexarr-com`) via Cloud Run's
+# built-in Auth Proxy: a Unix socket at /cloudsql/<connection-name>/.s.PGSQL.5432.
+# Stripe + session secrets come from Secret Manager. Public ingress; auth is
 # handled in-app via session tokens + Stripe signature verification.
 # ---------------------------------------------------------------------------
 
@@ -117,16 +118,15 @@ resource "google_cloud_run_v2_service" "billing" {
       max_instance_count = 10
     }
 
-    # Direct VPC egress so the service can reach Cloud SQL via its
-    # private IP. PRIVATE_RANGES_ONLY keeps internet egress off the VPC
-    # path (cheaper, faster) — the Stripe HTTP client still goes out the
-    # default Cloud Run NAT.
-    vpc_access {
-      network_interfaces {
-        network    = google_compute_network.lynxx.id
-        subnetwork = google_compute_subnetwork.lynxx.id
+    # Cloud Run's Cloud SQL integration: mounts a Unix socket at
+    # /cloudsql/<connection-name> and authenticates via the runtime SA.
+    # No VPC peering or private IP required — works with the shared
+    # `vexarr-com` instance which sits outside the lynxx VPC.
+    volumes {
+      name = "cloudsql"
+      cloud_sql_instance {
+        instances = [data.google_sql_database_instance.shared.connection_name]
       }
-      egress = "PRIVATE_RANGES_ONLY"
     }
 
     containers {
@@ -144,13 +144,35 @@ resource "google_cloud_run_v2_service" "billing" {
         cpu_idle = false
       }
 
+      volume_mounts {
+        name       = "cloudsql"
+        mount_path = "/cloudsql"
+      }
+
+      # The binary builds DATABASE_URL from these DB_* vars when
+      # DATABASE_URL itself is unset. DB_HOST is the Auth Proxy Unix
+      # socket dir mounted via `volume_mounts.cloudsql`; sqlx connects
+      # via that socket so no TCP/private-IP/VPC plumbing is needed.
       env {
-        # Plain TCP to Cloud SQL's private IP. Reaches the database over
-        # the VPC via direct egress (configured below). Simpler than
-        # Cloud Run's Unix-socket integration and avoids a sqlx URL
-        # parsing rabbit hole.
-        name  = "DATABASE_URL"
-        value = "postgres://lynxx:${var.db_password}@${google_sql_database_instance.lynxx.private_ip_address}:5432/lynxx"
+        name  = "DB_HOST"
+        value = "/cloudsql/${data.google_sql_database_instance.shared.connection_name}"
+      }
+      env {
+        name  = "DB_USER"
+        value = "lynxx"
+      }
+      env {
+        name  = "DB_NAME"
+        value = "lynxx"
+      }
+      env {
+        name = "DB_PASSWORD"
+        value_source {
+          secret_key_ref {
+            secret  = data.google_secret_manager_secret.lynxx_db_password.secret_id
+            version = "latest"
+          }
+        }
       }
       env {
         name  = "LYNXX_BILLING_BIND"
@@ -244,7 +266,6 @@ resource "google_cloud_run_v2_service" "billing" {
 
   depends_on = [
     google_project_service.apis,
-    google_secret_manager_secret_version.db_url,
   ]
 }
 

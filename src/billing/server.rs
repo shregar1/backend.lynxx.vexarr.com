@@ -48,6 +48,10 @@ pub fn router(state: AppState) -> Router {
         // Returns a short-lived V4 signed URL for the requested binary.
         // The install.sh script calls this once per binary it needs.
         .route("/v1/install/binary", get(install_binary))
+        // /healthz on *.run.app is intercepted by Google's edge (returns
+        // a generic 404 HTML page before the request reaches the
+        // container), so we expose /health as the public probe.
+        .route("/health", get(|| async { "ok" }))
         .route("/healthz", get(|| async { "ok" }))
         .layer(cors)
         .with_state(state)

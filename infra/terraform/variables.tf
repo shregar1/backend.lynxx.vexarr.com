@@ -27,23 +27,10 @@ variable "cluster_name" {
   default     = "lynxx-cluster"
 }
 
-variable "db_instance_name" {
-  description = "Cloud SQL instance name."
-  type        = string
-  default     = "lynxx-postgres"
-}
-
-variable "db_tier" {
-  description = "Cloud SQL machine tier."
-  type        = string
-  default     = "db-perf-optimized-N-2"   # 2 vCPU, 16 GB — change to db-f1-micro for staging
-}
-
-variable "db_password" {
-  description = "Postgres password for the lynxx user. Set via TF_VAR_db_password."
-  type        = string
-  sensitive   = true
-}
+# Cloud SQL is shared across Vexarr products — see infra/terraform/sql.tf.
+# The lynxx-specific DB user, database, and password (LYNXX_DB_PASSWORD)
+# are managed out-of-band via gcloud, not Terraform. No db_* variables
+# are declared here.
 
 variable "domain" {
   description = "Primary domain for the gateway load balancer (e.g. api.lynxx.dev)."

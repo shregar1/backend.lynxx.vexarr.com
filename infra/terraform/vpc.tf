@@ -42,22 +42,12 @@ resource "google_compute_router_nat" "lynxx" {
 }
 
 # ---------------------------------------------------------------------------
-# Private services access — required for Cloud SQL private IP
+# Private services access for Cloud SQL has been retired — the lynxx
+# product now shares the `vexarr-com` Cloud SQL instance and reaches it
+# via the Cloud Run Auth Proxy sidecar (TCP 5432 over a Unix socket
+# mounted by Cloud Run from /cloudsql/<connection-name>). No VPC peering
+# range or service-networking connection is required.
 # ---------------------------------------------------------------------------
-resource "google_compute_global_address" "sql_peering" {
-  name          = "lynxx-sql-peering"
-  purpose       = "VPC_PEERING"
-  address_type  = "INTERNAL"
-  prefix_length = 20
-  network       = google_compute_network.lynxx.id
-}
-
-resource "google_service_networking_connection" "sql" {
-  network                 = google_compute_network.lynxx.id
-  service                 = "servicenetworking.googleapis.com"
-  reserved_peering_ranges = [google_compute_global_address.sql_peering.name]
-  depends_on              = [google_project_service.apis]
-}
 
 # ---------------------------------------------------------------------------
 # Firewall — allow health-checks from the GCP LB prober ranges

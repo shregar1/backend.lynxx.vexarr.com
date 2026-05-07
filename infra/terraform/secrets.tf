@@ -1,27 +1,12 @@
 # ---------------------------------------------------------------------------
-# Secret Manager — gateway database URL and Stripe keys.
-# The gateway SA can read these; the CI/CD pipeline writes them at deploy time.
+# Secret Manager — Stripe keys, session-signing key, admin API key.
+#
+# The DB password lives in the shared Vexarr secret `LYNXX_DB_PASSWORD`,
+# created out-of-band per `infra/terraform/sql.tf`. Cloud Run reads it
+# directly via the data block in sql.tf.
+#
+# The gateway SA can read every secret here; CI/CD never writes them.
 # ---------------------------------------------------------------------------
-
-resource "google_secret_manager_secret" "db_url" {
-  secret_id = "lynxx-database-url"
-
-  replication {
-    auto {}
-  }
-
-  depends_on = [google_project_service.apis]
-}
-
-resource "google_secret_manager_secret_version" "db_url" {
-  secret = google_secret_manager_secret.db_url.id
-  secret_data = "postgres://lynxx:${var.db_password}@127.0.0.1:5432/lynxx"
-
-  # This version is replaced every time db_password changes.
-  lifecycle {
-    create_before_destroy = true
-  }
-}
 
 # Stripe keys — set these manually after first apply via:
 #   gcloud secrets versions add lynxx-stripe-secret-key --data-file=<(echo -n "sk_live_...")

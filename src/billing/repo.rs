@@ -98,12 +98,13 @@ fn parse_dt(s: &str) -> Result<chrono::DateTime<chrono::Utc>> {
 }
 
 // sqlx::Any does NOT rewrite `?` to `$N` for postgres
-// (https://github.com/launchbadge/sqlx/issues/2773). Two markers:
+// (https://github.com/launchbadge/sqlx/issues/2773). Three markers:
 //   `?`   ordinary placeholder — `$N` for postgres, `?` for sqlite
 //   `?@`  timestamp placeholder — `$N::timestamptz` for postgres, `?` for sqlite
-// We bind RFC-3339 strings for timestamps; postgres needs the cast since
-// the column is TIMESTAMPTZ and sqlx::Any doesn't impl Type<Any> for
-// chrono types.
+//   `?#`  text-array placeholder — `$N::text[]` for postgres, `?` for sqlite
+// We bind RFC-3339 strings for timestamps and `{a,b,c}` text-array
+// literals for arrays; postgres needs the cast since sqlx::Any doesn't
+// impl Type<Any> for chrono types or Vec<String>.
 fn ph(query: &str, is_postgres: bool) -> String {
     let mut out = String::with_capacity(query.len() + 16);
     let mut idx = 0;
@@ -111,15 +112,23 @@ fn ph(query: &str, is_postgres: bool) -> String {
     while let Some(ch) = chars.next() {
         if ch == '?' {
             idx += 1;
-            let is_ts = chars.peek() == Some(&'@');
-            if is_ts {
-                chars.next();
-            }
+            let next = chars.peek().copied();
+            let cast = match next {
+                Some('@') => {
+                    chars.next();
+                    Some("::timestamptz")
+                }
+                Some('#') => {
+                    chars.next();
+                    Some("::text[]")
+                }
+                _ => None,
+            };
             if is_postgres {
                 out.push('$');
                 out.push_str(&idx.to_string());
-                if is_ts {
-                    out.push_str("::timestamptz");
+                if let Some(c) = cast {
+                    out.push_str(c);
                 }
             } else {
                 out.push('?');
@@ -179,10 +188,13 @@ fn select_customer_sql(is_pg: bool) -> String {
 
 fn select_api_key_sql(is_pg: bool) -> String {
     if is_pg {
+        // Cast scopes to text so sqlx::Any can read it as a String —
+        // its `Any` row decoder doesn't handle postgres TEXT[] natively.
+        // The text form is `{read,write}` which parse_scopes() splits.
         format!(
             "SELECT k.id, k.urn, k.customer_id, k.name, k.key_hash, k.key_prefix, \
              k.api_key_status_id, aks.code AS status_code, \
-             k.scopes, \
+             k.scopes::text AS scopes, \
              to_char(k.expires_at AT TIME ZONE 'UTC', '{f}') AS expires_at, \
              to_char(k.revoked_at AT TIME ZONE 'UTC', '{f}') AS revoked_at, \
              k.is_deleted, \
@@ -365,7 +377,7 @@ impl BillingRepo for SqlBillingRepo {
               api_key_status_id, scopes, \
               expires_at, is_deleted, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, \
-              (SELECT id FROM api_key_status_lk WHERE code = ?), ?, \
+              (SELECT id FROM api_key_status_lk WHERE code = ?), ?#, \
               ?@, ?, ?@, ?@) \
              RETURNING id",
             self.is_postgres,

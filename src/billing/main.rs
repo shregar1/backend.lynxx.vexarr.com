@@ -19,15 +19,34 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
+    // The handler code lives in the `lynx_gateway` library crate, not in
+    // the `lynxx_billing` binary, so include both targets in the default
+    // filter. Without `lynx_gateway=info` we'd silently drop every
+    // `tracing::info/warn/error!` from the request handlers.
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("lynxx_billing=info,tower_http=info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                EnvFilter::new("lynxx_billing=info,lynx_gateway=info,tower_http=info")
+            }),
         )
         .init();
 
-    let database_url =
-        env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://lynxx.db?mode=rwc".to_string());
+    // Connection-string assembly. Two forms are supported:
+    //
+    //   1. DATABASE_URL set explicitly  →  use as-is. For local sqlite
+    //      and dev environments where you want full control of the URL.
+    //
+    //   2. DB_HOST + DB_USER + DB_NAME (+ DB_PORT, DB_PASSWORD) set →
+    //      build a postgres URL. Cloud Run uses this form: DB_HOST is the
+    //      Auth Proxy Unix-socket path (`/cloudsql/<connection-name>`),
+    //      DB_PASSWORD is injected from Secret Manager. This matches the
+    //      shared-instance convention used by every Vexarr product.
+    //
+    //   3. Neither set → default to a local sqlite file for `cargo run`.
+    let database_url = env::var("DATABASE_URL")
+        .ok()
+        .or_else(build_url_from_db_env)
+        .unwrap_or_else(|| "sqlite://lynxx.db?mode=rwc".to_string());
     let bind: SocketAddr = env::var("LYNXX_BILLING_BIND")
         .unwrap_or_else(|_| "0.0.0.0:9100".to_string())
         .parse()
@@ -122,4 +141,49 @@ async fn main() -> Result<()> {
     tracing::info!(%bind, "lynxx-billing listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Build a postgres connection URL from the standard `DB_*` env vars.
+/// Returns None if `DB_HOST` is missing — DATABASE_URL or the sqlite
+/// default takes over in that case.
+///
+/// Supports both TCP hosts (e.g. `34.x.x.x`) and unix-socket paths
+/// (e.g. `/cloudsql/<conn>`); the latter is encoded via the postgres
+/// `host=` query parameter so sqlx routes the connection to the socket
+/// instead of trying to resolve `/cloudsql/<conn>` as a TCP hostname.
+fn build_url_from_db_env() -> Option<String> {
+    let host = env::var("DB_HOST").ok().filter(|s| !s.is_empty())?;
+    let user = env::var("DB_USER").unwrap_or_else(|_| "lynxx".to_string());
+    let name = env::var("DB_NAME").unwrap_or_else(|_| "lynxx".to_string());
+    let port = env::var("DB_PORT").unwrap_or_else(|_| "5432".to_string());
+    let pass = env::var("DB_PASSWORD").unwrap_or_default();
+    let pass_part = if pass.is_empty() {
+        String::new()
+    } else {
+        // Hand-roll percent-encoding for password chars sqlx + url crate
+        // care about (`@`, `:`, `/`, `?`, `#`, `%`, `+`, ` `). Anything
+        // else passes through untouched. Avoids pulling in urlencoding
+        // for one call site.
+        let mut out = String::with_capacity(pass.len() + 8);
+        out.push(':');
+        for b in pass.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(b as char)
+                }
+                _ => out.push_str(&format!("%{b:02X}")),
+            }
+        }
+        out
+    };
+
+    if host.starts_with('/') {
+        // Unix socket — sqlx requires it in the `host` query parameter,
+        // not in the host position of the URL.
+        Some(format!(
+            "postgres://{user}{pass_part}@127.0.0.1/{name}?host={host}"
+        ))
+    } else {
+        Some(format!("postgres://{user}{pass_part}@{host}:{port}/{name}"))
+    }
 }

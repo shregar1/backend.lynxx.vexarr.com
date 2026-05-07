@@ -65,7 +65,6 @@ resource "google_container_cluster" "lynxx" {
 
   depends_on = [
     google_project_service.apis,
-    google_service_networking_connection.sql,
   ]
 
   lifecycle {

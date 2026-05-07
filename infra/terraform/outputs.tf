@@ -19,13 +19,8 @@ output "registry_base" {
 }
 
 output "sql_connection_name" {
-  description = "Cloud SQL instance connection name — used by Cloud SQL Auth Proxy."
-  value       = google_sql_database_instance.lynxx.connection_name
-}
-
-output "sql_private_ip" {
-  description = "Cloud SQL private IP (for direct connections within the VPC)."
-  value       = google_sql_database_instance.lynxx.private_ip_address
+  description = "Shared Cloud SQL instance connection name — used by the Auth Proxy mounted into Cloud Run."
+  value       = data.google_sql_database_instance.shared.connection_name
 }
 
 output "website_url" {

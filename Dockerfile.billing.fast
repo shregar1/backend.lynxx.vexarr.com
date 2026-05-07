@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1.6
+#
+# Manual-deploy fast path for lynxx-billing.
+#
+# Skips the in-image cargo compile (which requires QEMU emulation when
+# building a linux/amd64 image from an M1 Mac and balloons the build to
+# ~15 min). Instead we ship the pre-built binary produced locally with:
+#
+#   cargo zigbuild --release --target x86_64-unknown-linux-gnu --bin lynxx-billing
+#
+# Usage:
+#   docker buildx build --platform=linux/amd64 \
+#     -f Dockerfile.billing.fast -t <repo>/lynxx-billing:<tag> --push .
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN useradd -r -u 10001 -m lynxx
+
+COPY target/x86_64-unknown-linux-gnu/release/lynxx-billing /usr/local/bin/lynxx-billing
+COPY migrations /etc/lynxx/migrations
+
+USER lynxx
+WORKDIR /etc/lynxx
+EXPOSE 9100
+ENTRYPOINT ["/usr/local/bin/lynxx-billing"]
