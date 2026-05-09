@@ -217,7 +217,10 @@ impl LicenseState {
         self.inner
             .active
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        tracing::error!(reason, "licence revoked — gateway is in kill-switch mode; all requests will return 402");
+        tracing::error!(
+            reason,
+            "licence revoked — gateway is in kill-switch mode; all requests will return 402"
+        );
     }
 
     fn update_tier(&self, new_tier: PlanTier) {

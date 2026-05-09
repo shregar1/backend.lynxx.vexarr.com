@@ -23,13 +23,15 @@ num_cpus = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tower = { version = "0.4", features = ["full"] }
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "5"
 jsonwebtoken = "9"
+machine-uid = "0.3"
+whoami = "1.5"
 toml = "0.8"
 thiserror = "1"
 anyhow = "1"
@@ -134,6 +136,12 @@ instant-acme = "0.7"
 # provider. Default features pull in unix-socket + http transport;
 # anything beyond that (TLS, swarm, etc.) is opt-in per call site.
 bollard = "0.17"
+quinn = "0.11.9"
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+rustls-pki-types = "1.14.1"
+bytes = "1.11.1"
+http = "1.4.0"
 
 [lib]
 name = "lynxx_gateway"
@@ -159,3 +167,4 @@ path = "src/billing/main.rs"
 tempfile = "3"
 wiremock = "0.6"
 wat = "1"
+# cache-bust: 1778248579

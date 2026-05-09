@@ -44,6 +44,6 @@ pub fn short_circuit(
     PluginError::ShortCircuit {
         status,
         headers,
-        body,
+        body: body.into(),
     }
 }

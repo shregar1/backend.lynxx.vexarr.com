@@ -6,6 +6,7 @@ use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
+use axum::body::Body;
 
 /// Distributed rate limit backed by Redis. Uses a per-second sliding bucket
 /// keyed by `<namespace>:<key>:<unix_secs>` with INCR + EXPIRE. Falls back
@@ -77,7 +78,7 @@ impl RedisRateLimitPlugin {
         Ok(conn)
     }
 
-    fn extract_key(&self, req: &Request<axum::body::Body>) -> String {
+    fn extract_key(&self, req: &Request<Body>) -> String {
         match self.key_strategy {
             KeyStrategy::Ip => req
                 .headers()
@@ -109,7 +110,7 @@ impl Plugin for RedisRateLimitPlugin {
         "redis-rate-limit"
     }
 
-    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<Body>) -> Result<(), PluginError> {
         let bucket = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -145,7 +146,7 @@ impl Plugin for RedisRateLimitPlugin {
                     ("Retry-After".into(), "1".into()),
                     ("Content-Type".into(), "application/json".into()),
                 ],
-                body: br#"{"error":"rate limit exceeded"}"#.to_vec(),
+                body: br#"{"error":"rate limit exceeded"}"#.to_vec().into(),
             });
         }
         Ok(())

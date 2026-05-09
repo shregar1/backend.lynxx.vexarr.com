@@ -1,6 +1,8 @@
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
+use axum::body::Body;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, thiserror::Error)]
 pub enum GatewayError {
@@ -68,8 +70,41 @@ pub enum PluginError {
     ShortCircuit {
         status: u16,
         headers: Vec<(String, String)>,
-        body: Vec<u8>,
+        /// Response body. Wrapped in a Sync container because anyhow requires Sync.
+        body: SyncBody,
     },
+}
+
+/// A wrapper around axum::body::Body that implements Sync by using a Mutex.
+/// This is a "take-once" container.
+pub struct SyncBody(Arc<Mutex<Option<Body>>>);
+
+impl SyncBody {
+    pub fn new(body: Body) -> Self {
+        Self(Arc::new(Mutex::new(Some(body))))
+    }
+
+    pub fn take(&self) -> Option<Body> {
+        self.0.lock().ok()?.take()
+    }
+}
+
+impl From<Body> for SyncBody {
+    fn from(body: Body) -> Self {
+        Self::new(body)
+    }
+}
+
+impl From<Vec<u8>> for SyncBody {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::new(Body::from(bytes))
+    }
+}
+
+impl std::fmt::Debug for SyncBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncBody").finish()
+    }
 }
 
 impl IntoResponse for GatewayError {
@@ -80,16 +115,16 @@ impl IntoResponse for GatewayError {
             status,
             headers,
             body,
-        }) = &self
+        }) = self
         {
             let status_code =
-                StatusCode::from_u16(*status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let mut response = Response::new(axum::body::Body::from(body.clone()));
+                StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let mut response = Response::new(body.take().unwrap_or_else(Body::empty));
             *response.status_mut() = status_code;
             for (k, v) in headers {
                 if let (Ok(name), Ok(value)) = (
                     axum::http::HeaderName::from_bytes(k.as_bytes()),
-                    HeaderValue::from_str(v),
+                    HeaderValue::from_str(&v),
                 ) {
                     response.headers_mut().append(name, value);
                 }
@@ -138,7 +173,14 @@ impl IntoResponse for GatewayError {
 }
 
 impl From<PluginError> for GatewayError {
-    fn from(e: PluginError) -> Self {
-        GatewayError::PluginError(e)
+    fn from(err: PluginError) -> Self {
+        GatewayError::PluginError(err)
     }
 }
+
+impl From<anyhow::Error> for GatewayError {
+    fn from(err: anyhow::Error) -> Self {
+        GatewayError::Internal(err.to_string())
+    }
+}
+

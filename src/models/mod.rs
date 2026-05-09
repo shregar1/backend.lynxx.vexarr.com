@@ -100,8 +100,42 @@ pub struct Target {
     pub url: String,
     pub weight: u32,
     pub enabled: bool,
+    #[serde(default)]
+    pub zone: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceFingerprint {
+    pub id: Uuid,
+    pub customer_id: i64,
+    pub hardware_id: String,
+    pub name: Option<String>,
+    pub os_info: Option<String>,
+    pub is_blocked: bool,
+    pub last_seen_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeGrant {
+    pub id: Uuid,
+    pub customer_id: i64,
+    pub device_id: Option<Uuid>,
+    pub token_id: String,
+    pub expires_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub last_heartbeat_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyRow {
+    pub id: i64,
+    pub customer_id: i64,
+    pub name: String,
+    pub key_hash: String,
+    pub key_prefix: String,
+    pub scopes: Vec<String>,
 }
 
 impl Target {
@@ -113,6 +147,7 @@ impl Target {
             url,
             weight: weight.max(1),
             enabled: true,
+            zone: None,
             created_at: now,
             updated_at: now,
         }

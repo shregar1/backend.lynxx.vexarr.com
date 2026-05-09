@@ -17,6 +17,7 @@
 //! `expires_at` and drop it if stale.
 
 use dashmap::DashMap;
+use reqwest::Client;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -34,14 +35,26 @@ pub struct ResponseCache {
     store: DashMap<String, CacheEntry>,
     ttl: Duration,
     enabled: bool,
+    strategy: String,
+    reusex_url: Option<String>,
+    reusex_api_key: Option<String>,
+    http: Client,
 }
 
 impl ResponseCache {
-    pub fn new(enabled: bool, ttl_seconds: u64) -> Arc<Self> {
+    pub fn new(enabled: bool,
+    strategy: String,
+    reusex_url: Option<String>,
+    reusex_api_key: Option<String>,
+    _http: Client, ttl_seconds: u64) -> Arc<Self> {
         Arc::new(Self {
             store: DashMap::new(),
             ttl: Duration::from_secs(ttl_seconds.max(1)),
             enabled,
+            strategy,
+            reusex_url,
+            reusex_api_key,
+            http: Client::new(),
         })
     }
 
@@ -93,6 +106,67 @@ impl ResponseCache {
             self.store.remove(key);
             None
         }
+    }
+
+
+    pub async fn get_semantic(&self, model: &str, body: &Value) -> Option<CacheEntry> {
+        if !self.enabled || self.strategy != "semantic" {
+            return None;
+        }
+        let url = self.reusex_url.as_ref()?;
+        let messages = body.get("messages")?;
+        let prompt = messages.as_array()?.last()?.get("content")?.as_str()?;
+
+        let lookup_url = format!("{}/v1/cache/lookup", url.trim_end_matches("/"));
+        let req_body = serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "similarityThreshold": 0.9,
+        });
+
+        let mut req = self.http.post(&lookup_url).json(&req_body);
+        if let Some(key) = &self.reusex_api_key {
+            req = req.header("authorization", format!("Bearer {}", key));
+        }
+
+        let resp = req.send().await.ok()?;
+        if resp.status() == 200 {
+            let data: Value = resp.json().await.ok()?;
+            if data["hit"].as_bool().unwrap_or(false) {
+                let payload = data["payload"].clone();
+                return Some(CacheEntry {
+                    status: 200,
+                    headers: vec![("x-lynxx-llm-cache".into(), "hit_semantic".into())],
+                    body: serde_json::to_vec(&payload).unwrap_or_default(),
+                    expires_at: Instant::now() + self.ttl,
+                });
+            }
+        }
+        None
+    }
+
+    pub async fn put_semantic(&self, model: &str, body: &Value, response_body: &[u8]) {
+        if !self.enabled || self.strategy != "semantic" {
+            return;
+        }
+        let url = self.reusex_url.as_ref().unwrap();
+        let messages = body.get("messages").unwrap();
+        let prompt = messages.as_array().unwrap().last().unwrap().get("content").unwrap().as_str().unwrap();
+
+        let store_url = format!("{}/v1/cache/store", url.trim_end_matches("/"));
+        let payload: Value = serde_json::from_slice(response_body).unwrap_or(Value::Null);
+        let req_body = serde_json::json!({
+            "model": model,
+            "prompt": prompt,
+            "payload": payload,
+            "ttlSeconds": self.ttl.as_secs(),
+        });
+
+        let mut req = self.http.post(&store_url).json(&req_body);
+        if let Some(key) = &self.reusex_api_key {
+            req = req.header("authorization", format!("Bearer {}", key));
+        }
+        let _ = req.send().await;
     }
 
     pub fn put(&self, key: String, status: u16, headers: Vec<(String, String)>, body: Vec<u8>) {

@@ -181,9 +181,8 @@ impl AcmeManager {
         let cert_pem = std::fs::read(&cert_path).map_err(|e| {
             GatewayError::Internal(format!("read cert {}: {e}", cert_path.display()))
         })?;
-        let key_pem = std::fs::read(&key_path).map_err(|e| {
-            GatewayError::Internal(format!("read key {}: {e}", key_path.display()))
-        })?;
+        let key_pem = std::fs::read(&key_path)
+            .map_err(|e| GatewayError::Internal(format!("read key {}: {e}", key_path.display())))?;
         let production_key = Arc::new(certified_key_from_pem(&cert_pem, &key_pem)?);
 
         let lookup_map = Arc::clone(&self.tls_alpn_challenges);
@@ -295,8 +294,7 @@ impl AcmeManager {
     ) -> Result<(), GatewayError> {
         let cert = build_challenge_cert(&domain, &key_authorization)?;
         tracing::debug!(domain = %domain, "TLS-ALPN-01 challenge registered");
-        self.tls_alpn_challenges
-            .insert(domain, Arc::new(cert));
+        self.tls_alpn_challenges.insert(domain, Arc::new(cert));
         Ok(())
     }
 
@@ -425,10 +423,8 @@ impl AcmeManager {
             let data = std::fs::read(&account_path).map_err(|e| {
                 GatewayError::Internal(format!("read account {}: {e}", account_path.display()))
             })?;
-            let creds: instant_acme::AccountCredentials =
-                serde_json::from_slice(&data).map_err(|e| {
-                    GatewayError::Internal(format!("parse account.json: {e}"))
-                })?;
+            let creds: instant_acme::AccountCredentials = serde_json::from_slice(&data)
+                .map_err(|e| GatewayError::Internal(format!("parse account.json: {e}")))?;
             let account = instant_acme::Account::from_credentials(creds)
                 .await
                 .map_err(|e| GatewayError::Internal(format!("restore ACME account: {e}")))?;
@@ -463,9 +459,8 @@ impl AcmeManager {
         .map_err(|e| GatewayError::Internal(format!("create ACME account: {e}")))?;
 
         // Persist to disk.
-        let json = serde_json::to_vec_pretty(&credentials).map_err(|e| {
-            GatewayError::Internal(format!("serialize account credentials: {e}"))
-        })?;
+        let json = serde_json::to_vec_pretty(&credentials)
+            .map_err(|e| GatewayError::Internal(format!("serialize account credentials: {e}")))?;
 
         if let Some(parent) = account_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -478,10 +473,7 @@ impl AcmeManager {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(
-                &account_path,
-                std::fs::Permissions::from_mode(0o600),
-            );
+            let _ = std::fs::set_permissions(&account_path, std::fs::Permissions::from_mode(0o600));
         }
 
         tracing::info!(
@@ -693,10 +685,7 @@ impl AcmeManager {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(
-                    &key_path,
-                    std::fs::Permissions::from_mode(0o600),
-                );
+                let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
             }
 
             tracing::info!(
@@ -774,8 +763,7 @@ impl AcmeManager {
         tokio::spawn(async move {
             // Short initial delay to let the server finish booting.
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(12 * 3600));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(12 * 3600));
             loop {
                 interval.tick().await;
                 if let Err(e) = manager.check_and_renew().await {
@@ -808,19 +796,15 @@ impl AcmeManager {
         let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
             rustls_pemfile::certs(&mut cursor)
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| {
-                    GatewayError::Internal(format!("parse cert for renewal: {e}"))
-                })?;
+                .map_err(|e| GatewayError::Internal(format!("parse cert for renewal: {e}")))?;
 
         if certs.is_empty() {
             tracing::info!("cert file empty; requesting new certificate");
             return self.request_certificate().await;
         }
 
-        let (_, parsed) =
-            x509_parser::parse_x509_certificate(certs[0].as_ref()).map_err(|e| {
-                GatewayError::Internal(format!("parse x509 for expiry: {e}"))
-            })?;
+        let (_, parsed) = x509_parser::parse_x509_certificate(certs[0].as_ref())
+            .map_err(|e| GatewayError::Internal(format!("parse x509 for expiry: {e}")))?;
 
         let not_after = parsed.validity().not_after.timestamp();
         let now = chrono::Utc::now().timestamp();
@@ -839,10 +823,7 @@ impl AcmeManager {
             );
             self.request_certificate().await
         } else {
-            tracing::info!(
-                days_remaining,
-                "cert is still valid, no renewal needed"
-            );
+            tracing::info!(days_remaining, "cert is still valid, no renewal needed");
             Ok(())
         }
     }

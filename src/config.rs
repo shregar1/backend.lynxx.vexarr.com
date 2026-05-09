@@ -96,6 +96,11 @@ pub struct GatewaySettings {
     /// `"enterprise"` (∞). Defaults to `"free"` when not set.
     #[serde(default = "default_plan_tier")]
     pub plan_tier: String,
+
+    /// Local zone/region identifier for locality-aware load balancing.
+    /// When set, the load balancer prioritizes targets in the same zone.
+    #[serde(default)]
+    pub local_zone: Option<String>,
 }
 
 /// ACME / automatic certificate provisioning settings. When
@@ -307,6 +312,7 @@ fn default_gateway() -> GatewaySettings {
         auth_required: false,
         recordings_directory: None,
         plan_tier: default_plan_tier(),
+        local_zone: None,
     }
 }
 

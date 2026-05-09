@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use axum::http::header::{HeaderName, HeaderValue};
 use axum::http::{Request, Response};
 use http_body_util::BodyExt;
-use hyper::body::Bytes;
+use axum::body::Body;
 
 pub struct ResponseTransformerPlugin {
     add: Vec<(HeaderName, HeaderValue)>,
@@ -60,7 +60,7 @@ impl Plugin for ResponseTransformerPlugin {
         "response-transformer"
     }
 
-    async fn on_request(&self, _req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
+    async fn on_request(&self, _req: &mut Request<Body>) -> Result<(), PluginError> {
         Ok(())
     }
 
@@ -73,15 +73,15 @@ impl Plugin for ResponseTransformerPlugin {
             return Ok(());
         }
 
-        // Drain the Full<Bytes> body so we can parse/mutate it, then restore.
-        let body = std::mem::replace(resp.body_mut(), http_body_util::Full::new(Bytes::new()));
+        // Drain the body so we can parse/mutate it, then restore.
+        let body = std::mem::replace(resp.body_mut(), Body::empty());
         let bytes = match body.collect().await {
             Ok(c) => c.to_bytes(),
             Err(_) => return Ok(()),
         };
 
         if bytes.is_empty() {
-            *resp.body_mut() = http_body_util::Full::new(bytes);
+            *resp.body_mut() = Body::from(bytes);
             return Ok(());
         }
 
@@ -89,7 +89,7 @@ impl Plugin for ResponseTransformerPlugin {
         let mut parsed: serde_json::Value = match serde_json::from_slice(&bytes) {
             Ok(v) => v,
             Err(_) => {
-                *resp.body_mut() = http_body_util::Full::new(bytes);
+                *resp.body_mut() = Body::from(bytes);
                 return Ok(());
             }
         };
@@ -106,7 +106,7 @@ impl Plugin for ResponseTransformerPlugin {
 
         let new_bytes = serde_json::to_vec(&parsed)
             .map_err(|e| PluginError::Internal(format!("json serialize: {e}")))?;
-        *resp.body_mut() = http_body_util::Full::new(Bytes::from(new_bytes));
+        *resp.body_mut() = Body::from(new_bytes);
         Ok(())
     }
 }

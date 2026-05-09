@@ -150,19 +150,11 @@ impl DockerProvider {
             || config.endpoint.starts_with("http://")
             || config.endpoint.starts_with("https://")
         {
-            Docker::connect_with_http(
-                &config.endpoint,
-                4,
-                bollard::API_DEFAULT_VERSION,
-            )
+            Docker::connect_with_http(&config.endpoint, 4, bollard::API_DEFAULT_VERSION)
         } else {
             // Treat anything else (unix:///, npipe:////) as a local
             // socket path; bollard handles the platform routing.
-            Docker::connect_with_local(
-                &config.endpoint,
-                120,
-                bollard::API_DEFAULT_VERSION,
-            )
+            Docker::connect_with_local(&config.endpoint, 120, bollard::API_DEFAULT_VERSION)
         }
         .map_err(|e| GatewayError::Internal(format!("docker connect: {e}")))?;
 
@@ -360,20 +352,22 @@ impl DockerProvider {
             }
         }
 
-        let upstream = parsed
-            .upstream_url
-            .or(derived_upstream)
-            .ok_or_else(|| GatewayError::ConfigError(format!(
+        let upstream = parsed.upstream_url.or(derived_upstream).ok_or_else(|| {
+            GatewayError::ConfigError(format!(
                 "container {container_id} has lynxx.enable=true but no \
                  lynxx.service.url and no published port to derive from"
-            )))?;
+            ))
+        })?;
 
         let now = Utc::now();
         let mut owned = self.owned.lock().await;
 
         let (service_id, route_id) = match owned.get(container_id) {
             Some(existing) => (existing.service_id, existing.route_id),
-            None => (deterministic_uuid(container_id, "service"), deterministic_uuid(container_id, "route")),
+            None => (
+                deterministic_uuid(container_id, "service"),
+                deterministic_uuid(container_id, "route"),
+            ),
         };
 
         let service = Service {
@@ -657,7 +651,10 @@ mod tests {
         let l = labels(&[("lynxx.service.url", "http://x:1")]);
         assert!(parse_labels(&l, false).is_none());
 
-        let l = labels(&[("lynxx.enable", "true"), ("lynxx.service.url", "http://x:1")]);
+        let l = labels(&[
+            ("lynxx.enable", "true"),
+            ("lynxx.service.url", "http://x:1"),
+        ]);
         let p = parse_labels(&l, false).unwrap();
         assert_eq!(p.upstream_url.as_deref(), Some("http://x:1"));
     }
@@ -669,7 +666,10 @@ mod tests {
         assert_eq!(p.upstream_url.as_deref(), Some("http://x:1"));
 
         // explicit false still wins
-        let l = labels(&[("lynxx.enable", "false"), ("lynxx.service.url", "http://x:1")]);
+        let l = labels(&[
+            ("lynxx.enable", "false"),
+            ("lynxx.service.url", "http://x:1"),
+        ]);
         assert!(parse_labels(&l, true).is_none());
     }
 
@@ -692,7 +692,10 @@ mod tests {
 
     #[test]
     fn parse_labels_default_path_root() {
-        let l = labels(&[("lynxx.enable", "true"), ("lynxx.service.url", "http://x:1")]);
+        let l = labels(&[
+            ("lynxx.enable", "true"),
+            ("lynxx.service.url", "http://x:1"),
+        ]);
         let p = parse_labels(&l, false).unwrap();
         assert_eq!(p.paths, vec!["/"]);
     }

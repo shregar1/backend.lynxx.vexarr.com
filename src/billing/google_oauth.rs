@@ -150,10 +150,7 @@ async fn fetch_jwks() -> Result<JwkSet> {
         .map_err(|e| anyhow!("jwks fetch: {e}"))?
         .error_for_status()
         .map_err(|e| anyhow!("jwks status: {e}"))?;
-    let jwks: JwkSet = resp
-        .json()
-        .await
-        .map_err(|e| anyhow!("jwks parse: {e}"))?;
+    let jwks: JwkSet = resp.json().await.map_err(|e| anyhow!("jwks parse: {e}"))?;
     Ok(jwks)
 }
 

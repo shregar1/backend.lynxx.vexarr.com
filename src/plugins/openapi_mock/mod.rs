@@ -183,7 +183,9 @@ impl Plugin for OpenApiMockPlugin {
                     Err(PluginError::ShortCircuit {
                         status: 501,
                         headers: vec![("content-type".into(), "application/json".into())],
-                        body: br#"{"error":"openapi-mock: no operation in spec matches this request"}"#.to_vec(),
+                        body: br#"{"error":"openapi-mock: no operation in spec matches this request"}"#
+                            .to_vec()
+                            .into(),
                     })
                 }
             }
@@ -198,7 +200,9 @@ impl Plugin for OpenApiMockPlugin {
                     Err(PluginError::ShortCircuit {
                         status: 501,
                         headers: vec![("content-type".into(), "application/json".into())],
-                        body: br#"{"error":"openapi-mock: matched operation has no example response"}"#.to_vec(),
+                        body: br#"{"error":"openapi-mock: matched operation has no example response"}"#
+                            .to_vec()
+                            .into(),
                     })
                 }
             }
@@ -211,7 +215,7 @@ impl Plugin for OpenApiMockPlugin {
         Err(PluginError::ShortCircuit {
             status,
             headers: vec![("content-type".into(), content_type)],
-            body,
+            body: body.into(),
         })
     }
 

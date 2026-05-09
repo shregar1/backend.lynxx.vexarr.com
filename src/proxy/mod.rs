@@ -1,5 +1,6 @@
 pub mod acme;
 pub mod grpc;
+pub mod h3;
 pub mod handler;
 pub mod http_client;
 pub mod loadbalancer;

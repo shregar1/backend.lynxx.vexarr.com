@@ -226,7 +226,7 @@ async fn async_main() -> anyhow::Result<()> {
         "loaded persisted state"
     );
 
-    let plugin_exec = Arc::new(PluginExecutor::new());
+    let plugin_exec = Arc::new(PluginExecutor::new(license.tier));
     plugin_exec.rebuild(&repo).await?;
     tracing::info!("plugin executor ready");
 
@@ -317,6 +317,7 @@ async fn async_main() -> anyhow::Result<()> {
         lb: lb.clone(),
         quota: quota.clone(),
         license: license_state.clone(),
+        local_zone: None,
     };
 
     // Background connection pre-warmer. Keeps the upstream pool hot so
@@ -508,6 +509,8 @@ async fn async_main() -> anyhow::Result<()> {
     let admin_addr = format!("0.0.0.0:{}", config.gateway.admin_port);
 
     let admin_listener = TcpListener::bind(&admin_addr).await?;
+    tracing::info!(addr = %admin_addr, "admin API listening");
+    tracing::info!("Dashboard available at http://localhost:{}", config.gateway.admin_port);
     tracing::info!("admin listening on {admin_addr}");
 
     // Branch on TLS termination. Plain HTTP keeps the existing axum::serve

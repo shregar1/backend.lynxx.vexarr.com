@@ -69,7 +69,7 @@ pub fn build_server_config(settings: &TlsSettings) -> Result<ServerConfig, Gatew
 
     // Match what axum/hyper would advertise. Order matters — h2 first so
     // ALPN-aware clients pick HTTP/2 when both are acceptable.
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.alpn_protocols = vec![b"h3".to_vec(), b"h2".to_vec(), b"http/1.1".to_vec()];
 
     if settings.mtls_enabled() {
         tracing::info!(

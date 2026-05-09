@@ -130,7 +130,7 @@ impl Repository for PostgresRepository {
 
     async fn list_targets(&self) -> Result<Vec<Target>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, service_id, url, weight, enabled, created_at, updated_at FROM targets",
+            "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at FROM targets",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -142,7 +142,7 @@ impl Repository for PostgresRepository {
         service_id: &Uuid,
     ) -> Result<Vec<Target>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, service_id, url, weight, enabled, created_at, updated_at \
+            "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at \
              FROM targets WHERE service_id = $1",
         )
         .bind(service_id)
@@ -153,7 +153,7 @@ impl Repository for PostgresRepository {
 
     async fn get_target(&self, id: &Uuid) -> Result<Option<Target>, GatewayError> {
         let row = sqlx::query(
-            "SELECT id, service_id, url, weight, enabled, created_at, updated_at \
+            "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at \
              FROM targets WHERE id = $1",
         )
         .bind(id)
@@ -164,14 +164,15 @@ impl Repository for PostgresRepository {
 
     async fn create_target(&self, target: &Target) -> Result<(), GatewayError> {
         sqlx::query(
-            "INSERT INTO targets (id, service_id, url, weight, enabled, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO targets (id, service_id, url, weight, enabled, zone, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(target.id)
         .bind(target.service_id)
         .bind(&target.url)
         .bind(target.weight as i64)
         .bind(target.enabled)
+        .bind(&target.zone)
         .bind(target.created_at)
         .bind(target.updated_at)
         .execute(&self.pool)
@@ -181,11 +182,12 @@ impl Repository for PostgresRepository {
 
     async fn update_target(&self, id: &Uuid, target: &Target) -> Result<(), GatewayError> {
         sqlx::query(
-            "UPDATE targets SET url = $1, weight = $2, enabled = $3, updated_at = $4 WHERE id = $5",
+            "UPDATE targets SET url = $1, weight = $2, enabled = $3, zone = $4, updated_at = $5 WHERE id = $6",
         )
         .bind(&target.url)
         .bind(target.weight as i64)
         .bind(target.enabled)
+        .bind(&target.zone)
         .bind(target.updated_at)
         .bind(id)
         .execute(&self.pool)
@@ -751,6 +753,131 @@ impl Repository for PostgresRepository {
         Ok(result.rows_affected())
     }
 
+    // ---------- commercial zero-trust ----------
+
+    async fn get_device_fingerprint(
+        &self,
+        customer_id: i64,
+        hardware_id: &str,
+    ) -> Result<Option<crate::models::DeviceFingerprint>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, customer_id, hardware_id, name, os_info, is_blocked, last_seen_at \
+             FROM device_fingerprints WHERE customer_id = $1 AND hardware_id = $2",
+        )
+        .bind(customer_id)
+        .bind(hardware_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(row_to_device_fingerprint).transpose()
+    }
+
+    async fn create_device_fingerprint(
+        &self,
+        device: &crate::models::DeviceFingerprint,
+    ) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO device_fingerprints (id, customer_id, hardware_id, name, os_info, is_blocked, last_seen_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(device.id)
+        .bind(device.customer_id)
+        .bind(&device.hardware_id)
+        .bind(device.name.as_deref())
+        .bind(device.os_info.as_deref())
+        .bind(device.is_blocked)
+        .bind(device.last_seen_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn update_device_last_seen(
+        &self,
+        id: &Uuid,
+        ts: DateTime<Utc>,
+    ) -> Result<(), GatewayError> {
+        sqlx::query("UPDATE device_fingerprints SET last_seen_at = $1 WHERE id = $2")
+            .bind(ts)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn create_runtime_grant(
+        &self,
+        grant: &crate::models::RuntimeGrant,
+    ) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO runtime_grants (id, customer_id, device_id, token_id, expires_at, revoked_at, last_heartbeat_at, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(grant.id)
+        .bind(grant.customer_id)
+        .bind(grant.device_id)
+        .bind(&grant.token_id)
+        .bind(grant.expires_at)
+        .bind(grant.revoked_at)
+        .bind(grant.last_heartbeat_at)
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_runtime_grant_by_token_id(
+        &self,
+        token_id: &str,
+    ) -> Result<Option<crate::models::RuntimeGrant>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, customer_id, device_id, token_id, expires_at, revoked_at, last_heartbeat_at \
+             FROM runtime_grants WHERE token_id = $1",
+        )
+        .bind(token_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(row_to_runtime_grant).transpose()
+    }
+
+    async fn update_grant_heartbeat(
+        &self,
+        token_id: &str,
+        ts: DateTime<Utc>,
+    ) -> Result<(), GatewayError> {
+        sqlx::query("UPDATE runtime_grants SET last_heartbeat_at = $1 WHERE token_id = $2")
+            .bind(ts)
+            .bind(token_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn revoke_grant(&self, token_id: &str) -> Result<bool, GatewayError> {
+        let result = sqlx::query("UPDATE runtime_grants SET revoked_at = $1 WHERE token_id = $2 AND revoked_at IS NULL")
+            .bind(Utc::now())
+            .bind(token_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn get_api_key_by_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Option<crate::models::ApiKeyRow>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, customer_id, name, key_hash, key_prefix, scopes \
+             FROM api_keys WHERE key_prefix = $1 AND is_deleted = FALSE",
+        )
+        .bind(prefix)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(row_to_api_key_row).transpose()
+    }
+
     // ---------- quota ----------
 
     async fn get_quota_usage(&self, period: &str) -> Result<Option<(u64, u64)>, GatewayError> {
@@ -839,6 +966,7 @@ fn row_to_target(row: sqlx::postgres::PgRow) -> Result<Target, GatewayError> {
     let service_id: Uuid = row.try_get("service_id")?;
     let weight: i64 = row.try_get("weight")?;
     let enabled: bool = row.try_get("enabled")?;
+    let zone: Option<String> = row.try_get("zone").ok();
     let created_at: DateTime<Utc> = row.try_get("created_at")?;
     let updated_at: DateTime<Utc> = row.try_get("updated_at")?;
 
@@ -848,6 +976,7 @@ fn row_to_target(row: sqlx::postgres::PgRow) -> Result<Target, GatewayError> {
         url: row.try_get("url")?,
         weight: weight as u32,
         enabled,
+        zone,
         created_at,
         updated_at,
     })
@@ -977,5 +1106,63 @@ fn row_to_consumer(row: sqlx::postgres::PgRow) -> Result<Consumer, GatewayError>
         api_key,
         created_at,
         updated_at,
+    })
+}
+
+fn row_to_device_fingerprint(row: sqlx::postgres::PgRow) -> Result<crate::models::DeviceFingerprint, GatewayError> {
+    let id: Uuid = row.try_get("id")?;
+    let customer_id: i64 = row.try_get("customer_id")?;
+    let hardware_id: String = row.try_get("hardware_id")?;
+    let name: Option<String> = row.try_get("name")?;
+    let os_info: Option<String> = row.try_get("os_info")?;
+    let is_blocked: bool = row.try_get("is_blocked")?;
+    let last_seen_at: DateTime<Utc> = row.try_get("last_seen_at")?;
+
+    Ok(crate::models::DeviceFingerprint {
+        id,
+        customer_id,
+        hardware_id,
+        name,
+        os_info,
+        is_blocked,
+        last_seen_at,
+    })
+}
+
+fn row_to_runtime_grant(row: sqlx::postgres::PgRow) -> Result<crate::models::RuntimeGrant, GatewayError> {
+    let id: Uuid = row.try_get("id")?;
+    let customer_id: i64 = row.try_get("customer_id")?;
+    let device_id: Option<Uuid> = row.try_get("device_id")?;
+    let token_id: String = row.try_get("token_id")?;
+    let expires_at: DateTime<Utc> = row.try_get("expires_at")?;
+    let revoked_at: Option<DateTime<Utc>> = row.try_get("revoked_at")?;
+    let last_heartbeat_at: DateTime<Utc> = row.try_get("last_heartbeat_at")?;
+
+    Ok(crate::models::RuntimeGrant {
+        id,
+        customer_id,
+        device_id,
+        token_id,
+        expires_at,
+        revoked_at,
+        last_heartbeat_at,
+    })
+}
+
+fn row_to_api_key_row(row: sqlx::postgres::PgRow) -> Result<crate::models::ApiKeyRow, GatewayError> {
+    let id: i64 = row.try_get("id")?;
+    let customer_id: i64 = row.try_get("customer_id")?;
+    let name: String = row.try_get("name")?;
+    let key_hash: String = row.try_get("key_hash")?;
+    let key_prefix: String = row.try_get("key_prefix")?;
+    let scopes: Vec<String> = row.try_get("scopes")?;
+
+    Ok(crate::models::ApiKeyRow {
+        id,
+        customer_id,
+        name,
+        key_hash,
+        key_prefix,
+        scopes,
     })
 }

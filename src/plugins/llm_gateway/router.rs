@@ -37,6 +37,8 @@ impl Router {
             if by_name.contains_key(&p.name) {
                 return Err(format!("llm-gateway: duplicate provider name `{}`", p.name));
             }
+            // Validate that we can resolve a URL.
+            p.resolved_base_url()?;
             by_name.insert(p.name.clone(), p.clone());
         }
 
@@ -126,5 +128,9 @@ impl Router {
             }
         }
         out
+    }
+
+    pub fn get_provider(&self, name: &str) -> Option<ProviderCfg> {
+        self.by_name.get(name).cloned()
     }
 }

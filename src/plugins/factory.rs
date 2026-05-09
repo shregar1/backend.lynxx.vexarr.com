@@ -75,7 +75,7 @@ pub fn build(
         "request-termination" => Arc::new(RequestTerminationPlugin::from_config(config)?),
         "oauth2-introspect" => Arc::new(Oauth2IntrospectPlugin::from_config(config, repo)?),
         "hmac-auth" => Arc::new(HmacAuthPlugin::from_config(config, repo)?),
-        "acl" => Arc::new(AclPlugin::from_config(config, repo)?),
+        "acl" => Arc::new(AclPlugin::from_config(config)?),
         "request-validator" => Arc::new(RequestValidatorPlugin::from_config(config, repo)?),
         "session" => Arc::new(SessionPlugin::from_config(config, repo)?),
         "statsd" => Arc::new(StatsdPlugin::from_config(config)?),

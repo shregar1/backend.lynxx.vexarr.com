@@ -29,6 +29,7 @@ use dashmap::DashMap;
 use http_body_util::BodyExt;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
+use axum::body::Body;
 
 /// Header used to thread the pending capture id from request to response.
 const HDR_CAPTURE_ID: &str = "x-lynxx-recorder-id";
@@ -99,7 +100,7 @@ impl Plugin for RequestRecorderPlugin {
         "request-recorder"
     }
 
-    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<Body>) -> Result<(), PluginError> {
         // Sampling decision is made up front; if we're not capturing this
         // request we don't touch the body at all.
         if rand::random::<f64>() >= self.cfg.sample_rate {
@@ -117,14 +118,14 @@ impl Plugin for RequestRecorderPlugin {
         // Drain the request body so we can both record it and rebuild the
         // request for downstream consumers.
         let (parts, body) =
-            std::mem::replace(req, Request::new(axum::body::Body::empty())).into_parts();
+            std::mem::replace(req, Request::new(Body::empty())).into_parts();
         let body_bytes = match body.collect().await {
             Ok(c) => c.to_bytes(),
             Err(e) => {
                 tracing::debug!(error = %e, "request-recorder: collect req body");
                 // Reassemble with empty body — we lost the original. Better
                 // than panicking the request.
-                *req = Request::from_parts(parts, axum::body::Body::empty());
+                *req = Request::from_parts(parts, Body::empty());
                 return Ok(());
             }
         };
@@ -159,15 +160,12 @@ impl Plugin for RequestRecorderPlugin {
             .get("x-consumer-username")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let (mc_service, mc_route, mc_upstream, mc_consumer) = match match_ctx {
-            Some(c) => (
-                Some(c.service_id),
-                Some(c.route_id),
-                c.upstream_url,
-                c.consumer_username.or(consumer_from_header),
-            ),
-            None => (None, None, String::new(), consumer_from_header),
-        };
+        let (mc_service, mc_route, mc_upstream, mc_consumer) = match_ctx.map(|c| (
+            Some(c.service_id),
+            Some(c.route_id),
+            c.upstream_url,
+            c.consumer_username.or(consumer_from_header.clone()),
+        )).unwrap_or((None, None, String::new(), consumer_from_header));
 
         let pending_capture = PendingCapture {
             method: parts.method.as_str().to_string(),
@@ -193,7 +191,7 @@ impl Plugin for RequestRecorderPlugin {
 
         // Reassemble request with the buffered body so downstream consumers
         // still see it.
-        let mut req_rebuilt = Request::from_parts(parts, axum::body::Body::from(body_bytes));
+        let mut req_rebuilt = Request::from_parts(parts, Body::from(body_bytes));
         if let Ok(v) = HeaderValue::from_str(&capture_id) {
             req_rebuilt.headers_mut().insert(HDR_CAPTURE_ID, v);
         }
@@ -225,16 +223,14 @@ impl Plugin for RequestRecorderPlugin {
         }
 
         // Drain the response body so we can both record it and rebuild the
-        // response for downstream consumers. `BoxBody = Full<Bytes>` so this
-        // is a cheap clone, not a real stream.
+        // response for downstream consumers.
         let (parts, body) =
-            std::mem::replace(resp, Response::new(BoxBody::new(hyper::body::Bytes::new())))
-                .into_parts();
+            std::mem::replace(resp, Response::new(Body::empty())).into_parts();
         let body_bytes = match body.collect().await {
             Ok(c) => c.to_bytes(),
             Err(e) => {
                 tracing::debug!(error = %e, "request-recorder: collect resp body");
-                *resp = Response::from_parts(parts, BoxBody::new(hyper::body::Bytes::new()));
+                *resp = Response::from_parts(parts, Body::empty());
                 return Ok(());
             }
         };
@@ -292,7 +288,7 @@ impl Plugin for RequestRecorderPlugin {
         };
 
         // Reassemble response with the buffered body.
-        *resp = Response::from_parts(parts, BoxBody::new(hyper::body::Bytes::from(body_bytes)));
+        *resp = Response::from_parts(parts, Body::from(body_bytes));
 
         // Fire-and-forget. A full channel just drops; recording is best-effort.
         if let Err(e) = self.tx.try_send(RecordingJob {
@@ -348,247 +344,61 @@ fn spawn_retention_sweeper(repo: Arc<dyn Repository>, retention_days: u32) {
 mod tests {
     use super::*;
 
-    /// A repository test double for from_config tests. We only need
-    /// from_config to construct successfully — the real plumbing is
-    /// covered by integration tests in A3.
     struct StubRepo;
 
     #[async_trait]
     impl Repository for StubRepo {
-        async fn list_services(&self) -> Result<Vec<crate::models::Service>, GatewayError> {
-            Ok(vec![])
-        }
-        async fn get_service(
-            &self,
-            _id: &uuid::Uuid,
-        ) -> Result<Option<crate::models::Service>, GatewayError> {
-            Ok(None)
-        }
-        async fn create_service(&self, _svc: &crate::models::Service) -> Result<(), GatewayError> {
-            Ok(())
-        }
-        async fn update_service(
-            &self,
-            _id: &uuid::Uuid,
-            _svc: &crate::models::Service,
-        ) -> Result<(), GatewayError> {
-            Ok(())
-        }
-        async fn delete_service(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
-            Ok(false)
-        }
-
-        async fn list_routes(&self) -> Result<Vec<crate::models::Route>, GatewayError> {
-            Ok(vec![])
-        }
-        async fn get_route(
-            &self,
-            _id: &uuid::Uuid,
-        ) -> Result<Option<crate::models::Route>, GatewayError> {
-            Ok(None)
-        }
-        async fn create_route(&self, _route: &crate::models::Route) -> Result<(), GatewayError> {
-            Ok(())
-        }
-        async fn update_route(
-            &self,
-            _id: &uuid::Uuid,
-            _route: &crate::models::Route,
-        ) -> Result<(), GatewayError> {
-            Ok(())
-        }
-        async fn delete_route(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
-            Ok(false)
-        }
-
-        async fn list_plugins(&self) -> Result<Vec<crate::models::PluginInstance>, GatewayError> {
-            Ok(vec![])
-        }
-        async fn get_plugin(
-            &self,
-            _id: &uuid::Uuid,
-        ) -> Result<Option<crate::models::PluginInstance>, GatewayError> {
-            Ok(None)
-        }
-        async fn create_plugin(
-            &self,
-            _plugin: &crate::models::PluginInstance,
-        ) -> Result<(), GatewayError> {
-            Ok(())
-        }
-        async fn update_plugin(
-            &self,
-            _id: &uuid::Uuid,
-            _plugin: &crate::models::PluginInstance,
-        ) -> Result<(), GatewayError> {
-            Ok(())
-        }
-        async fn delete_plugin(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
-            Ok(false)
-        }
-
-        async fn list_consumers(&self) -> Result<Vec<crate::models::Consumer>, GatewayError> {
-            Ok(vec![])
-        }
-        async fn create_consumer(
-            &self,
-            _consumer: &crate::models::Consumer,
-        ) -> Result<(), GatewayError> {
-            Ok(())
-        }
-        async fn delete_consumer(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
-            Ok(false)
-        }
-
-        async fn list_targets(&self) -> Result<Vec<crate::models::Target>, GatewayError> {
-            Ok(vec![])
-        }
-        async fn list_targets_for_service(
-            &self,
-            _id: &uuid::Uuid,
-        ) -> Result<Vec<crate::models::Target>, GatewayError> {
-            Ok(vec![])
-        }
-        async fn get_target(
-            &self,
-            _id: &uuid::Uuid,
-        ) -> Result<Option<crate::models::Target>, GatewayError> {
-            Ok(None)
-        }
-        async fn create_target(&self, _t: &crate::models::Target) -> Result<(), GatewayError> {
-            Ok(())
-        }
-        async fn update_target(
-            &self,
-            _id: &uuid::Uuid,
-            _t: &crate::models::Target,
-        ) -> Result<(), GatewayError> {
-            Ok(())
-        }
-        async fn delete_target(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
-            Ok(false)
-        }
-
-        async fn is_empty(&self) -> Result<bool, GatewayError> {
-            Ok(true)
-        }
-        async fn seed_from_config(
-            &self,
-            _config: &crate::config::GatewayConfig,
-        ) -> Result<(), GatewayError> {
-            Ok(())
-        }
-
-        async fn list_admin_tokens(&self) -> Result<Vec<crate::auth::AdminToken>, GatewayError> {
-            Ok(vec![])
-        }
-        async fn get_admin_token_by_hash(
-            &self,
-            _h: &str,
-        ) -> Result<Option<crate::auth::AdminToken>, GatewayError> {
-            Ok(None)
-        }
-        async fn get_admin_token(
-            &self,
-            _id: &uuid::Uuid,
-        ) -> Result<Option<crate::auth::AdminToken>, GatewayError> {
-            Ok(None)
-        }
-        async fn create_admin_token(
-            &self,
-            _t: &crate::db::NewAdminToken,
-        ) -> Result<(), GatewayError> {
-            Ok(())
-        }
-        async fn update_admin_token(
-            &self,
-            _id: &uuid::Uuid,
-            _patch: &crate::db::AdminTokenPatch,
-        ) -> Result<Option<crate::auth::AdminToken>, GatewayError> {
-            Ok(None)
-        }
-        async fn delete_admin_token(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
-            Ok(false)
-        }
-        async fn update_admin_token_last_used(
-            &self,
-            _id: &uuid::Uuid,
-            _ts: chrono::DateTime<Utc>,
-        ) -> Result<(), GatewayError> {
-            Ok(())
-        }
-        async fn has_any_admin_token(&self) -> Result<bool, GatewayError> {
-            Ok(false)
-        }
-
-        async fn append_audit(
-            &self,
-            entry: &crate::audit::NewAuditEntry,
-        ) -> Result<crate::audit::AuditEntry, GatewayError> {
+        async fn list_services(&self) -> Result<Vec<crate::models::Service>, GatewayError> { Ok(vec![]) }
+        async fn get_service(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::Service>, GatewayError> { Ok(None) }
+        async fn create_service(&self, _svc: &crate::models::Service) -> Result<(), GatewayError> { Ok(()) }
+        async fn update_service(&self, _id: &uuid::Uuid, _svc: &crate::models::Service) -> Result<(), GatewayError> { Ok(()) }
+        async fn delete_service(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn list_routes(&self) -> Result<Vec<crate::models::Route>, GatewayError> { Ok(vec![]) }
+        async fn get_route(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::Route>, GatewayError> { Ok(None) }
+        async fn create_route(&self, _route: &crate::models::Route) -> Result<(), GatewayError> { Ok(()) }
+        async fn update_route(&self, _id: &uuid::Uuid, _route: &crate::models::Route) -> Result<(), GatewayError> { Ok(()) }
+        async fn delete_route(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn list_plugins(&self) -> Result<Vec<crate::models::PluginInstance>, GatewayError> { Ok(vec![]) }
+        async fn get_plugin(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::PluginInstance>, GatewayError> { Ok(None) }
+        async fn create_plugin(&self, _plugin: &crate::models::PluginInstance) -> Result<(), GatewayError> { Ok(()) }
+        async fn update_plugin(&self, _id: &uuid::Uuid, _plugin: &crate::models::PluginInstance) -> Result<(), GatewayError> { Ok(()) }
+        async fn delete_plugin(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn list_consumers(&self) -> Result<Vec<crate::models::Consumer>, GatewayError> { Ok(vec![]) }
+        async fn create_consumer(&self, _consumer: &crate::models::Consumer) -> Result<(), GatewayError> { Ok(()) }
+        async fn delete_consumer(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn list_targets(&self) -> Result<Vec<crate::models::Target>, GatewayError> { Ok(vec![]) }
+        async fn list_targets_for_service(&self, _id: &uuid::Uuid) -> Result<Vec<crate::models::Target>, GatewayError> { Ok(vec![]) }
+        async fn get_target(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::Target>, GatewayError> { Ok(None) }
+        async fn create_target(&self, _t: &crate::models::Target) -> Result<(), GatewayError> { Ok(()) }
+        async fn update_target(&self, _id: &uuid::Uuid, _t: &crate::models::Target) -> Result<(), GatewayError> { Ok(()) }
+        async fn delete_target(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn is_empty(&self) -> Result<bool, GatewayError> { Ok(true) }
+        async fn seed_from_config(&self, _config: &crate::config::GatewayConfig) -> Result<(), GatewayError> { Ok(()) }
+        async fn list_admin_tokens(&self) -> Result<Vec<crate::auth::AdminToken>, GatewayError> { Ok(vec![]) }
+        async fn get_admin_token_by_hash(&self, _h: &str) -> Result<Option<crate::auth::AdminToken>, GatewayError> { Ok(None) }
+        async fn get_admin_token(&self, _id: &uuid::Uuid) -> Result<Option<crate::auth::AdminToken>, GatewayError> { Ok(None) }
+        async fn create_admin_token(&self, _t: &crate::db::NewAdminToken) -> Result<(), GatewayError> { Ok(()) }
+        async fn update_admin_token(&self, _id: &uuid::Uuid, _patch: &crate::db::AdminTokenPatch) -> Result<Option<crate::auth::AdminToken>, GatewayError> { Ok(None) }
+        async fn delete_admin_token(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn update_admin_token_last_used(&self, _id: &uuid::Uuid, _ts: chrono::DateTime<Utc>) -> Result<(), GatewayError> { Ok(()) }
+        async fn has_any_admin_token(&self) -> Result<bool, GatewayError> { Ok(false) }
+        async fn append_audit(&self, entry: &crate::audit::NewAuditEntry) -> Result<crate::audit::AuditEntry, GatewayError> {
             Ok(crate::audit::AuditEntry {
-                id: 0,
-                ts: entry.ts,
-                actor_id: entry.actor_id,
-                actor_name: entry.actor_name.clone(),
-                actor_role: entry.actor_role.clone(),
-                action: entry.action.clone(),
-                resource_type: entry.resource_type.clone(),
-                resource_id: entry.resource_id.clone(),
-                diff: entry.diff.clone(),
-                hash: String::new(),
-                prev_hash: None,
+                id: 0, ts: entry.ts, actor_id: entry.actor_id, actor_name: entry.actor_name.clone(), actor_role: entry.actor_role.clone(),
+                action: entry.action.clone(), resource_type: entry.resource_type.clone(), resource_id: entry.resource_id.clone(),
+                diff: entry.diff.clone(), hash: String::new(), prev_hash: None,
             })
         }
-        async fn list_audit(
-            &self,
-            _f: &crate::audit::AuditFilter,
-        ) -> Result<Vec<crate::audit::AuditEntry>, GatewayError> {
-            Ok(vec![])
-        }
-        async fn last_audit_hash(&self) -> Result<Option<String>, GatewayError> {
-            Ok(None)
-        }
-
-        fn cluster_bus(&self) -> Arc<dyn crate::cluster::ClusterBus> {
-            unimplemented!("test stub")
-        }
-
-        async fn get_quota_usage(&self, _period: &str) -> Result<Option<(u64, u64)>, GatewayError> {
-            Ok(None)
-        }
-        async fn upsert_quota_usage(
-            &self,
-            _period: &str,
-            _calls_total: u64,
-            _calls_rejected: u64,
-        ) -> Result<(), GatewayError> {
-            Ok(())
-        }
-
-        async fn append_recording(&self, _row: &RecordingIndexRow) -> Result<(), GatewayError> {
-            Ok(())
-        }
-        async fn list_recordings(
-            &self,
-            _f: &crate::recording::RecordingFilter,
-        ) -> Result<Vec<RecordingIndexRow>, GatewayError> {
-            Ok(vec![])
-        }
-        async fn get_recording_index(
-            &self,
-            _id: &str,
-        ) -> Result<Option<RecordingIndexRow>, GatewayError> {
-            Ok(None)
-        }
-        async fn delete_recording(&self, _id: &str) -> Result<bool, GatewayError> {
-            Ok(false)
-        }
-        async fn delete_recordings_before(
-            &self,
-            _ts: chrono::DateTime<Utc>,
-        ) -> Result<u64, GatewayError> {
-            Ok(0)
-        }
+        async fn list_audit(&self, _f: &crate::audit::AuditFilter) -> Result<Vec<crate::audit::AuditEntry>, GatewayError> { Ok(vec![]) }
+        async fn last_audit_hash(&self) -> Result<Option<String>, GatewayError> { Ok(None) }
+        fn cluster_bus(&self) -> Arc<dyn crate::cluster::ClusterBus> { unimplemented!("test stub") }
+        async fn get_quota_usage(&self, _period: &str) -> Result<Option<(u64, u64)>, GatewayError> { Ok(None) }
+        async fn upsert_quota_usage(&self, _period: &str, _calls_total: u64, _calls_rejected: u64) -> Result<(), GatewayError> { Ok(()) }
+        async fn append_recording(&self, _row: &RecordingIndexRow) -> Result<(), GatewayError> { Ok(()) }
+        async fn list_recordings(&self, _f: &crate::recording::RecordingFilter) -> Result<Vec<RecordingIndexRow>, GatewayError> { Ok(vec![]) }
+        async fn get_recording_index(&self, _id: &str) -> Result<Option<RecordingIndexRow>, GatewayError> { Ok(None) }
+        async fn delete_recording(&self, _id: &str) -> Result<bool, GatewayError> { Ok(false) }
+        async fn delete_recordings_before(&self, _ts: chrono::DateTime<Utc>) -> Result<u64, GatewayError> { Ok(0) }
     }
 
     #[tokio::test]

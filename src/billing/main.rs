@@ -26,11 +26,9 @@ async fn main() -> Result<()> {
     // filter. Without `lynxx_gateway=info` we'd silently drop every
     // `tracing::info/warn/error!` from the request handlers.
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                EnvFilter::new("lynxx_billing=info,lynxx_gateway=info,tower_http=info")
-            }),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("lynxx_billing=info,lynxx_gateway=info,tower_http=info")
+        }))
         .init();
 
     // Connection-string assembly. Two forms are supported:

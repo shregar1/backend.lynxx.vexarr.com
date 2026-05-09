@@ -2,6 +2,7 @@ use crate::error::{GatewayError, PluginError};
 use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
 use axum::http::{Request, Response};
+use axum::body::Body;
 
 /// Always short-circuit with a canned response. Useful for maintenance
 /// windows, blocking specific routes, or mocking endpoints during dev. Set
@@ -50,11 +51,11 @@ impl Plugin for RequestTerminationPlugin {
         "request-termination"
     }
 
-    async fn on_request(&self, _req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
+    async fn on_request(&self, _req: &mut Request<Body>) -> Result<(), PluginError> {
         Err(PluginError::ShortCircuit {
             status: self.status,
             headers: vec![("content-type".into(), self.content_type.clone())],
-            body: self.body.clone(),
+            body: self.body.clone().into(),
         })
     }
 

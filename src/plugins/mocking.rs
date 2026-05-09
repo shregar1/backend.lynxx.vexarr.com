@@ -2,6 +2,7 @@ use crate::error::{GatewayError, PluginError};
 use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
 use axum::http::{Request, Response};
+use axum::body::Body;
 
 /// Deterministic mock responses keyed on method + path patterns. Useful for
 /// dev environments and contract testing.
@@ -149,7 +150,7 @@ impl Plugin for MockingPlugin {
         "mocking"
     }
 
-    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<Body>) -> Result<(), PluginError> {
         let method = req.method().as_str().to_string();
         let path = req.uri().path().to_string();
         for r in &self.responses {
@@ -172,7 +173,7 @@ impl Plugin for MockingPlugin {
             return Err(PluginError::ShortCircuit {
                 status: r.status,
                 headers,
-                body: r.body.clone(),
+                body: r.body.clone().into(),
             });
         }
         match self.fallthrough {
@@ -180,7 +181,7 @@ impl Plugin for MockingPlugin {
             Fallthrough::NotFound => Err(PluginError::ShortCircuit {
                 status: 404,
                 headers: vec![("content-type".into(), "application/json".into())],
-                body: br#"{"error":"no mock matched"}"#.to_vec(),
+                body: br#"{"error":"no mock matched"}"#.to_vec().into(),
             }),
         }
     }

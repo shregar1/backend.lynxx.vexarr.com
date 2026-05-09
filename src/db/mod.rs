@@ -148,6 +148,48 @@ pub trait Repository: Send + Sync {
     /// Delete every recording row with `ts < cutoff`. Returns the number
     /// of rows removed. Used by the retention sweeper.
     async fn delete_recordings_before(&self, ts: DateTime<Utc>) -> Result<u64, GatewayError>;
+
+    // ---------- commercial zero-trust ----------
+
+    async fn get_device_fingerprint(
+        &self,
+        customer_id: i64,
+        hardware_id: &str,
+    ) -> Result<Option<crate::models::DeviceFingerprint>, GatewayError>;
+
+    async fn create_device_fingerprint(
+        &self,
+        device: &crate::models::DeviceFingerprint,
+    ) -> Result<(), GatewayError>;
+
+    async fn update_device_last_seen(
+        &self,
+        id: &Uuid,
+        ts: DateTime<Utc>,
+    ) -> Result<(), GatewayError>;
+
+    async fn create_runtime_grant(
+        &self,
+        grant: &crate::models::RuntimeGrant,
+    ) -> Result<(), GatewayError>;
+
+    async fn get_runtime_grant_by_token_id(
+        &self,
+        token_id: &str,
+    ) -> Result<Option<crate::models::RuntimeGrant>, GatewayError>;
+
+    async fn update_grant_heartbeat(
+        &self,
+        token_id: &str,
+        ts: DateTime<Utc>,
+    ) -> Result<(), GatewayError>;
+
+    async fn revoke_grant(&self, token_id: &str) -> Result<bool, GatewayError>;
+
+    async fn get_api_key_by_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Option<crate::models::ApiKeyRow>, GatewayError>;
 }
 
 /// Build the appropriate repository implementation from the configured URL.

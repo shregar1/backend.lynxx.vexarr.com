@@ -21,6 +21,7 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use routes::AdminState;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
 #[allow(clippy::too_many_arguments)]
@@ -157,7 +158,18 @@ pub fn admin_router(
         )
         .route_layer(middleware::from_fn(admin_only));
 
-    Router::new()
+
+    // ---- dashboard serving ----
+    let dashboard_path = std::path::Path::new("../node.dashboard.lynxx.dev/dist");
+    let dashboard = if dashboard_path.exists() {
+        Router::new().fallback_service(
+            ServeDir::new(dashboard_path).not_found_service(ServeFile::new(dashboard_path.join("index.html")))
+        )
+    } else {
+        Router::new()
+    };
+
+    dashboard
         .merge(reads)
         .merge(mutations)
         .merge(tokens)

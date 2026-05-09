@@ -1,7 +1,7 @@
 use crate::error::GatewayError;
 use crate::health::HealthRegistry;
 use crate::metrics as gw_metrics;
-use crate::plugins::{BoxBody, PluginExecutor};
+use crate::plugins::PluginExecutor;
 use crate::proxy::grpc::{handle_grpc, GrpcClient};
 use crate::proxy::http_client::{HttpProxyClient, ProxyClientPool};
 use crate::proxy::loadbalancer::{InFlightGuard, LoadBalancerRegistry};
@@ -49,6 +49,7 @@ pub struct ProxyState {
     /// before serving — flipped off by the periodic re-verifier when
     /// the licence server reports the key is no longer active.
     pub license: crate::license::LicenseState,
+    pub local_zone: Option<String>,
 }
 
 /// Hop-by-hop headers that must not be forwarded to the upstream. RFC 7230 §6.1.
@@ -75,6 +76,7 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
 enum ProtocolKind {
     WebSocket,
     Grpc,
+    GrpcWeb,
     Http,
 }
 
@@ -88,15 +90,20 @@ fn detect_protocol(req: &Request<Body>) -> ProtocolKind {
     if is_websocket {
         return ProtocolKind::WebSocket;
     }
-    let is_grpc = req
+
+    let content_type = req
         .headers()
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.starts_with("application/grpc"))
-        .unwrap_or(false);
-    if is_grpc {
+        .unwrap_or("");
+
+    if content_type.starts_with("application/grpc-web") {
+        return ProtocolKind::GrpcWeb;
+    }
+    if content_type.starts_with("application/grpc") {
         return ProtocolKind::Grpc;
     }
+
     ProtocolKind::Http
 }
 
@@ -193,7 +200,7 @@ pub async fn proxy_handler(
 
     // Pick a target via load balancer if one is configured for this service.
     // Falls back to `service.url` if no targets exist.
-    let picked = state.lb.pick(&service.id);
+    let picked = state.lb.pick(&service.id, state.local_zone.as_deref());
     let (upstream_base, target_label, _in_flight) = match &picked {
         Some(ts) => {
             let guard = InFlightGuard::new(ts.clone());
@@ -246,6 +253,40 @@ pub async fn proxy_handler(
                 Ok(r) => gw_metrics::status_bucket(r.status().as_u16()),
                 Err(_) => "5xx",
             };
+            metrics::counter!(
+                "lynxx_requests_total",
+                "service" => svc_name.clone(),
+                "route" => route_id.clone(),
+                "method" => method.clone(),
+                "status" => status_label,
+                "target" => target_label.clone(),
+            )
+            .increment(1);
+            metrics::histogram!(
+                "lynxx_request_duration_seconds",
+                "service" => svc_name,
+                "route" => route_id,
+                "method" => method,
+                "target" => target_label,
+            )
+            .record(start.elapsed().as_secs_f64());
+            return result;
+        }
+        ProtocolKind::GrpcWeb => {
+            let result =
+                crate::proxy::grpc::handle_grpc_web(&state.grpc_client, req, upstream_url).await;
+            let status_label = match &result {
+                Ok(r) => gw_metrics::status_bucket(r.status().as_u16()),
+                Err(_) => "5xx",
+            };
+            match &result {
+                Ok(_) => state.health.record_success(&service.id, &svc_name),
+                Err(e) => state.health.record_failure(
+                    &service.id,
+                    &svc_name,
+                    format!("grpc-web upstream error: {e}"),
+                ),
+            }
             metrics::counter!(
                 "lynxx_requests_total",
                 "service" => svc_name.clone(),
@@ -512,7 +553,7 @@ pub async fn proxy_handler(
 
     // Build the plugin-facing response. We reuse the upstream HeaderMap by
     // moving it through `Response::from_parts` — no clone.
-    let mut plugin_resp = Response::new(BoxBody::new(resp_body.clone()));
+    let mut plugin_resp = Response::new(Body::from(resp_body.clone()));
     *plugin_resp.status_mut() = status;
     *plugin_resp.headers_mut() = resp_parts.headers;
     if let Some(v) = cache_key {

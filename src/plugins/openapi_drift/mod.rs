@@ -31,8 +31,8 @@ use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
 use axum::http::{Request, Response};
 use http_body_util::BodyExt;
-use hyper::body::Bytes;
 use std::sync::Arc;
+use axum::body::Body;
 
 pub use config::OpenApiDriftConfig;
 
@@ -60,7 +60,7 @@ impl Plugin for OpenApiDriftPlugin {
         "openapi-drift"
     }
 
-    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<Body>) -> Result<(), PluginError> {
         // Stash the request method+path into extensions so on_response can
         // recover them without a parallel side-channel. We can't simply
         // re-read the request because Response doesn't carry it.
@@ -104,10 +104,8 @@ impl Plugin for OpenApiDriftPlugin {
 
         let status = resp.status().as_u16();
 
-        // Drain → validate → restore. The body type is `BoxBody`
-        // (http_body_util::Full<Bytes>) so reconstruction is O(0) once we
-        // have the bytes.
-        let body = std::mem::replace(resp.body_mut(), http_body_util::Full::new(Bytes::new()));
+        // Drain → validate → restore.
+        let body = std::mem::replace(resp.body_mut(), Body::empty());
         let bytes = match body.collect().await {
             Ok(c) => c.to_bytes(),
             Err(_) => return Ok(()), // can't fail the response over an observability collect error
@@ -125,7 +123,7 @@ impl Plugin for OpenApiDriftPlugin {
         }
 
         // Always restore the body — we are passive.
-        *resp.body_mut() = http_body_util::Full::new(bytes);
+        *resp.body_mut() = Body::from(bytes);
         Ok(())
     }
 }
@@ -192,7 +190,7 @@ paths:
         let mut resp = Response::builder()
             .status(200)
             .header("content-type", "application/json")
-            .body(http_body_util::Full::new(Bytes::from(r#"{"id": 42}"#)))
+            .body(Body::from(r#"{"id": 42}"#))
             .unwrap();
         resp.extensions_mut()
             .insert(req.extensions().get::<DriftCtx>().cloned().unwrap());
@@ -230,9 +228,7 @@ paths:
         let mut resp = Response::builder()
             .status(200)
             .header("content-type", "application/json")
-            .body(http_body_util::Full::new(Bytes::from(
-                r#"{"id": 7, "name": "alpha"}"#,
-            )))
+            .body(Body::from(r#"{"id": 7, "name": "alpha"}"#))
             .unwrap();
         resp.extensions_mut()
             .insert(req.extensions().get::<DriftCtx>().cloned().unwrap());

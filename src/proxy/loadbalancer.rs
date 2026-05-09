@@ -100,15 +100,60 @@ impl ServiceLoadBalancer {
 
     /// Pick a target according to the strategy. Skips disabled and unhealthy
     /// targets. Returns `None` if no target is configured or all are out.
-    pub fn pick(&self) -> Option<Arc<TargetState>> {
+    ///
+    /// If `local_zone` is provided, the balancer first tries to find a
+    /// healthy target in the same zone. If none are available, it falls
+    /// back to the full set.
+    pub fn pick(&self, local_zone: Option<&str>) -> Option<Arc<TargetState>> {
         if self.targets.is_empty() {
             return None;
+        }
+
+        if let Some(zone) = local_zone {
+            // First try: healthy targets in the same zone.
+            let zone_targets: Vec<_> = self
+                .targets
+                .iter()
+                .filter(|s| {
+                    s.target.enabled
+                        && s.healthy.load(Ordering::Relaxed)
+                        && s.target.zone.as_deref() == Some(zone)
+                })
+                .collect();
+
+            if !zone_targets.is_empty() {
+                return match self.strategy {
+                    LbStrategy::RoundRobin => self.pick_rr_from_subset(&zone_targets),
+                    LbStrategy::LeastConn => self.pick_least_conn_from_subset(&zone_targets),
+                };
+            }
         }
 
         match self.strategy {
             LbStrategy::RoundRobin => self.pick_rr(),
             LbStrategy::LeastConn => self.pick_least_conn(),
         }
+    }
+
+    fn pick_rr_from_subset(&self, subset: &[&Arc<TargetState>]) -> Option<Arc<TargetState>> {
+        let i = self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize;
+        Some((*subset[i % subset.len()]).clone())
+    }
+
+    fn pick_least_conn_from_subset(
+        &self,
+        subset: &[&Arc<TargetState>],
+    ) -> Option<Arc<TargetState>> {
+        let mut best: Option<&Arc<TargetState>> = None;
+        let mut best_count = u64::MAX;
+        for s in subset {
+            let c = s.in_flight.load(Ordering::Relaxed);
+            if c < best_count {
+                best_count = c;
+                best = Some(s);
+            }
+        }
+        best.cloned()
     }
 
     fn pick_rr(&self) -> Option<Arc<TargetState>> {
@@ -167,10 +212,10 @@ impl LoadBalancerRegistry {
         self.inner.insert(service_id, Arc::new(RwLock::new(lb)));
     }
 
-    pub fn pick(&self, service_id: &Uuid) -> Option<Arc<TargetState>> {
+    pub fn pick(&self, service_id: &Uuid, local_zone: Option<&str>) -> Option<Arc<TargetState>> {
         let entry = self.inner.get(service_id)?;
         let guard = entry.read().ok()?;
-        guard.pick()
+        guard.pick(local_zone)
     }
 
     pub fn remove_service(&self, service_id: &Uuid) {

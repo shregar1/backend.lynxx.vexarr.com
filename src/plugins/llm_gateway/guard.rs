@@ -22,6 +22,23 @@ pub struct Guard {
     pub pii_redactors: Vec<PiiRedactor>,
 }
 
+/// Robust default patterns for prompt injection (LLM01).
+/// These cover common jailbreaks, system prompt leakage, and role spoofing.
+const DEFAULT_INJECTION_PATTERNS: &[&str] = &[
+    r"(?i)ignore (all )?(previous|prior|above) (instructions|prompts|directives|orders)",
+    r"(?i)reveal (your|the) (system|initial) (prompt|message|instruction)",
+    r"(?i)forget (your|the) (rules|instructions|identity)",
+    r"(?i)you are (now|instead) (a|an|the) .*",
+    r"(?i)act as (a|an|the) .*",
+    r"(?i)stay in character",
+    r"(?i)break out of character",
+    r"(?i)DAN:",
+    r"(?i)Do Anything Now",
+    r"(?i)\[(system|assistant|user|inst|instruction)\]",
+    r"(?i)<\|(system|user|assistant)\|>",
+    r"(?i)---.*END.*SYSTEM.*PROMPT.*---",
+];
+
 pub struct PiiRedactor {
     pub label: &'static str,
     pub pattern: Regex,
@@ -34,7 +51,7 @@ impl Guard {
         injection_patterns: &[String],
         redact_pii: &[String],
     ) -> Self {
-        let injection_patterns = injection_patterns
+        let mut compiled_patterns: Vec<Regex> = injection_patterns
             .iter()
             .filter_map(|p| match Regex::new(&format!("(?i){p}")) {
                 Ok(r) => Some(r),
@@ -44,6 +61,15 @@ impl Guard {
                 }
             })
             .collect();
+
+        // If enabled but no custom patterns provided, use the robust defaults.
+        if block_prompt_injection && compiled_patterns.is_empty() {
+            for p in DEFAULT_INJECTION_PATTERNS {
+                if let Ok(r) = Regex::new(p) {
+                    compiled_patterns.push(r);
+                }
+            }
+        }
 
         let mut pii_redactors = Vec::new();
         for kind in redact_pii {
@@ -56,7 +82,7 @@ impl Guard {
 
         Self {
             injection_enabled: block_prompt_injection,
-            injection_patterns,
+            injection_patterns: compiled_patterns,
             pii_redactors,
         }
     }

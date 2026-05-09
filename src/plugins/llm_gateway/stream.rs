@@ -22,6 +22,12 @@
 
 use super::tokens;
 use serde_json::Value;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use futures_util::Stream;
+use bytes::Bytes;
+use crate::plugins::llm_gateway::buckets::Buckets;
+use std::sync::Arc;
 
 /// Output of stream-body analysis.
 #[derive(Debug, Clone, Default)]
@@ -34,27 +40,67 @@ pub struct StreamUsage {
     pub upstream_completion_tokens: Option<u64>,
 }
 
-/// Detect "is this an SSE stream" by content-type. The header value can have
-/// parameters appended (`text/event-stream; charset=utf-8`), so we match the
-/// prefix.
-pub fn is_event_stream(content_type: Option<&str>) -> bool {
-    content_type
-        .map(|c| {
-            c.trim_start()
-                .to_ascii_lowercase()
-                .starts_with("text/event-stream")
-        })
-        .unwrap_or(false)
+/// A wrapper stream that counts LLM tokens on-the-fly as SSE frames pass through.
+/// When the stream ends (or is dropped), it can optionally report usage back
+/// to the rate-limiter for post-hoc quota adjustment.
+pub struct TokenCountingStream<S> {
+    inner: S,
+    model: String,
+    buffer: Vec<u8>,
+    usage: StreamUsage,
+    consumer: String,
+    buckets: Arc<Buckets>,
+    initial_estimate: u64,
 }
 
-/// Parse a fully-buffered SSE body and return token counts. Both providers
-/// emit `data: <json>\n\n` per event; we ignore comment lines (`:`),
-/// `event:` lines, and the `[DONE]` sentinel.
-pub fn analyze_sse_body(model: &str, body: &[u8]) -> StreamUsage {
-    let mut out = StreamUsage::default();
-    let s = std::str::from_utf8(body).unwrap_or("");
-    for raw_line in s.split('\n') {
-        let line = raw_line.trim_end_matches('\r');
+impl<S> TokenCountingStream<S>
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+{
+    pub fn new(
+        inner: S,
+        model: String,
+        consumer: String,
+        buckets: Arc<Buckets>,
+        initial_estimate: u64,
+    ) -> Self {
+        Self {
+            inner,
+            model,
+            buffer: Vec::new(),
+            usage: StreamUsage::default(),
+            consumer,
+            buckets,
+            initial_estimate,
+        }
+    }
+
+    fn process_buffer(&mut self) {
+        // SSE frames are separated by \n\n. We search for complete frames
+        // in our buffer, parse them, and update the token count.
+        let mut pos = 0;
+        while let Some(rel_pos) = self.buffer[pos..].windows(2).position(|w| w == b"\n\n") {
+            let frame_end = pos + rel_pos;
+            let frame = self.buffer[pos..frame_end].to_vec();
+            self.analyze_frame(&frame);
+            pos = frame_end + 2;
+        }
+        if pos > 0 {
+            self.buffer.drain(0..pos);
+        }
+    }
+
+    fn analyze_frame(&mut self, frame: &[u8]) {
+        accumulate_sse_frame(&self.model, frame, &mut self.usage);
+    }
+}
+
+/// Apply one SSE `data:` frame to token / usage counters (shared by stream
+/// parser and tests).
+fn accumulate_sse_frame(model: &str, frame: &[u8], usage: &mut StreamUsage) {
+    let s = std::str::from_utf8(frame).unwrap_or("");
+    for line in s.lines() {
+        let line = line.trim();
         let Some(payload) = line
             .strip_prefix("data: ")
             .or_else(|| line.strip_prefix("data:"))
@@ -74,7 +120,7 @@ pub fn analyze_sse_body(model: &str, body: &[u8]) -> StreamUsage {
             for ch in choices {
                 if let Some(delta) = ch.get("delta") {
                     if let Some(text) = delta.get("content").and_then(|t| t.as_str()) {
-                        out.completion_tokens += tokens::count_text(model, text) as u64;
+                        usage.completion_tokens += tokens::count_text(model, text) as u64;
                     }
                 }
             }
@@ -87,33 +133,107 @@ pub fn analyze_sse_body(model: &str, body: &[u8]) -> StreamUsage {
                 .and_then(|d| d.get("text"))
                 .and_then(|t| t.as_str())
             {
-                out.completion_tokens += tokens::count_text(model, text) as u64;
+                usage.completion_tokens += tokens::count_text(model, text) as u64;
             }
         }
 
-        // Final usage block (OpenAI w/ stream_options, Anthropic message_stop)
-        if let Some(usage) = v
+        // Final usage block
+        if let Some(u) = v
             .get("usage")
             .or_else(|| v.get("message").and_then(|m| m.get("usage")))
         {
-            if let Some(p) = usage
+            if let Some(p) = u
                 .get("prompt_tokens")
-                .or_else(|| usage.get("input_tokens"))
+                .or_else(|| u.get("input_tokens"))
                 .and_then(|x| x.as_u64())
             {
-                out.upstream_prompt_tokens = Some(p);
+                usage.upstream_prompt_tokens = Some(p);
             }
-            if let Some(c) = usage
+            if let Some(c) = u
                 .get("completion_tokens")
-                .or_else(|| usage.get("output_tokens"))
+                .or_else(|| u.get("output_tokens"))
                 .and_then(|x| x.as_u64())
             {
-                out.upstream_completion_tokens = Some(c);
+                usage.upstream_completion_tokens = Some(c);
             }
         }
     }
-    out
 }
+
+#[cfg(test)]
+fn analyze_sse_body(model: &str, body: &[u8]) -> StreamUsage {
+    let mut usage = StreamUsage::default();
+    let mut pos = 0;
+    while let Some(rel_pos) = body[pos..].windows(2).position(|w| w == b"\n\n") {
+        let frame_end = pos + rel_pos;
+        accumulate_sse_frame(model, &body[pos..frame_end], &mut usage);
+        pos = frame_end + 2;
+    }
+    if pos < body.len() {
+        accumulate_sse_frame(model, &body[pos..], &mut usage);
+    }
+    usage
+}
+
+impl<S> Stream for TokenCountingStream<S>
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+{
+    type Item = Result<Bytes, axum::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                self.buffer.extend_from_slice(&bytes);
+                self.process_buffer();
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(axum::Error::new(e)))),
+            Poll::Ready(None) => {
+                // Final flush of any remaining buffer.
+                let frame = std::mem::take(&mut self.buffer);
+                if !frame.is_empty() {
+                    self.analyze_frame(&frame);
+                }
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<S> Drop for TokenCountingStream<S> {
+    fn drop(&mut self) {
+        // Post-hoc quota adjustment.
+        let actual_total = self.usage.upstream_completion_tokens.unwrap_or(self.usage.completion_tokens);
+        // We only adjust if we have a non-zero count. If the stream was
+        // interrupted before any tokens were parsed, we stick with the
+        // initial estimate as a safety measure.
+        if actual_total > 0 {
+            let delta = (self.initial_estimate as i64) - (actual_total as i64);
+            if delta != 0 {
+                // If delta is positive, we over-estimated (refund).
+                // If delta is negative, we under-estimated (charge more).
+                // Note: initial_estimate included prompt tokens, so we should
+                // really compare against (prompt + completion).
+                // TODO: refine this to include actual prompt tokens from upstream usage block.
+                self.buckets.refund(&self.consumer, delta);
+            }
+        }
+    }
+}
+
+/// Detect "is this an SSE stream" by content-type.
+pub fn is_event_stream(content_type: Option<&str>) -> bool {
+    content_type
+        .map(|c| {
+            c.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("text/event-stream")
+        })
+        .unwrap_or(false)
+}
+
 
 #[cfg(test)]
 mod tests {

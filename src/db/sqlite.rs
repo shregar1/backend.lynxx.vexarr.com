@@ -128,7 +128,7 @@ impl Repository for SqliteRepository {
 
     async fn list_targets(&self) -> Result<Vec<Target>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, service_id, url, weight, enabled, created_at, updated_at FROM targets",
+            "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at FROM targets",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -140,7 +140,7 @@ impl Repository for SqliteRepository {
         service_id: &Uuid,
     ) -> Result<Vec<Target>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, service_id, url, weight, enabled, created_at, updated_at \
+            "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at \
              FROM targets WHERE service_id = ?",
         )
         .bind(service_id.to_string())
@@ -151,7 +151,7 @@ impl Repository for SqliteRepository {
 
     async fn get_target(&self, id: &Uuid) -> Result<Option<Target>, GatewayError> {
         let row = sqlx::query(
-            "SELECT id, service_id, url, weight, enabled, created_at, updated_at \
+            "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at \
              FROM targets WHERE id = ?",
         )
         .bind(id.to_string())
@@ -162,14 +162,15 @@ impl Repository for SqliteRepository {
 
     async fn create_target(&self, target: &Target) -> Result<(), GatewayError> {
         sqlx::query(
-            "INSERT INTO targets (id, service_id, url, weight, enabled, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO targets (id, service_id, url, weight, enabled, zone, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(target.id.to_string())
         .bind(target.service_id.to_string())
         .bind(&target.url)
         .bind(target.weight as i64)
         .bind(target.enabled as i64)
+        .bind(target.zone.as_deref())
         .bind(target.created_at.to_rfc3339())
         .bind(target.updated_at.to_rfc3339())
         .execute(&self.pool)
@@ -179,11 +180,12 @@ impl Repository for SqliteRepository {
 
     async fn update_target(&self, id: &Uuid, target: &Target) -> Result<(), GatewayError> {
         sqlx::query(
-            "UPDATE targets SET url = ?, weight = ?, enabled = ?, updated_at = ? WHERE id = ?",
+            "UPDATE targets SET url = ?, weight = ?, enabled = ?, zone = ?, updated_at = ? WHERE id = ?",
         )
         .bind(&target.url)
         .bind(target.weight as i64)
         .bind(target.enabled as i64)
+        .bind(target.zone.as_deref())
         .bind(target.updated_at.to_rfc3339())
         .bind(id.to_string())
         .execute(&self.pool)
@@ -734,6 +736,64 @@ impl Repository for SqliteRepository {
         Ok(result.rows_affected())
     }
 
+    // ---------- commercial zero-trust (Not implemented for SQLite) ----------
+
+    async fn get_device_fingerprint(
+        &self,
+        _customer_id: i64,
+        _hardware_id: &str,
+    ) -> Result<Option<crate::models::DeviceFingerprint>, GatewayError> {
+        Err(GatewayError::Internal("Not implemented for SQLite".into()))
+    }
+
+    async fn create_device_fingerprint(
+        &self,
+        _device: &crate::models::DeviceFingerprint,
+    ) -> Result<(), GatewayError> {
+        Err(GatewayError::Internal("Not implemented for SQLite".into()))
+    }
+
+    async fn update_device_last_seen(
+        &self,
+        _id: &Uuid,
+        _ts: DateTime<Utc>,
+    ) -> Result<(), GatewayError> {
+        Err(GatewayError::Internal("Not implemented for SQLite".into()))
+    }
+
+    async fn create_runtime_grant(
+        &self,
+        _grant: &crate::models::RuntimeGrant,
+    ) -> Result<(), GatewayError> {
+        Err(GatewayError::Internal("Not implemented for SQLite".into()))
+    }
+
+    async fn get_runtime_grant_by_token_id(
+        &self,
+        _token_id: &str,
+    ) -> Result<Option<crate::models::RuntimeGrant>, GatewayError> {
+        Err(GatewayError::Internal("Not implemented for SQLite".into()))
+    }
+
+    async fn update_grant_heartbeat(
+        &self,
+        _token_id: &str,
+        _ts: DateTime<Utc>,
+    ) -> Result<(), GatewayError> {
+        Err(GatewayError::Internal("Not implemented for SQLite".into()))
+    }
+
+    async fn revoke_grant(&self, _token_id: &str) -> Result<bool, GatewayError> {
+        Err(GatewayError::Internal("Not implemented for SQLite".into()))
+    }
+
+    async fn get_api_key_by_prefix(
+        &self,
+        _prefix: &str,
+    ) -> Result<Option<crate::models::ApiKeyRow>, GatewayError> {
+        Err(GatewayError::Internal("Not implemented for SQLite".into()))
+    }
+
     // ---------- quota ----------
 
     async fn get_quota_usage(&self, period: &str) -> Result<Option<(u64, u64)>, GatewayError> {
@@ -895,6 +955,7 @@ fn row_to_target(row: sqlx::sqlite::SqliteRow) -> Result<Target, GatewayError> {
     let service_id: String = row.try_get("service_id")?;
     let weight: i64 = row.try_get("weight")?;
     let enabled: i64 = row.try_get("enabled")?;
+    let zone: Option<String> = row.try_get("zone").ok();
     let created_at: String = row.try_get("created_at")?;
     let updated_at: String = row.try_get("updated_at")?;
 
@@ -904,6 +965,7 @@ fn row_to_target(row: sqlx::sqlite::SqliteRow) -> Result<Target, GatewayError> {
         url: row.try_get("url")?,
         weight: weight as u32,
         enabled: enabled != 0,
+        zone,
         created_at: parse_dt(&created_at)?,
         updated_at: parse_dt(&updated_at)?,
     })

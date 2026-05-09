@@ -186,7 +186,7 @@ impl Plugin for WasmPlugin {
             return Err(PluginError::ShortCircuit {
                 status,
                 headers: vec![],
-                body,
+                body: body.into(),
             });
         }
 
@@ -273,7 +273,6 @@ fn load_module_bytes(cfg: &WasmConfig) -> Result<Vec<u8>, GatewayError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
     use axum::http::Request;
     use base64::Engine as Base64Engine;
     use serde_json::json;
@@ -322,14 +321,20 @@ mod tests {
     #[tokio::test]
     async fn noop_module_runs() {
         let p = from_wat(NOOP_WAT, json!({}));
-        let mut req = Request::builder().uri("/").body(Body::empty()).unwrap();
+        let mut req = Request::builder()
+            .uri("/")
+            .body(axum::body::Body::empty())
+            .unwrap();
         p.on_request(&mut req).await.unwrap();
     }
 
     #[tokio::test]
     async fn header_injection_round_trips() {
         let p = from_wat(HEADER_WAT, json!({}));
-        let mut req = Request::builder().uri("/x").body(Body::empty()).unwrap();
+        let mut req = Request::builder()
+            .uri("/x")
+            .body(axum::body::Body::empty())
+            .unwrap();
         p.on_request(&mut req).await.unwrap();
         assert_eq!(
             req.headers()
@@ -345,7 +350,10 @@ mod tests {
             LOOP_WAT,
             json!({ "fuel_per_request": 1_000u64, "wall_timeout_ms": 1_000u64 }),
         );
-        let mut req = Request::builder().uri("/").body(Body::empty()).unwrap();
+        let mut req = Request::builder()
+            .uri("/")
+            .body(axum::body::Body::empty())
+            .unwrap();
         let err = p.on_request(&mut req).await.expect_err("must trap");
         let s = format!("{err}");
         assert!(s.contains("fuel") || s.contains("wall"), "got: {s}");
@@ -369,7 +377,10 @@ mod tests {
             HEADER_INJECTOR_WASM,
         );
         let plugin = WasmPlugin::from_config(&json!({ "module_b64": b64 })).expect("plugin builds");
-        let mut req = Request::builder().uri("/x").body(Body::empty()).unwrap();
+        let mut req = Request::builder()
+            .uri("/x")
+            .body(axum::body::Body::empty())
+            .unwrap();
         plugin.on_request(&mut req).await.unwrap();
         assert_eq!(
             req.headers()

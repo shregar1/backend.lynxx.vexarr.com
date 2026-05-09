@@ -6,6 +6,7 @@ use axum::http::{Request, Response};
 use http_body_util::BodyExt;
 use jsonschema::JSONSchema;
 use std::sync::Arc;
+use axum::body::Body;
 
 /// JSON Schema validation of request bodies.
 ///
@@ -65,7 +66,7 @@ fn bad_request_short_circuit(body: Vec<u8>) -> PluginError {
     PluginError::ShortCircuit {
         status: 400,
         headers: vec![("content-type".into(), "application/json".into())],
-        body,
+        body: body.into(),
     }
 }
 
@@ -75,7 +76,7 @@ impl Plugin for RequestValidatorPlugin {
         "request-validator"
     }
 
-    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<Body>) -> Result<(), PluginError> {
         let ct = req
             .headers()
             .get("content-type")
@@ -103,7 +104,7 @@ impl Plugin for RequestValidatorPlugin {
 
         // Drain, validate, restore. Works because the gateway's HTTP/1.1
         // path already buffers; streaming uploads would break here.
-        let body = std::mem::replace(req.body_mut(), axum::body::Body::empty());
+        let body = std::mem::replace(req.body_mut(), Body::empty());
         let bytes = body
             .collect()
             .await
@@ -117,7 +118,7 @@ impl Plugin for RequestValidatorPlugin {
             )));
         }
         if bytes.is_empty() {
-            *req.body_mut() = axum::body::Body::from(bytes);
+            *req.body_mut() = Body::from(bytes);
             return Ok(());
         }
 
@@ -142,11 +143,11 @@ impl Plugin for RequestValidatorPlugin {
             .unwrap_or_else(|_| br#"{"error":"request validation failed"}"#.to_vec());
             // Restore body before returning so error logging downstream
             // doesn't see a stripped request.
-            *req.body_mut() = axum::body::Body::from(bytes);
+            *req.body_mut() = Body::from(bytes);
             return Err(bad_request_short_circuit(body));
         }
 
-        *req.body_mut() = axum::body::Body::from(bytes);
+        *req.body_mut() = Body::from(bytes);
         Ok(())
     }
 

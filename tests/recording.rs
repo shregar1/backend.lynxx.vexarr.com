@@ -97,6 +97,7 @@ async fn launch_gateway(
     let bin = env!("CARGO_BIN_EXE_lynxx-gateway");
     let child = Command::new(bin)
         .env("LYNXX_CONFIG", &config)
+        .env("LYNXX_API_KEY", "lnx_dev_pro")
         .env("RUST_LOG", "lynxx_gateway=warn")
         .current_dir(&dir_path)
         .stdout(Stdio::null())

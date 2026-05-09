@@ -4012,6 +4012,9 @@ fn cmd_start(args: Vec<String>) -> Result<()> {
     use std::process::Command;
 
     let gateway = locate_gateway()?;
+    println!("{} Starting Lynxx Gateway...", dim("→"));
+    println!("{} Once started, the dashboard will be available at http://localhost:9001", green("✓"));
+
     let err = Command::new(&gateway).args(&args).exec();
     Err(anyhow::anyhow!(
         "failed to exec {}: {}",

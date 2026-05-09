@@ -87,6 +87,45 @@ impl OpenTelemetryPlugin {
         }
         Some((parts[1].to_string(), parts[2].to_string()))
     }
+
+    fn extract_context(req: &Request<axum::body::Body>) -> (String, String) {
+        // 1. Try W3C traceparent
+        if let Some((tid, _)) = req
+            .headers()
+            .get("traceparent")
+            .and_then(|v| v.to_str().ok())
+            .and_then(Self::parse_traceparent)
+        {
+            return (tid, Self::rand_hex(8));
+        }
+
+        // 2. Try B3 Single Header
+        if let Some(b3) = req.headers().get("b3").and_then(|v| v.to_str().ok()) {
+            let parts: Vec<&str> = b3.split('-').collect();
+            if parts.len() >= 2 && parts[0].len() == 32 && parts[1].len() == 16 {
+                return (parts[0].to_string(), Self::rand_hex(8));
+            }
+        }
+
+        // 3. Try B3 Multi Headers
+        let b3_tid = req
+            .headers()
+            .get("x-b3-traceid")
+            .and_then(|v| v.to_str().ok());
+        if let Some(tid) = b3_tid {
+            if tid.len() == 32 || tid.len() == 16 {
+                let normalized_tid = if tid.len() == 16 {
+                    format!("0000000000000000{}", tid)
+                } else {
+                    tid.to_string()
+                };
+                return (normalized_tid, Self::rand_hex(8));
+            }
+        }
+
+        // 4. Generate new
+        (Self::rand_hex(16), Self::rand_hex(8))
+    }
 }
 
 #[async_trait]
@@ -106,20 +145,25 @@ impl Plugin for OpenTelemetryPlugin {
             return Ok(());
         }
 
-        let (trace_id, span_id) = match req
-            .headers()
-            .get("traceparent")
-            .and_then(|v| v.to_str().ok())
-            .and_then(Self::parse_traceparent)
-        {
-            Some((tid, _parent_span)) => (tid, Self::rand_hex(8)),
-            None => (Self::rand_hex(16), Self::rand_hex(8)),
-        };
+        let (trace_id, span_id) = Self::extract_context(req);
 
+        // Inject W3C traceparent
         let traceparent = format!("00-{trace_id}-{span_id}-01");
         if let Ok(v) = HeaderValue::from_str(&traceparent) {
             req.headers_mut().insert("traceparent", v);
         }
+
+        // Inject B3 Headers for backward compatibility
+        if let Ok(v) = HeaderValue::from_str(&trace_id) {
+            req.headers_mut().insert("x-b3-traceid", v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&span_id) {
+            req.headers_mut().insert("x-b3-spanid", v);
+        }
+        if let Ok(v) = HeaderValue::from_str("1") {
+            req.headers_mut().insert("x-b3-sampled", v);
+        }
+
         if let Ok(v) = HeaderValue::from_str(&trace_id) {
             req.headers_mut().insert(HDR_TRACE_ID, v);
         }

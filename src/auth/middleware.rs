@@ -17,11 +17,21 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::Utc;
 use serde_json::json;
+use std::sync::Arc;
+use uuid::Uuid;
 
 /// Wrapper around `Option<AdminToken>` so we can `Extension::<CurrentActor>`
 /// from handlers without colliding with bare `Option<T>`.
 #[derive(Clone, Debug, Default)]
 pub struct CurrentActor(pub Option<AdminToken>);
+
+/// Data extracted from a verified PASETO runtime grant.
+#[derive(Clone, Debug)]
+pub struct GrantActor {
+    pub customer_urn: String,
+    pub device_id: Uuid,
+    pub capabilities: Vec<crate::auth::grant::Capability>,
+}
 
 fn unauthorized(msg: &str) -> Response {
     (StatusCode::UNAUTHORIZED, Json(json!({ "error": msg }))).into_response()
@@ -29,6 +39,42 @@ fn unauthorized(msg: &str) -> Response {
 
 fn forbidden(msg: &str) -> Response {
     (StatusCode::FORBIDDEN, Json(json!({ "error": msg }))).into_response()
+}
+
+/// Middleware that validates the PASETO runtime grant token.
+/// Required for all "commercial" endpoints where premium features are executed.
+pub async fn validate_grant(
+    State(state): State<Arc<crate::auth::handshake::HandshakeState>>,
+    mut req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let auth_header = req.headers().get(header::AUTHORIZATION);
+    let token = match auth_header.and_then(|h| h.to_str().ok()).and_then(|s| s.strip_prefix("Bearer ")) {
+        Some(t) => t,
+        None => return unauthorized("missing runtime grant token"),
+    };
+
+    let claims = match state.grant_manager.verify_grant(token) {
+        Ok(c) => c,
+        Err(e) => return unauthorized(&format!("invalid grant token: {e}")),
+    };
+
+    // Check revocation in DB
+    match state.repo.get_runtime_grant_by_token_id(&claims.jti).await {
+        Ok(Some(grant)) if grant.revoked_at.is_some() => return unauthorized("grant revoked"),
+        Ok(Some(_)) => {},
+        _ => return unauthorized("grant session not found"),
+    };
+
+    let device_id = Uuid::parse_str(&claims.device_id).unwrap_or_else(|_| Uuid::nil());
+    
+    req.extensions_mut().insert(GrantActor {
+        customer_urn: claims.sub,
+        device_id,
+        capabilities: claims.caps,
+    });
+
+    next.run(req).await
 }
 
 /// Axum middleware: extract bearer token, look it up, attach a

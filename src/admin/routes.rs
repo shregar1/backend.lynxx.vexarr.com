@@ -124,6 +124,8 @@ pub struct CreateTarget {
     pub weight: u32,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub zone: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -131,6 +133,7 @@ pub struct UpdateTarget {
     pub url: Option<String>,
     pub weight: Option<u32>,
     pub enabled: Option<bool>,
+    pub zone: Option<String>,
 }
 
 fn default_weight() -> u32 {
@@ -751,6 +754,7 @@ pub async fn create_service_target(
     }
     let mut target = Target::new(service_id, input.url, input.weight);
     target.enabled = input.enabled;
+    target.zone = input.zone;
     state.repo.create_target(&target).await?;
     rebuild_lb(&state, service_id).await?;
     tracing::info!(target_id = %target.id, service_id = %service_id, "target created");
@@ -793,6 +797,7 @@ pub async fn update_target_handler(
         url: input.url.clone().unwrap_or_else(|| existing.url.clone()),
         weight: input.weight.unwrap_or(existing.weight).max(1),
         enabled: input.enabled.unwrap_or(existing.enabled),
+        zone: input.zone.or(existing.zone.clone()),
         created_at: existing.created_at,
         updated_at: Utc::now(),
     };

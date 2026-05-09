@@ -25,6 +25,9 @@ metrics-exporter-prometheus = "0.15"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = "1.0.228"
+serde_json = "1.0.149"
+reqwest = { version = "0.13.3", features = ["json"] }
 
 # Address formatting for retransmit metric labels.
 # (We intentionally avoid pulling `ipnet` here; the std `Ipv4Addr` is plenty.)

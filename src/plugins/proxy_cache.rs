@@ -6,6 +6,7 @@ use dashmap::DashMap;
 use http_body_util::BodyExt;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+use axum::body::Body;
 
 #[derive(Clone)]
 struct CacheEntry {
@@ -87,7 +88,7 @@ impl ProxyCachePlugin {
         })
     }
 
-    fn build_key(&self, req: &Request<axum::body::Body>) -> String {
+    fn build_key(&self, req: &Request<Body>) -> String {
         match self.key_strategy {
             KeyStrategy::Uri => format!(
                 "{}|{}",
@@ -117,7 +118,7 @@ impl Plugin for ProxyCachePlugin {
         "proxy-cache"
     }
 
-    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<Body>) -> Result<(), PluginError> {
         if !self.method_cacheable(req.method().as_str()) {
             return Ok(());
         }
@@ -139,7 +140,7 @@ impl Plugin for ProxyCachePlugin {
             return Err(PluginError::ShortCircuit {
                 status: entry.status,
                 headers,
-                body: entry.body,
+                body: entry.body.into(),
             });
         }
 
@@ -199,7 +200,7 @@ impl Plugin for ProxyCachePlugin {
             .collect();
 
         // Drain the body so we can both cache it and rebuild the response.
-        let body = std::mem::replace(resp.body_mut(), BoxBody::new(hyper::body::Bytes::new()));
+        let body = std::mem::replace(resp.body_mut(), Body::empty());
         let collected = body
             .collect()
             .await
@@ -218,7 +219,7 @@ impl Plugin for ProxyCachePlugin {
         );
 
         // Restore the body and add MISS marker.
-        *resp.body_mut() = BoxBody::new(hyper::body::Bytes::from(bytes_vec));
+        *resp.body_mut() = Body::from(bytes_vec);
         resp.headers_mut()
             .insert("x-cache", axum::http::HeaderValue::from_static("MISS"));
         Ok(())

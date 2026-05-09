@@ -128,6 +128,24 @@ impl Buckets {
             .saturating_add(extra_tokens)
             .min(self.tokens_per_min * 2);
     }
+
+    /// Refund tokens back to the consumer's bucket. Used for post-hoc
+    /// adjustment when an estimated count was higher than the actual
+    /// tokens delivered (e.g. on client-side stream cancellation).
+    /// If `delta` is negative, it actually deducts more.
+    pub fn refund(&self, consumer: &str, delta: i64) {
+        if !self.enabled || delta == 0 {
+            return;
+        }
+        let now = Instant::now();
+        let mut entry = self.inner.entry(consumer.to_string()).or_default();
+        entry.maybe_reset(now);
+        if delta > 0 {
+            entry.tokens = entry.tokens.saturating_sub(delta as u64);
+        } else {
+            entry.tokens = entry.tokens.saturating_add((-delta) as u64).min(self.tokens_per_min * 2);
+        }
+    }
 }
 
 #[cfg(test)]

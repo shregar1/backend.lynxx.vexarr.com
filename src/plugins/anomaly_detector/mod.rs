@@ -33,6 +33,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use http_body_util::BodyExt;
+use axum::body::Body;
 
 /// Extension stash so `on_response` can find the same key without re-parsing
 /// headers. Cloned out of `req.extensions_mut()` after `on_request`.
@@ -301,7 +303,7 @@ impl AnomalyDetectorPlugin {
                         ("content-type".into(), "application/json".into()),
                         ("x-lynxx-anomaly".into(), sig.name.into()),
                     ],
-                    body,
+                    body: body.into(),
                 }
             }
             Mode::Block => {
@@ -312,7 +314,7 @@ impl AnomalyDetectorPlugin {
                         ("content-type".into(), "application/json".into()),
                         ("x-lynxx-anomaly".into(), sig.name.into()),
                     ],
-                    body,
+                    body: body.into(),
                 }
             }
         }
@@ -379,6 +381,15 @@ impl Plugin for AnomalyDetectorPlugin {
         if self.exempt.contains(&ctx.key) {
             return Ok(());
         }
+
+        // Collect body to check for anomalies (v1 logic)
+        let body = std::mem::replace(resp.body_mut(), Body::empty());
+        let collected = body
+            .collect()
+            .await
+            .map_err(|e| PluginError::Internal(format!("anomaly-detector body: {e}")))?
+            .to_bytes();
+
         let status = resp.status().as_u16();
         let triggered = self.check_response(&ctx.key, status);
         if let Some(sig) = triggered {
@@ -401,6 +412,9 @@ impl Plugin for AnomalyDetectorPlugin {
             // Response-side detection cannot short-circuit — the upstream
             // already produced a response. We only emit metrics + log.
         }
+
+        // Restore body
+        *resp.body_mut() = Body::from(collected);
         Ok(())
     }
 }
@@ -425,7 +439,6 @@ fn prune(state: &DashMap<String, Mutex<Baseline>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::body::Bytes;
 
     fn plugin(cfg: serde_json::Value) -> AnomalyDetectorPlugin {
         AnomalyDetectorPlugin::from_config(&cfg).unwrap()
@@ -625,7 +638,7 @@ mod tests {
 
         let mut resp = Response::builder()
             .status(500)
-            .body(http_body_util::Full::new(Bytes::new()))
+            .body(Body::empty())
             .unwrap();
         resp.extensions_mut().insert(ctx);
         p.on_response(&mut resp).await.unwrap();

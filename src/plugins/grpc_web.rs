@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use axum::http::{HeaderValue, Request, Response};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use http_body_util::BodyExt;
+use axum::body::Body;
 
 /// Translate gRPC-Web (`application/grpc-web+proto` or `-text`) to standard
 /// gRPC over HTTP/2 before the proxy hands the request to the gRPC dispatch
@@ -69,7 +70,7 @@ impl Plugin for GrpcWebPlugin {
         "grpc-web"
     }
 
-    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<Body>) -> Result<(), PluginError> {
         // Capture the origin so on_response can echo it back on success.
         let origin_str = req
             .headers()
@@ -112,7 +113,7 @@ impl Plugin for GrpcWebPlugin {
             return Err(PluginError::ShortCircuit {
                 status: 204,
                 headers,
-                body: Vec::new(),
+                body: Vec::new().into(),
             });
         }
 
@@ -129,7 +130,7 @@ impl Plugin for GrpcWebPlugin {
         // grpc-web-text bodies are base64-encoded; decode in place. Bodies
         // are typically small (single RPC frames) so a full buffer is fine.
         if ct == GRPC_WEB_TEXT {
-            let body = std::mem::replace(req.body_mut(), axum::body::Body::empty());
+            let body = std::mem::replace(req.body_mut(), Body::empty());
             let bytes = body
                 .collect()
                 .await
@@ -138,7 +139,7 @@ impl Plugin for GrpcWebPlugin {
             let decoded = B64
                 .decode(bytes.as_ref())
                 .map_err(|e| PluginError::Internal(format!("grpc-web: base64 decode: {e}")))?;
-            *req.body_mut() = axum::body::Body::from(decoded);
+            *req.body_mut() = Body::from(decoded);
         }
 
         // Rewrite content-type to standard gRPC and ensure the upstream sees
@@ -212,7 +213,7 @@ impl Plugin for GrpcWebPlugin {
         trailer_frame.extend_from_slice(&len.to_be_bytes());
         trailer_frame.extend_from_slice(&payload);
 
-        let body = std::mem::replace(resp.body_mut(), BoxBody::new(hyper::body::Bytes::new()));
+        let body = std::mem::replace(resp.body_mut(), Body::empty());
         let bytes = body
             .collect()
             .await
@@ -239,7 +240,7 @@ impl Plugin for GrpcWebPlugin {
             resp.headers_mut()
                 .insert(axum::http::header::CONTENT_LENGTH, v);
         }
-        *resp.body_mut() = BoxBody::new(hyper::body::Bytes::from(final_bytes));
+        *resp.body_mut() = Body::from(final_bytes);
         Ok(())
     }
 }

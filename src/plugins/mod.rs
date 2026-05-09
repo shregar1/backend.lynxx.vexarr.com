@@ -48,9 +48,9 @@ pub mod websocket_size_limit;
 
 use crate::db::Repository;
 use crate::error::{GatewayError, PluginError};
+use crate::quota::PlanTier;
 use async_trait::async_trait;
 use axum::http::{Request, Response};
-use hyper::body::Bytes;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,7 +58,7 @@ use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 use uuid::Uuid;
 
-pub type BoxBody = http_body_util::Full<Bytes>;
+pub type BoxBody = axum::body::Body;
 
 #[async_trait]
 pub trait Plugin: Send + Sync {
@@ -78,6 +78,22 @@ pub struct PluginIndex {
 /// Dynamic plugin registry. Plugins are persisted in the DB and rebuilt into
 /// concrete `Arc<dyn Plugin>` instances cached here. Every plugin CRUD op in
 /// the admin API triggers `rebuild` to refresh the cache.
+/// Plugins available on the Free tier. Everything else requires Pro+.
+const CORE_PLUGINS: &[&str] = &[
+    "rate_limit",
+    "cors",
+    "request_transformer",
+    "response_transformer",
+    "jwt",
+    "basic_auth",
+    "key_auth",
+    "logging",
+    "request_size_limit",
+    "request_termination",
+    "ip_restriction",
+    "proxy_cache",
+];
+
 pub struct PluginExecutor {
     built: RwLock<HashMap<Uuid, Arc<dyn Plugin>>>,
     index: RwLock<PluginIndex>,
@@ -94,10 +110,12 @@ pub struct PluginExecutor {
     /// changes. The main server loop listens on this and triggers a
     /// `rebuild()`.
     pub reload_signal: Arc<Notify>,
+    /// Licence tier that determines which plugins may be loaded.
+    tier: PlanTier,
 }
 
 impl PluginExecutor {
-    pub fn new() -> Self {
+    pub fn new(tier: PlanTier) -> Self {
         let reload_signal = Arc::new(Notify::new());
         let wasm_watcher = wasm::watcher::WasmWatcher::new();
 
@@ -115,6 +133,7 @@ impl PluginExecutor {
             is_empty: AtomicBool::new(true),
             wasm_watcher,
             reload_signal,
+            tier,
         }
     }
 
@@ -128,6 +147,8 @@ impl PluginExecutor {
     /// Re-fetch all plugin rows from the DB and (re)build every enabled plugin.
     /// Disabled plugins are skipped. Build failures are logged but do not abort
     /// the rebuild — other plugins still load.
+    ///
+    /// Free-tier licences only load `CORE_PLUGINS`; Pro+ loads everything.
     pub async fn rebuild(&self, repo: &Arc<dyn Repository>) -> Result<(), GatewayError> {
         let rows = repo.list_plugins().await?;
         let mut built: HashMap<Uuid, Arc<dyn Plugin>> = HashMap::with_capacity(rows.len());
@@ -135,6 +156,14 @@ impl PluginExecutor {
 
         for row in &rows {
             if !row.enabled {
+                continue;
+            }
+            if self.tier == PlanTier::Free && !CORE_PLUGINS.contains(&row.name.as_str()) {
+                tracing::debug!(
+                    plugin = %row.name,
+                    tier = %self.tier.as_str(),
+                    "plugin skipped — requires Pro+"
+                );
                 continue;
             }
             let plugin = match factory::build(&row.name, &row.config, Some(repo.clone())) {
@@ -260,6 +289,6 @@ impl PluginExecutor {
 
 impl Default for PluginExecutor {
     fn default() -> Self {
-        Self::new()
+        Self::new(PlanTier::Free)
     }
 }

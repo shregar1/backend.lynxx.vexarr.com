@@ -58,11 +58,7 @@ pub fn router(state: AppState) -> Router {
     // can't piggyback on the session cookie.
     let cors = CorsLayer::new()
         .allow_origin(state.allowed_origins.clone())
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::OPTIONS,
-        ])
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
@@ -219,19 +215,25 @@ async fn install_binary(
         arch = q.arch,
         name = q.name,
     );
-    let signed_url = signer.sign_get(&object, SIGNED_URL_TTL_SECS).await.map_err(|e| {
-        error!(error = %e, object = %object, "gcs signed-url mint failed");
-        ApiError(
-            StatusCode::BAD_GATEWAY,
-            "could not sign download URL".into(),
-        )
-    })?;
+    let signed_url = signer
+        .sign_get(&object, SIGNED_URL_TTL_SECS)
+        .await
+        .map_err(|e| {
+            error!(error = %e, object = %object, "gcs signed-url mint failed");
+            ApiError(
+                StatusCode::BAD_GATEWAY,
+                "could not sign download URL".into(),
+            )
+        })?;
 
     let mut headers = HeaderMap::new();
-    headers.insert(header::LOCATION, signed_url.parse().map_err(|e| {
-        error!(error = %e, "signed url is not a valid header value");
-        ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal".into())
-    })?);
+    headers.insert(
+        header::LOCATION,
+        signed_url.parse().map_err(|e| {
+            error!(error = %e, "signed url is not a valid header value");
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, "internal".into())
+        })?,
+    );
     headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
     Ok((StatusCode::FOUND, headers).into_response())
 }
@@ -663,82 +665,97 @@ async fn google_signin(
 
     let claims = google.verify(&req.id_token).await.map_err(|e| {
         warn!(error=%e, "google id_token rejected");
-        ApiError(StatusCode::UNAUTHORIZED, "invalid Google credentials".into())
+        ApiError(
+            StatusCode::UNAUTHORIZED,
+            "invalid Google credentials".into(),
+        )
     })?;
 
     let email = claims.email.trim().to_lowercase();
-    let display_name = claims
-        .name
-        .clone()
-        .or_else(|| match (&claims.given_name, &claims.family_name) {
-            (Some(g), Some(f)) => Some(format!("{g} {f}")),
-            (Some(g), None) => Some(g.clone()),
-            _ => None,
-        });
+    let display_name =
+        claims
+            .name
+            .clone()
+            .or_else(|| match (&claims.given_name, &claims.family_name) {
+                (Some(g), Some(f)) => Some(format!("{g} {f}")),
+                (Some(g), None) => Some(g.clone()),
+                _ => None,
+            });
 
     // Lookup or create. The customers table has password_hash NOT NULL
     // so we mint a random argon2 hash on first sign-up — Google is the
     // only way back in until the user requests a password reset, and
     // that reset flow generates a new hash.
-    let (customer_id, customer_urn, name, company, tier_code, created, api_key) =
-        match state.repo.find_customer_by_email(&email).await? {
-            Some(existing) => {
-                info!(
-                    customer_urn = %existing.urn,
-                    email = %existing.email,
-                    sub = %claims.sub,
-                    "google signin (existing customer)"
-                );
-                (
-                    existing.id,
-                    existing.urn,
-                    existing.name,
-                    existing.company,
-                    existing.tier_code,
-                    false,
-                    None,
-                )
-            }
-            None => {
-                if !state.public_signup_enabled {
-                    warn!(email=%email, "google signin rejected — public signup closed");
-                    return Err(ApiError(
+    let (customer_id, customer_urn, name, company, tier_code, created, api_key) = match state
+        .repo
+        .find_customer_by_email(&email)
+        .await?
+    {
+        Some(existing) => {
+            info!(
+                customer_urn = %existing.urn,
+                email = %existing.email,
+                sub = %claims.sub,
+                "google signin (existing customer)"
+            );
+            (
+                existing.id,
+                existing.urn,
+                existing.name,
+                existing.company,
+                existing.tier_code,
+                false,
+                None,
+            )
+        }
+        None => {
+            if !state.public_signup_enabled {
+                warn!(email=%email, "google signin rejected — public signup closed");
+                return Err(ApiError(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "Lynxx is in private beta — new accounts are invite-only. Email hi@lynxx.dev to request access.".into(),
                     ));
-                }
-                let urn = Uuid::new_v4();
-                let pw_hash = hash_password(&random_password())?;
-                let new_customer = NewCustomer {
-                    urn,
-                    email: email.clone(),
-                    password_hash: pw_hash,
-                    name: display_name.clone(),
-                    company: None,
-                    tier_code: "free".to_string(),
-                    stripe_customer_id: None,
-                    stripe_subscription_id: None,
-                    subscription_status_code: "active".into(),
-                    subscription_type_code: "free".into(),
-                };
-                let id = state.repo.create_customer(&new_customer).await?;
-                let key = mint_key(
-                    &state,
-                    id,
-                    "Default",
-                    vec!["read".into(), "write".into()],
-                    None,
-                )
-                .await?;
-                info!(
-                    customer_urn = %urn,
-                    email = %email,
-                    sub = %claims.sub,
-                    "google signin (new customer)"
-                );
-                (id, urn, display_name, None, "free".to_string(), true, Some(key))
             }
-        };
+            let urn = Uuid::new_v4();
+            let pw_hash = hash_password(&random_password())?;
+            let new_customer = NewCustomer {
+                urn,
+                email: email.clone(),
+                password_hash: pw_hash,
+                name: display_name.clone(),
+                company: None,
+                tier_code: "free".to_string(),
+                stripe_customer_id: None,
+                stripe_subscription_id: None,
+                subscription_status_code: "active".into(),
+                subscription_type_code: "free".into(),
+            };
+            let id = state.repo.create_customer(&new_customer).await?;
+            let key = mint_key(
+                &state,
+                id,
+                "Default",
+                vec!["read".into(), "write".into()],
+                None,
+            )
+            .await?;
+            info!(
+                customer_urn = %urn,
+                email = %email,
+                sub = %claims.sub,
+                "google signin (new customer)"
+            );
+            (
+                id,
+                urn,
+                display_name,
+                None,
+                "free".to_string(),
+                true,
+                Some(key),
+            )
+        }
+    };
 
     let token = issue_session(customer_id, &state.session_secret);
     let body = Json(GoogleAuthResp {
@@ -924,7 +941,7 @@ async fn start_checkout(
         .ok_or_else(|| bad("unsupported tier or stripe not configured"))?
         .to_string();
     let sess =
-        stripe::create_checkout_session(&state.stripe, &price_id, &c.email, &c.id.to_string())
+        stripe::create_checkout_session(&state.stripe, &price_id, &c.email, &c.urn.to_string())
             .await
             .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(json!({ "url": sess.url })))
@@ -1068,6 +1085,16 @@ async fn stripe_webhook(
         }
         // Payment failed → past_due (still active grace, but flagged).
         "invoice.payment_failed" => handle_payment_failed(&state, &data).await?,
+        // Subscription created directly (e.g. via API). Treat like an update.
+        "customer.subscription.created" => {
+            handle_subscription_event(&state, &data, "active").await?
+        }
+        // Successful payment — just log it. The subscription.updated event
+        // already flipped status to active, so nothing more to do.
+        "invoice.payment_succeeded" => {
+            let stripe_customer = data.get("customer").and_then(|v| v.as_str());
+            info!(stripe_customer = ?stripe_customer, "invoice payment succeeded");
+        }
         _ => info!(event_type = %kind, "unhandled stripe event"),
     }
     Ok(StatusCode::OK)
