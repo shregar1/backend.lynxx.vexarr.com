@@ -31,10 +31,8 @@ async fn assert_short_circuit(err: PluginError, status: u16, code: &str) {
             status: s, body, ..
         } => {
             assert_eq!(s, status, "status mismatch");
-            use http_body_util::BodyExt;
-            let b = body.take().unwrap();
-            let collected = b.collect().await.unwrap().to_bytes();
-            let parsed: serde_json::Value = serde_json::from_slice(&collected).expect("body is JSON");
+            let bytes = body.into_bytes().await;
+            let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("body is JSON");
             let actual = parsed
                 .pointer("/errors/0/extensions/code")
                 .and_then(|v| v.as_str())

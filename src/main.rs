@@ -355,8 +355,12 @@ async fn async_main() -> anyhow::Result<()> {
                 return Err(anyhow::anyhow!("ACME init: {e}"));
             }
         }
-        // Start background cert file watcher (polls every 30s).
+        // Start background cert file watcher (polls every 30s) and the
+        // auto-renewal loop (first tick ~10s, every 12h after). The renewal
+        // loop is what actually drives initial ACME issuance — without it
+        // nothing replaces a self-signed boot cert.
         mgr.spawn_cert_watcher();
+        mgr.spawn_auto_renew();
         Some(mgr)
     } else {
         None

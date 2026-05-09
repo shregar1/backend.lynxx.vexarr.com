@@ -806,6 +806,16 @@ impl AcmeManager {
         let (_, parsed) = x509_parser::parse_x509_certificate(certs[0].as_ref())
             .map_err(|e| GatewayError::Internal(format!("parse x509 for expiry: {e}")))?;
 
+        // Treat the self-signed boot cert as immediately needing replacement.
+        // generate_self_signed_cert sets the issuer's Organization to
+        // "Lynxx Self-Signed" — that string is the cleanest sentinel since
+        // a real LE cert's issuer is "Let's Encrypt R3"/etc.
+        let issuer = parsed.issuer().to_string();
+        if issuer.contains("Lynxx Self-Signed") {
+            tracing::info!(issuer = %issuer, "self-signed boot cert detected; requesting real ACME certificate");
+            return self.request_certificate().await;
+        }
+
         let not_after = parsed.validity().not_after.timestamp();
         let now = chrono::Utc::now().timestamp();
         let days_remaining = (not_after - now) / 86400;
