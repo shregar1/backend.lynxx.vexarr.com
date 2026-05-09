@@ -1,79 +1,57 @@
-# Lynxx Gateway
+# backend.lynxx.dev
 
-API gateway in Rust. Three binaries: `lynxx-gateway` (proxy + admin :9000/:9001), `lynxx-ingress` (K8s controller), `lynxx` (admin CLI).
+> **Private Beta · Coming Soon**
+>
+> This project is currently in invite-only private beta. The source
+> tree, binaries, and any container images are **not publicly
+> distributed** at this time. Public release will be announced via
+> the appropriate product website.
 
-## Quickstart (Docker Compose)
+---
 
-```sh
-docker compose up --build
-curl http://localhost:9001/status
-```
+## Status
 
-## Quickstart (Helm)
+- **Repository visibility:** private. If you can read this, you are
+  an invited collaborator under NDA.
+- **Distribution:** no GitHub Releases, no public package registries
+  (crates.io / PyPI / npm), no Docker Hub / GHCR, no public CDN.
+- **License:** Proprietary — All Rights Reserved. See [`LICENSE`](LICENSE).
 
-```sh
-helm install lynxx ./deploy/helm/lynxx
-```
+## Beta access
 
-## Local dev
+Send a request via the private onboarding channel established by the
+project owner. Approved testers receive their access materials there.
 
-```sh
-cargo run --bin lynxx-gateway
-```
+## What you may do under the beta agreement
 
-## CLI
+- Build the project and run it against your own data.
+- File issues on the private GitHub issue tracker.
+- Provide feedback through the agreed-upon private channel.
 
-The `lynxx` binary is the official admin client. It defaults to
-`http://localhost:9001` and resolves the admin URL as
-`--admin > LYNXX_ADMIN > ~/.config/lynxx/config.toml > default`. Tables are
-boxed in light box-drawing chars on a TTY; `--output json|yaml` for machine
-consumption. Color is on by default; disable with `--no-color` or `NO_COLOR=1`.
-Truncated 8-char UUIDs are shown by default; `--full-id` for the whole thing.
+## What you may **not** do
 
-```sh
-# Inspect
-lynxx ping
-lynxx services list
+- Distribute compiled binaries, Docker images, or source tarballs.
+- Mirror the source tree to a public or private third-party location,
+  including any code-hosting platform.
+- Run the project in a service exposed to non-beta users.
+- Publish benchmarks, marketing material, screenshots, or derived
+  analyses without prior written approval.
+- Attempt to bypass any runtime access control.
 
-# Manage
-lynxx services create --name api --url http://api.svc:8080
-lynxx routes create --service api --paths /api
-lynxx plugins install jwt --config '{"secret":"shh"}'
+## Public timeline
 
-# Declarative — diff plan, confirm, apply
-lynxx dump > state.yaml
-vim state.yaml
-lynxx validate -f state.yaml          # offline lint
-lynxx apply -f state.yaml             # prints +/~/- plan, prompts y/N
-lynxx apply -f state.yaml --auto-approve  # CI mode
-lynxx apply -f state.yaml --dry-run       # plan only, no mutation
+The public-release timeline is intentionally unannounced. Announcements
+will go through the project's official website only — not GitHub
+Releases, not crates.io, not Twitter.
 
-# Live views (Ctrl-C exits, cursor restored)
-lynxx watch services -n 2             # redraws every 2s
-lynxx watch health
-lynxx tail                            # per-tick request deltas from /metrics
+## Contact
 
-# Smoke test a route through the proxy
-lynxx exec /api/v1/users
-lynxx exec /api/v1/users -X POST --body @payload.json -H 'Authorization: Bearer …'
+For beta-access requests, license-key issues, or NDA questions, reach
+out via the private channel coordinated at onboarding. There is no
+public support channel during beta.
 
-# Local config (so you don't retype --admin)
-lynxx config set admin http://prod-gateway:9001
-lynxx config show
-```
+---
 
-Apply ordering is **services → targets → routes → plugins**, with deletes in
-reverse. On failure, execution stops and partial state is **not** rolled back —
-the plan output makes it clear which step failed.
-
-Shell completions: `lynxx completion zsh > _lynxx`.
-
-## Gateway flags
-
-The gateway accepts CLI flags as the highest-precedence config layer
-(`flag > env > config.toml > default`):
-
-```sh
-lynxx-gateway --config /etc/lynxx/config.toml --proxy-port 9000 --admin-port 9001
-```
-
+*This README is the private-beta landing page applied as part of the
+project lockdown. Engineering documentation has moved to the private
+docs index — beta participants have the URL.*
