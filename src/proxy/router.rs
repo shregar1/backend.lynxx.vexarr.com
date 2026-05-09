@@ -164,6 +164,8 @@ impl RouteTable {
                 if p.ends_with('*') {
                     let prefix = &p[..p.len() - 1];
                     path.starts_with(prefix)
+                } else if p == "/" {
+                    true
                 } else {
                     path == p || path.starts_with(&format!("{p}/"))
                 }

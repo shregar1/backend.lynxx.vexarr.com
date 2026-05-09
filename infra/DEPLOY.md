@@ -7,7 +7,7 @@ Complete bootstrap from zero to a running production cluster.
 ## Prerequisites
 
 | Tool | Min version |
-|------|-------------|
+| ------ | ------------- |
 | `gcloud` CLI | 470+ |
 | `terraform` | 1.7+ |
 | `helm` | 3.14+ |
@@ -44,6 +44,7 @@ $EDITOR terraform.tfvars     # fill in project_id, bucket, domains, db_password
 ```
 
 Key values:
+
 - `project_id` — from `gcloud projects list`
 - `tf_state_bucket` — bucket name from Step 1
 - `domain` — e.g. `api.lynxx.dev` (the gateway endpoint)
@@ -100,7 +101,7 @@ Each entry is `{ name, type, rrdata }` — add the matching record set
 The gateway LB stays on its own A record:
 
 | Record | Type | Value |
-|--------|------|-------|
+| ------ | ---- | ----- |
 | `api.lynxx.vexarr.com` | A/AAAA | from `billing_domain_dns` |
 | `lynxx.vexarr.com` | A/AAAA | from `website_domain_dns` |
 | `app.lynxx.vexarr.com` | A/AAAA | from `dashboard_domain_dns` |
@@ -226,6 +227,18 @@ terraform apply \
   -var="gateway_replicas=1" \
   -var="cluster_name=lynxx-staging"
 ```
+
+---
+
+## Binary upgrades (VM or manual install)
+
+Replacing `/usr/local/bin/lynxx-gateway` **does not** remove or reset configured services, routes, plugins, or consumers. That state is stored in the **gateway database** (`[gateway].database_url` / `DATABASE_URL`). On each start the gateway **reloads** everything from the database.
+
+Safe practices:
+
+- Keep the **same database URL** when you upgrade the executable.
+- Leave **`[gateway].seed_from_config`** off (`false`) in production unless you intentionally bootstrap an empty DB from `config.toml`. When the DB already has data, seeding is **skipped** even if `seed_from_config` is true.
+- Avoid swapping in an empty SQLite file or pointing `DATABASE_URL` at a fresh database without a migration plan.
 
 ---
 

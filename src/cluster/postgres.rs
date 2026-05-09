@@ -29,7 +29,7 @@ impl ClusterBus for PostgresBus {
             .bind(&payload)
             .execute(&self.pool)
             .await?;
-        tracing::info!(
+        tracing::debug!(
             kind = event.kind(),
             origin = %event.origin(),
             "cluster event published"

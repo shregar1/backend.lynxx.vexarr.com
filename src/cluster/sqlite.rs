@@ -37,7 +37,7 @@ impl ClusterBus for SqliteBus {
             .bind(Utc::now().to_rfc3339())
             .execute(&self.pool)
             .await?;
-        tracing::info!(
+        tracing::debug!(
             kind = event.kind(),
             origin = %event.origin(),
             "cluster event published"

@@ -488,16 +488,86 @@ impl AcmeManager {
     // Full ACME order flow
     // ------------------------------------------------------------------
 
+    /// Resolve each candidate domain and keep only those whose A/AAAA
+    /// records point to one of this machine's public IPs. Domains that
+    /// resolve elsewhere or fail DNS are logged and dropped — they would
+    /// cause ACME challenge failures anyway.
+    async fn filter_resolvable_domains(&self, candidates: &[String]) -> Vec<String> {
+        let our_ips = Self::local_public_ips().await;
+        if our_ips.is_empty() {
+            tracing::warn!("could not determine public IPs; skipping DNS pre-flight filter");
+            return candidates.to_vec();
+        }
+
+        let resolver = hickory_resolver::TokioAsyncResolver::tokio(
+            hickory_resolver::config::ResolverConfig::default(),
+            hickory_resolver::config::ResolverOpts::default(),
+        );
+
+        let mut keepers = Vec::new();
+        for domain in candidates {
+            match resolver.lookup_ip(domain.as_str()).await {
+                Ok(lookup) => {
+                    let resolved: Vec<std::net::IpAddr> = lookup.iter().collect();
+                    if resolved.iter().any(|ip| our_ips.contains(ip)) {
+                        keepers.push(domain.clone());
+                    } else {
+                        tracing::warn!(
+                            domain = %domain,
+                            resolved = ?resolved,
+                            our_ips = ?our_ips,
+                            "domain resolves elsewhere; excluding from ACME order"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        domain = %domain,
+                        error = %e,
+                        "domain DNS lookup failed; excluding from ACME order"
+                    );
+                }
+            }
+        }
+        keepers
+    }
+
+    /// Discover this machine's public IP addresses by querying external
+    /// services. Returns both IPv4 and IPv6 when available.
+    async fn local_public_ips() -> std::collections::HashSet<std::net::IpAddr> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_default();
+
+        let mut ips = std::collections::HashSet::new();
+        for url in &[
+            "https://api.ipify.org",
+            "https://api64.ipify.org",
+            "https://ifconfig.me/ip",
+        ] {
+            if let Ok(resp) = client.get(*url).send().await {
+                if let Ok(text) = resp.text().await {
+                    if let Ok(ip) = text.trim().parse::<std::net::IpAddr>() {
+                        ips.insert(ip);
+                    }
+                }
+            }
+        }
+        ips
+    }
+
     /// Request a certificate from the configured ACME directory for all
-    /// configured domains. Handles:
+    /// configured domains. Uses per-domain orders so a single failing
+    /// domain doesn't block the rest. Handles:
     ///
     /// 1. Account creation / loading
-    /// 2. Order creation
-    /// 3. Authorization challenges (HTTP-01 or TLS-ALPN-01 based on
-    ///    `challenge_type` config)
-    /// 4. Order finalization with a fresh CSR
-    /// 5. Certificate download and disk persistence
-    /// 6. Hot-reload of the `ServerConfig`
+    /// 2. DNS pre-flight filter (drop domains that don't resolve here)
+    /// 3. Per-domain order creation
+    /// 4. Authorization challenges (HTTP-01 or TLS-ALPN-01)
+    /// 5. Order finalization with a fresh CSR
+    /// 6. Certificate download and disk persistence
+    /// 7. Hot-reload of the `ServerConfig`
     pub async fn request_certificate(&self) -> Result<(), GatewayError> {
         let domains = &self.config.domains;
         if domains.is_empty() {
@@ -506,50 +576,93 @@ impl AcmeManager {
             ));
         }
 
-        tracing::info!(domains = ?domains, "starting ACME certificate request");
+        let reachable = self.filter_resolvable_domains(domains).await;
+        if reachable.is_empty() {
+            return Err(GatewayError::Internal(
+                "ACME: no configured domains resolve to this server's public IP".into(),
+            ));
+        }
+        if reachable.len() < domains.len() {
+            let skipped: Vec<&String> = domains.iter().filter(|d| !reachable.contains(d)).collect();
+            tracing::warn!(
+                skipped = ?skipped,
+                "ACME: some configured domains don't resolve here; proceeding with {:?}",
+                reachable
+            );
+        }
 
-        // Step 1: account.
+        tracing::info!(domains = ?reachable, "starting ACME certificate request");
+
         let account = self.get_or_create_account().await?;
 
-        // Step 2: create order.
-        let identifiers: Vec<instant_acme::Identifier> = domains
-            .iter()
-            .map(|d| instant_acme::Identifier::Dns(d.clone()))
-            .collect();
+        let mut succeeded: Vec<String> = Vec::new();
+        let mut failed: Vec<(String, String)> = Vec::new();
+
+        for domain in &reachable {
+            match self.request_certificate_for_domain(&account, domain).await {
+                Ok(()) => {
+                    tracing::info!(domain = %domain, "ACME cert issued successfully");
+                    succeeded.push(domain.clone());
+                }
+                Err(e) => {
+                    tracing::warn!(domain = %domain, error = %e, "ACME cert failed; skipping domain");
+                    failed.push((domain.clone(), e.to_string()));
+                }
+            }
+        }
+
+        if succeeded.is_empty() {
+            return Err(GatewayError::Internal(format!(
+                "ACME: all domains failed: {:?}",
+                failed
+            )));
+        }
+
+        if !failed.is_empty() {
+            tracing::warn!(
+                succeeded = ?succeeded,
+                failed = ?failed,
+                "ACME: some domains failed; certs issued for successful ones only"
+            );
+        }
+
+        self.try_load_cert().await?;
+        tracing::info!("ACME certificate loaded into server");
+        Ok(())
+    }
+
+    /// Issue a certificate for a single domain via a standalone ACME order.
+    async fn request_certificate_for_domain(
+        &self,
+        account: &instant_acme::Account,
+        domain: &str,
+    ) -> Result<(), GatewayError> {
+        let identifiers = vec![instant_acme::Identifier::Dns(domain.to_string())];
         let mut order = account
             .new_order(&instant_acme::NewOrder {
                 identifiers: &identifiers,
             })
             .await
-            .map_err(|e| GatewayError::Internal(format!("create ACME order: {e}")))?;
+            .map_err(|e| GatewayError::Internal(format!("create ACME order for {domain}: {e}")))?;
 
-        tracing::info!(status = ?order.state().status, "ACME order created");
-
-        // Step 3: handle authorizations.
         let authorizations = order
             .authorizations()
             .await
-            .map_err(|e| GatewayError::Internal(format!("fetch authorizations: {e}")))?;
+            .map_err(|e| GatewayError::Internal(format!("fetch authorizations for {domain}: {e}")))?;
 
         let challenge_type = self.config.challenge_type.as_str();
 
         for authz in &authorizations {
             if authz.status == instant_acme::AuthorizationStatus::Valid {
-                tracing::info!(
-                    identifier = ?authz.identifier,
-                    "authorization already valid, skipping"
-                );
                 continue;
             }
 
-            let instant_acme::Identifier::Dns(ref domain) = authz.identifier;
-
-            // Pick the right challenge based on config.
+            let instant_acme::Identifier::Dns(ref auth_domain) = authz.identifier;
             let challenge = self
                 .pick_challenge(&authz.challenges, challenge_type)
                 .ok_or_else(|| {
                     GatewayError::Internal(format!(
-                        "no suitable challenge for domain {domain} with type '{challenge_type}'"
+                        "no suitable challenge for {auth_domain} with type '{challenge_type}'"
                     ))
                 })?;
 
@@ -557,16 +670,10 @@ impl AcmeManager {
 
             match challenge.r#type {
                 instant_acme::ChallengeType::Http01 => {
-                    tracing::info!(
-                        domain = %domain,
-                        token = %challenge.token,
-                        "setting up HTTP-01 challenge"
-                    );
                     self.set_challenge(challenge.token.clone(), key_auth.as_str().to_string());
                 }
                 instant_acme::ChallengeType::TlsAlpn01 => {
-                    tracing::info!(domain = %domain, "setting up TLS-ALPN-01 challenge");
-                    self.set_tls_alpn_challenge(domain.clone(), key_auth.as_str().to_string())?;
+                    self.set_tls_alpn_challenge(auth_domain.clone(), key_auth.as_str().to_string())?;
                 }
                 _ => {
                     return Err(GatewayError::Internal(format!(
@@ -576,32 +683,28 @@ impl AcmeManager {
                 }
             }
 
-            // Tell the server the challenge is ready.
             order
                 .set_challenge_ready(&challenge.url)
                 .await
                 .map_err(|e| {
-                    GatewayError::Internal(format!("set challenge ready for {domain}: {e}"))
+                    GatewayError::Internal(format!("set challenge ready for {auth_domain}: {e}"))
                 })?;
-
-            tracing::info!(domain = %domain, "challenge marked ready");
         }
 
-        // Step 4: poll until the order is ready or invalid.
         let mut delay = std::time::Duration::from_secs(1);
         for attempt in 1u8..=10 {
             tokio::time::sleep(delay).await;
             let state = order
                 .refresh()
                 .await
-                .map_err(|e| GatewayError::Internal(format!("refresh order: {e}")))?;
-            tracing::info!(attempt, status = ?state.status, "polling ACME order status");
+                .map_err(|e| GatewayError::Internal(format!("refresh order for {domain}: {e}")))?;
+            tracing::info!(attempt, domain = %domain, status = ?state.status, "polling ACME order");
             match state.status {
                 instant_acme::OrderStatus::Ready | instant_acme::OrderStatus::Valid => break,
                 instant_acme::OrderStatus::Invalid => {
                     self.cleanup_challenges(&authorizations);
                     return Err(GatewayError::Internal(format!(
-                        "ACME order became invalid: {:?}",
+                        "ACME order for {domain} became invalid: {:?}",
                         state.error
                     )));
                 }
@@ -611,30 +714,26 @@ impl AcmeManager {
             }
         }
 
-        // Clean up challenges now that validation is done.
         self.cleanup_challenges(&authorizations);
 
         if order.state().status == instant_acme::OrderStatus::Ready {
-            // Step 5: finalize with a CSR.
-            tracing::info!("generating CSR and finalizing order");
-
-            let mut csr_params = rcgen::CertificateParams::new(domains.to_vec())
-                .map_err(|e| GatewayError::Internal(format!("CSR params: {e}")))?;
+            let domains_vec = vec![domain.to_string()];
+            let mut csr_params = rcgen::CertificateParams::new(domains_vec)
+                .map_err(|e| GatewayError::Internal(format!("CSR params for {domain}: {e}")))?;
             csr_params.distinguished_name = rcgen::DistinguishedName::new();
 
             let private_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
-                .map_err(|e| GatewayError::Internal(format!("generate CSR key: {e}")))?;
+                .map_err(|e| GatewayError::Internal(format!("generate CSR key for {domain}: {e}")))?;
 
             let csr = csr_params
                 .serialize_request(&private_key)
-                .map_err(|e| GatewayError::Internal(format!("serialize CSR: {e}")))?;
+                .map_err(|e| GatewayError::Internal(format!("serialize CSR for {domain}: {e}")))?;
 
             order
                 .finalize(csr.der())
                 .await
-                .map_err(|e| GatewayError::Internal(format!("finalize order: {e}")))?;
+                .map_err(|e| GatewayError::Internal(format!("finalize order for {domain}: {e}")))?;
 
-            // Step 6: poll for the certificate.
             let cert_pem = {
                 let mut pem = None;
                 for _ in 0..10 {
@@ -644,37 +743,28 @@ impl AcmeManager {
                             pem = Some(chain);
                             break;
                         }
-                        Ok(None) => {
-                            tracing::info!("certificate not ready yet, polling...");
-                        }
+                        Ok(None) => {}
                         Err(e) => {
                             return Err(GatewayError::Internal(format!(
-                                "download certificate: {e}"
+                                "download certificate for {domain}: {e}"
                             )));
                         }
                     }
                 }
                 pem.ok_or_else(|| {
-                    GatewayError::Internal("timed out waiting for certificate".into())
+                    GatewayError::Internal(format!("timed out waiting for cert for {domain}"))
                 })?
             };
 
-            // Step 7: write cert + key to disk.
-            let cert_path = self
-                .cert_path()
-                .ok_or_else(|| GatewayError::Internal("no primary domain for cert path".into()))?;
-            let key_path = self
-                .key_path()
-                .ok_or_else(|| GatewayError::Internal("no primary domain for key path".into()))?;
+            let domain_dir = self.storage_dir().join(domain);
+            let cert_path = domain_dir.join("cert.pem");
+            let key_path = domain_dir.join("key.pem");
 
-            if let Some(parent) = cert_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    GatewayError::Internal(format!("create cert dir {}: {e}", parent.display()))
-                })?;
-            }
+            std::fs::create_dir_all(&domain_dir).map_err(|e| {
+                GatewayError::Internal(format!("create cert dir {}: {e}", domain_dir.display()))
+            })?;
 
             let key_pem = private_key.serialize_pem();
-
             std::fs::write(&cert_path, cert_pem.as_bytes()).map_err(|e| {
                 GatewayError::Internal(format!("write cert {}: {e}", cert_path.display()))
             })?;
@@ -689,15 +779,11 @@ impl AcmeManager {
             }
 
             tracing::info!(
+                domain = %domain,
                 cert = %cert_path.display(),
-                key = %key_path.display(),
                 "ACME certificate written to disk"
             );
         }
-
-        // Step 8: reload into the running server.
-        self.try_load_cert().await?;
-        tracing::info!("ACME certificate loaded into server");
 
         Ok(())
     }
@@ -825,6 +911,39 @@ impl AcmeManager {
             not_after = %parsed.validity().not_after,
             "cert expiry check"
         );
+
+        // Check if the configured domains have changed since the cert was issued.
+        let configured: std::collections::HashSet<&str> =
+            self.config.domains.iter().map(|s| s.as_str()).collect();
+        let cert_sans: std::collections::HashSet<String> = parsed
+            .subject_alternative_name()
+            .ok()
+            .flatten()
+            .map(|ext| {
+                ext.value
+                    .general_names
+                    .iter()
+                    .filter_map(|gn| {
+                        if let x509_parser::prelude::GeneralName::DNSName(dns) = gn {
+                            Some(dns.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
+        let cert_san_refs: std::collections::HashSet<&str> =
+            cert_sans.iter().map(|s| s.as_str()).collect();
+        let missing: Vec<&&str> = configured.difference(&cert_san_refs).collect();
+
+        if !missing.is_empty() {
+            tracing::info!(
+                ?missing,
+                "configured domains not in cert SANs; forcing re-issue"
+            );
+            return self.request_certificate().await;
+        }
 
         if days_remaining <= 30 {
             tracing::info!(

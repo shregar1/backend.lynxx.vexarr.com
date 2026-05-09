@@ -83,10 +83,12 @@ pub fn admin_router(
         .route("/plugins/:id", get(routes::get_plugin))
         .route("/consumers", get(routes::list_consumers))
         .route("/health", get(routes::list_health))
+        .route("/healthz", get(routes::healthz))
         .route("/health/:service_id", get(routes::get_health))
         .route("/status", get(routes::gateway_status))
         .route("/metrics", get(routes::metrics))
         .route("/quota", get(routes::quota_snapshot))
+        .route("/circuit-breakers", get(routes::list_circuit_breakers))
         .route_layer(middleware::from_fn(viewer));
 
     // ---- mutations (operator) ----
@@ -94,7 +96,9 @@ pub fn admin_router(
         .route("/services", post(routes::create_service))
         .route(
             "/services/:id",
-            put(routes::update_service).delete(routes::delete_service),
+            put(routes::update_service)
+                .patch(routes::patch_service)
+                .delete(routes::delete_service),
         )
         .route("/services/:id/targets", post(routes::create_service_target))
         .route(
@@ -104,7 +108,9 @@ pub fn admin_router(
         .route("/routes", post(routes::create_route))
         .route(
             "/routes/:id",
-            put(routes::update_route).delete(routes::delete_route),
+            put(routes::update_route)
+                .patch(routes::patch_route)
+                .delete(routes::delete_route),
         )
         .route("/plugins", post(routes::create_plugin))
         .route(
@@ -144,6 +150,11 @@ pub fn admin_router(
             axum::routing::delete(routes::clear_tls_alpn_challenge),
         )
         .route("/acme/status", get(routes::acme_status))
+        .route("/acme/renew", post(routes::acme_renew))
+        .route(
+            "/circuit-breakers/:service_id/reset",
+            post(routes::reset_circuit_breaker),
+        )
         .route_layer(middleware::from_fn(operator));
 
     // ---- token management (admin) ----

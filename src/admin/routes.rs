@@ -160,6 +160,24 @@ pub struct CreateRoute {
 }
 
 #[derive(Deserialize)]
+pub struct PatchRoute {
+    pub paths: Option<Vec<String>>,
+    pub methods: Option<Vec<String>>,
+    pub hosts: Option<Vec<String>>,
+    pub service_id: Option<Uuid>,
+    pub strip_path: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct PatchService {
+    pub name: Option<String>,
+    pub url: Option<String>,
+    pub retries: Option<u32>,
+    pub connect_timeout_ms: Option<u64>,
+    pub lb_strategy: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct CreatePlugin {
     pub name: String,
     #[serde(default)]
@@ -186,6 +204,7 @@ pub struct CreateConsumer {
 pub struct StatusResponse {
     pub status: String,
     pub version: String,
+    pub build_hash: String,
     pub uptime_seconds: i64,
     pub services_count: usize,
     pub routes_count: usize,
@@ -470,6 +489,122 @@ pub async fn update_route(
     publish_event(
         &state,
         ChangeEvent::RouteUpdated {
+            id,
+            origin: state.node_id,
+        },
+    )
+    .await;
+    Ok(Json(updated))
+}
+
+pub async fn patch_route(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
+    Json(input): Json<PatchRoute>,
+) -> Result<Json<Route>, GatewayError> {
+    let now = Utc::now();
+    let existing = state
+        .route_table
+        .get_route(&id)
+        .ok_or_else(|| GatewayError::NotFound(format!("route {id}")))?;
+
+    if let Some(ref sid) = input.service_id {
+        if state.route_table.get_service(sid).is_none() {
+            return Err(GatewayError::BadRequest(format!("service {} not found", sid)));
+        }
+    }
+
+    let updated = Route {
+        id,
+        paths: input.paths.unwrap_or_else(|| existing.paths.clone()),
+        methods: input.methods.unwrap_or_else(|| existing.methods.clone()),
+        hosts: input.hosts.unwrap_or_else(|| existing.hosts.clone()),
+        service_id: input.service_id.unwrap_or(existing.service_id),
+        strip_path: input.strip_path.unwrap_or(existing.strip_path),
+        created_at: existing.created_at,
+        updated_at: now,
+    };
+
+    state.repo.update_route(&id, &updated).await?;
+    state.route_table.update_route(&id, updated.clone());
+    state
+        .audit
+        .record(
+            AuditAction::Update,
+            ResourceType::Route,
+            Some(id.to_string()),
+            Some(serde_json::json!({ "before": existing, "after": updated })),
+            actor_of(&actor),
+        )
+        .await;
+    publish_event(
+        &state,
+        ChangeEvent::RouteUpdated {
+            id,
+            origin: state.node_id,
+        },
+    )
+    .await;
+    Ok(Json(updated))
+}
+
+pub async fn patch_service(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
+    Json(input): Json<PatchService>,
+) -> Result<Json<Service>, GatewayError> {
+    let now = Utc::now();
+    let existing = state
+        .route_table
+        .get_service(&id)
+        .ok_or_else(|| GatewayError::NotFound(format!("service {id}")))?;
+
+    let new_strategy = input
+        .lb_strategy
+        .unwrap_or_else(|| existing.lb_strategy.clone());
+    let strategy_changed = new_strategy != existing.lb_strategy;
+
+    let updated = Service {
+        id,
+        name: input.name.unwrap_or_else(|| existing.name.clone()),
+        url: input.url.unwrap_or_else(|| existing.url.clone()),
+        retries: input.retries.unwrap_or(existing.retries),
+        connect_timeout_ms: input.connect_timeout_ms.unwrap_or(existing.connect_timeout_ms),
+        lb_strategy: new_strategy,
+        tls_verify: existing.tls_verify,
+        tls_client_cert_path: existing.tls_client_cert_path.clone(),
+        tls_client_key_path: existing.tls_client_key_path.clone(),
+        tls_ca_path: existing.tls_ca_path.clone(),
+        created_at: existing.created_at,
+        updated_at: now,
+    };
+
+    state.repo.update_service(&id, &updated).await?;
+    state.route_table.update_service(&id, updated.clone());
+    state.client_pool.invalidate(&id);
+
+    if strategy_changed {
+        let targets = state.repo.list_targets_for_service(&id).await?;
+        state
+            .lb
+            .rebuild_for_service(id, LbStrategy::from_str(&updated.lb_strategy), targets);
+    }
+
+    state
+        .audit
+        .record(
+            AuditAction::Update,
+            ResourceType::Service,
+            Some(id.to_string()),
+            Some(serde_json::json!({ "before": existing, "after": updated })),
+            actor_of(&actor),
+        )
+        .await;
+    publish_event(
+        &state,
+        ChangeEvent::ServiceUpdated {
             id,
             origin: state.node_id,
         },
@@ -1145,12 +1280,60 @@ pub async fn gateway_status(
     Ok(Json(StatusResponse {
         status: "running".into(),
         version: env!("CARGO_PKG_VERSION").into(),
+        build_hash: env!("LYNXX_BUILD_HASH").into(),
         uptime_seconds: uptime,
         services_count: state.route_table.list_services().len(),
         routes_count: state.route_table.list_routes().len(),
         plugins_count,
         consumers_count,
     }))
+}
+
+pub async fn healthz(
+    State(state): State<AdminState>,
+) -> Result<Json<StatusResponse>, GatewayError> {
+    gateway_status(State(state)).await
+}
+
+// ---------- circuit breakers ----------
+
+pub async fn list_circuit_breakers(
+    State(state): State<AdminState>,
+) -> Json<Vec<ServiceHealth>> {
+    Json(state.health.list())
+}
+
+pub async fn reset_circuit_breaker(
+    State(state): State<AdminState>,
+    Path(service_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    state
+        .health
+        .reset_circuit(&service_id)
+        .ok_or_else(|| GatewayError::NotFound(format!("service {service_id}")))?;
+    tracing::info!(service_id = %service_id, "circuit breaker manually reset");
+    Ok(Json(serde_json::json!({"reset": true, "service_id": service_id})))
+}
+
+// ---------- ACME force renew ----------
+
+#[derive(Deserialize)]
+pub struct AcmeRenewQuery {
+    pub force: Option<bool>,
+}
+
+pub async fn acme_renew(
+    State(state): State<AdminState>,
+    Query(q): Query<AcmeRenewQuery>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    let mgr = require_acme(&state)?;
+    if q.force.unwrap_or(false) {
+        mgr.request_certificate().await?;
+        Ok(Json(serde_json::json!({"renewed": true, "forced": true})))
+    } else {
+        mgr.request_certificate().await?;
+        Ok(Json(serde_json::json!({"renewed": true})))
+    }
 }
 
 // ---------------------------------------------------------------------------

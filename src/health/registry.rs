@@ -189,6 +189,16 @@ impl HealthRegistry {
             .set(crate::metrics::health_status_value(status));
     }
 
+    pub fn reset_circuit(&self, service_id: &Uuid) -> Option<()> {
+        let mut entry = self.entries.get_mut(service_id)?;
+        entry.circuit = CircuitState::Closed;
+        entry.consecutive_failures = 0;
+        entry.consecutive_successes = 0;
+        entry.opened_at = None;
+        entry.status = HealthStatus::Unknown;
+        Some(())
+    }
+
     pub fn should_allow_request(&self, service_id: &Uuid, open_duration_ms: u64) -> bool {
         let mut entry = match self.entries.get_mut(service_id) {
             Some(e) => e,

@@ -69,6 +69,11 @@ struct Args {
     #[arg(long)]
     no_seed: bool,
 
+    /// Force re-seed from config.toml even if the database already has data.
+    /// Overwrites existing services/routes/plugins with the config file state.
+    #[arg(long)]
+    reseed: bool,
+
     /// Override [gateway].health_check_interval_ms
     #[arg(long, env = "LYNXX_HEALTH_INTERVAL_MS")]
     health_check_interval_ms: Option<u64>,
@@ -130,7 +135,7 @@ async fn async_main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("lynxx_gateway=info,tower_http=info")),
+                .unwrap_or_else(|_| EnvFilter::new("lynxx_gateway=info,tower_http=debug")),
         )
         .init();
 
@@ -177,9 +182,21 @@ async fn async_main() -> anyhow::Result<()> {
     let repo: Arc<dyn Repository> = crate::db::connect(&config.gateway.database_url).await?;
     tracing::info!(database_url = %config.gateway.database_url, "database ready");
 
-    if config.gateway.seed_from_config && repo.is_empty().await? {
-        tracing::info!("database empty; seeding from config.toml");
+    // Services, routes, plugins, and consumers live in this database. Replacing the
+    // `lynxx-gateway` binary does not touch them. Initial seed from config.toml runs
+    // only when [gateway].seed_from_config is true *and* the DB has no rows yet.
+    let db_empty = repo.is_empty().await?;
+    if args.reseed {
+        tracing::info!("--reseed: forcing re-seed from config.toml (overwriting DB state)");
         repo.seed_from_config(&config).await?;
+    } else if config.gateway.seed_from_config && db_empty {
+        tracing::info!("database empty; seeding from config.toml (first boot only)");
+        repo.seed_from_config(&config).await?;
+    } else if config.gateway.seed_from_config && !db_empty {
+        tracing::info!(
+            "seed_from_config is set but database already has data; skipping \
+             (use --reseed to force). Config changes won't take effect until --reseed or admin API."
+        );
     }
 
     // ---------- admin auth bootstrap ----------
@@ -205,6 +222,18 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     if !repo.has_any_admin_token().await? {
+        let is_production = std::env::var("NODE_ENV")
+            .map(|v| v.eq_ignore_ascii_case("production"))
+            .unwrap_or(false);
+        if is_production {
+            eprintln!(
+                "FATAL: admin API has no tokens and NODE_ENV=production. \
+                 Pass --bootstrap-admin-token <name> to create one at startup."
+            );
+            return Err(anyhow::anyhow!(
+                "admin API requires at least one token in production mode"
+            ));
+        }
         tracing::warn!(
             "admin API is in BOOTSTRAP MODE (no admin tokens configured); \
              all requests are accepted. Create a token via POST /tokens or \
@@ -517,6 +546,25 @@ async fn async_main() -> anyhow::Result<()> {
     tracing::info!("Dashboard available at http://localhost:{}", config.gateway.admin_port);
     tracing::info!("admin listening on {admin_addr}");
 
+    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+    {
+        let n = shutdown_notify.clone();
+        tokio::spawn(async move {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("install SIGTERM handler");
+            tokio::select! {
+                _ = sigterm.recv() => tracing::info!("SIGTERM received, draining connections…"),
+                res = tokio::signal::ctrl_c() => {
+                    if res.is_ok() {
+                        tracing::info!("SIGINT received, draining connections…");
+                    }
+                }
+            }
+            n.notify_waiters();
+        });
+    }
+
     // Branch on TLS termination. Plain HTTP keeps the existing axum::serve
     // path; HTTPS uses axum-server's bind_rustls so we don't have to
     // reinvent the accept loop. Only the proxy listener is affected — the
@@ -541,7 +589,10 @@ async fn async_main() -> anyhow::Result<()> {
             config.gateway.acme.domains
         );
         let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(server_config);
+        let handle = axum_server::Handle::new();
+        let shutdown_handle = handle.clone();
         let serve = axum_server::bind_rustls(proxy_addr_socket, rustls_cfg)
+            .handle(handle)
             .serve(proxy_app.into_make_service());
 
         // Spawn a plain-HTTP listener for ACME HTTP-01 challenges and
@@ -586,7 +637,6 @@ async fn async_main() -> anyhow::Result<()> {
                     )
                     .fallback(
                         move |req: axum::http::Request<axum::body::Body>| async move {
-                            // Redirect everything else to HTTPS.
                             let host = req
                                 .headers()
                                 .get(axum::http::header::HOST)
@@ -621,19 +671,23 @@ async fn async_main() -> anyhow::Result<()> {
             None
         };
 
+        let admin_serve = axum::serve(admin_listener, admin_app);
         tokio::select! {
+            _ = shutdown_notify.notified() => {
+                tracing::info!("graceful shutdown: stopping new connections, draining in-flight (30s max)");
+                shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+            }
             result = serve => {
                 if let Err(e) = result {
                     tracing::error!("proxy server error: {e}");
                 }
             }
-            result = axum::serve(admin_listener, admin_app) => {
+            result = admin_serve => {
                 if let Err(e) = result {
                     tracing::error!("admin server error: {e}");
                 }
             }
         }
-        // Clean up the HTTP listener if the main server exits.
         if let Some(h) = acme_http_handle {
             h.abort();
         }
@@ -650,15 +704,23 @@ async fn async_main() -> anyhow::Result<()> {
         );
         let rustls_cfg =
             axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
+        let handle = axum_server::Handle::new();
+        let shutdown_handle = handle.clone();
         let serve = axum_server::bind_rustls(proxy_addr_socket, rustls_cfg)
+            .handle(handle)
             .serve(proxy_app.into_make_service());
+        let admin_serve = axum::serve(admin_listener, admin_app);
         tokio::select! {
+            _ = shutdown_notify.notified() => {
+                tracing::info!("graceful shutdown: draining in-flight (30s max)");
+                shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+            }
             result = serve => {
                 if let Err(e) = result {
                     tracing::error!("proxy server error: {e}");
                 }
             }
-            result = axum::serve(admin_listener, admin_app) => {
+            result = admin_serve => {
                 if let Err(e) = result {
                     tracing::error!("admin server error: {e}");
                 }
@@ -668,13 +730,18 @@ async fn async_main() -> anyhow::Result<()> {
         // Plain HTTP.
         let proxy_listener = TcpListener::bind(&proxy_addr).await?;
         tracing::info!("proxy listening on {proxy_addr}");
+        let sn = shutdown_notify.clone();
+        let admin_server = axum::serve(admin_listener, admin_app);
+        let admin_serve =
+            admin_server.with_graceful_shutdown(async move { sn.notified().await });
+        let proxy_serve = axum::serve(proxy_listener, proxy_app);
         tokio::select! {
-            result = axum::serve(proxy_listener, proxy_app) => {
+            result = proxy_serve => {
                 if let Err(e) = result {
                     tracing::error!("proxy server error: {e}");
                 }
             }
-            result = axum::serve(admin_listener, admin_app) => {
+            result = admin_serve => {
                 if let Err(e) = result {
                     tracing::error!("admin server error: {e}");
                 }
