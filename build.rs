@@ -11,4 +11,5 @@ fn main() {
 
     println!("cargo:rustc-env=LYNXX_BUILD_HASH={hash}");
     println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs/heads");
 }

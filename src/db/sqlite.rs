@@ -900,6 +900,10 @@ fn parse_uuid(s: &str) -> Result<Uuid, GatewayError> {
 fn parse_dt(s: &str) -> Result<DateTime<Utc>, GatewayError> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                .map(|ndt| ndt.and_utc())
+        })
         .map_err(|e| GatewayError::Internal(format!("invalid timestamp in db: {e}")))
 }
 

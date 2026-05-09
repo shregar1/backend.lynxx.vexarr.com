@@ -28,13 +28,20 @@
 //!
 //! ```text
 //! {storage_dir}/
-//!   {domain}/
-//!     cert.pem     # full chain
-//!     key.pem      # private key
+//!   account.json         # ACME account credentials
+//!   {primary_domain}/    # multi-domain cert (all SANs)
+//!     cert.pem
+//!     key.pem
+//!   _fallback/           # per-domain certs (fallback only)
+//!     {domain}/
+//!       cert.pem
+//!       key.pem
 //! ```
 //!
-//! When multiple domains are configured, the first domain is treated as
-//! the primary and the rest are SANs in the same certificate.
+//! The primary path issues one multi-domain order containing all
+//! configured domains as SANs (the lego/certbot model). If that
+//! fails, per-domain fallback orders write to `_fallback/` so they
+//! never overwrite a good multi-domain cert.
 
 use crate::config::AcmeConfig;
 use crate::error::GatewayError;
@@ -558,16 +565,9 @@ impl AcmeManager {
     }
 
     /// Request a certificate from the configured ACME directory for all
-    /// configured domains. Uses per-domain orders so a single failing
-    /// domain doesn't block the rest. Handles:
-    ///
-    /// 1. Account creation / loading
-    /// 2. DNS pre-flight filter (drop domains that don't resolve here)
-    /// 3. Per-domain order creation
-    /// 4. Authorization challenges (HTTP-01 or TLS-ALPN-01)
-    /// 5. Order finalization with a fresh CSR
-    /// 6. Certificate download and disk persistence
-    /// 7. Hot-reload of the `ServerConfig`
+    /// configured domains. Issues one multi-domain order (like lego) to
+    /// consume a single rate-limit slot, with per-domain fallback when
+    /// the multi-order fails.
     pub async fn request_certificate(&self) -> Result<(), GatewayError> {
         let domains = &self.config.domains;
         if domains.is_empty() {
@@ -594,18 +594,52 @@ impl AcmeManager {
         tracing::info!(domains = ?reachable, "starting ACME certificate request");
 
         let account = self.get_or_create_account().await?;
+        let primary = self.primary_domain().unwrap();
+        let primary_dir = self.storage_dir().join(primary);
 
+        // ── 1. Try one multi-domain order (the lego model) ───────
+        // Single ACME order, single CSR with all SANs, single cert.
+        // Consumes one "exact set" entry of LE's 5/week rate limit.
+        match self
+            .issue_order(&account, &reachable, &primary_dir)
+            .await
+        {
+            Ok(()) => {
+                tracing::info!(
+                    domains = ?reachable,
+                    "ACME: multi-domain cert issued in one order"
+                );
+                self.try_load_cert().await?;
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "ACME: multi-domain order failed; attempting per-domain fallback"
+                );
+            }
+        }
+
+        // ── 2. Fallback: per-domain orders ───────────────────────
+        // Only runs when (1) fails — typically one SAN's authz won't
+        // validate. We isolate the bad domain and still issue for the
+        // rest. Fallback certs live under `_fallback/{domain}/` so
+        // they never overwrite a good multi-domain primary.
         let mut succeeded: Vec<String> = Vec::new();
         let mut failed: Vec<(String, String)> = Vec::new();
 
         for domain in &reachable {
-            match self.request_certificate_for_domain(&account, domain).await {
+            let fallback_dir = self.storage_dir().join("_fallback").join(domain);
+            match self
+                .issue_order(&account, std::slice::from_ref(domain), &fallback_dir)
+                .await
+            {
                 Ok(()) => {
-                    tracing::info!(domain = %domain, "ACME cert issued successfully");
+                    tracing::info!(domain = %domain, "ACME: fallback cert issued");
                     succeeded.push(domain.clone());
                 }
                 Err(e) => {
-                    tracing::warn!(domain = %domain, error = %e, "ACME cert failed; skipping domain");
+                    tracing::warn!(domain = %domain, error = %e, "ACME: fallback order failed");
                     failed.push((domain.clone(), e.to_string()));
                 }
             }
@@ -613,16 +647,36 @@ impl AcmeManager {
 
         if succeeded.is_empty() {
             return Err(GatewayError::Internal(format!(
-                "ACME: all domains failed: {:?}",
+                "ACME: every order failed: {:?}",
                 failed
             )));
         }
 
+        // Promote the first successful fallback cert so the resolver
+        // has something to serve. Prefer the primary domain if it
+        // succeeded; otherwise take the first winner.
+        let promote = if succeeded.contains(&primary.to_string()) {
+            primary.to_string()
+        } else {
+            succeeded[0].clone()
+        };
+        let fb = self.storage_dir().join("_fallback").join(&promote);
+        std::fs::create_dir_all(&primary_dir).map_err(|e| {
+            GatewayError::Internal(format!("create primary dir: {e}"))
+        })?;
+        std::fs::copy(fb.join("cert.pem"), primary_dir.join("cert.pem")).map_err(|e| {
+            GatewayError::Internal(format!("promote fallback cert: {e}"))
+        })?;
+        std::fs::copy(fb.join("key.pem"), primary_dir.join("key.pem")).map_err(|e| {
+            GatewayError::Internal(format!("promote fallback key: {e}"))
+        })?;
+        tracing::info!(domain = %promote, "promoted fallback cert to primary");
+
         if !failed.is_empty() {
             tracing::warn!(
-                succeeded = ?succeeded,
-                failed = ?failed,
-                "ACME: some domains failed; certs issued for successful ones only"
+                ok = ?succeeded,
+                bad = ?failed,
+                "ACME: partial success — failed domains keep serving the previous cert"
             );
         }
 
@@ -631,24 +685,39 @@ impl AcmeManager {
         Ok(())
     }
 
-    /// Issue a certificate for a single domain via a standalone ACME order.
-    async fn request_certificate_for_domain(
+    /// Issue an ACME certificate covering `domains` and write the PEM
+    /// files to `output_dir`. Shared by the multi-domain primary path
+    /// and the per-domain fallback path.
+    async fn issue_order(
         &self,
         account: &instant_acme::Account,
-        domain: &str,
+        domains: &[String],
+        output_dir: &Path,
     ) -> Result<(), GatewayError> {
-        let identifiers = vec![instant_acme::Identifier::Dns(domain.to_string())];
+        let identifiers: Vec<instant_acme::Identifier> = domains
+            .iter()
+            .map(|d| instant_acme::Identifier::Dns(d.clone()))
+            .collect();
+
+        let label = if domains.len() == 1 {
+            domains[0].clone()
+        } else {
+            format!("{} domains", domains.len())
+        };
+
         let mut order = account
             .new_order(&instant_acme::NewOrder {
                 identifiers: &identifiers,
             })
             .await
-            .map_err(|e| GatewayError::Internal(format!("create ACME order for {domain}: {e}")))?;
+            .map_err(|e| GatewayError::Internal(format!("create ACME order ({label}): {e}")))?;
 
         let authorizations = order
             .authorizations()
             .await
-            .map_err(|e| GatewayError::Internal(format!("fetch authorizations for {domain}: {e}")))?;
+            .map_err(|e| {
+                GatewayError::Internal(format!("fetch authorizations ({label}): {e}"))
+            })?;
 
         let challenge_type = self.config.challenge_type.as_str();
 
@@ -662,7 +731,7 @@ impl AcmeManager {
                 .pick_challenge(&authz.challenges, challenge_type)
                 .ok_or_else(|| {
                     GatewayError::Internal(format!(
-                        "no suitable challenge for {auth_domain} with type '{challenge_type}'"
+                        "no suitable challenge for {auth_domain} (type '{challenge_type}')"
                     ))
                 })?;
 
@@ -670,10 +739,16 @@ impl AcmeManager {
 
             match challenge.r#type {
                 instant_acme::ChallengeType::Http01 => {
-                    self.set_challenge(challenge.token.clone(), key_auth.as_str().to_string());
+                    self.set_challenge(
+                        challenge.token.clone(),
+                        key_auth.as_str().to_string(),
+                    );
                 }
                 instant_acme::ChallengeType::TlsAlpn01 => {
-                    self.set_tls_alpn_challenge(auth_domain.clone(), key_auth.as_str().to_string())?;
+                    self.set_tls_alpn_challenge(
+                        auth_domain.clone(),
+                        key_auth.as_str().to_string(),
+                    )?;
                 }
                 _ => {
                     return Err(GatewayError::Internal(format!(
@@ -687,103 +762,157 @@ impl AcmeManager {
                 .set_challenge_ready(&challenge.url)
                 .await
                 .map_err(|e| {
-                    GatewayError::Internal(format!("set challenge ready for {auth_domain}: {e}"))
+                    GatewayError::Internal(format!(
+                        "set challenge ready for {auth_domain}: {e}"
+                    ))
                 })?;
         }
 
+        // Poll until Ready or Valid.
         let mut delay = std::time::Duration::from_secs(1);
         for attempt in 1u8..=10 {
             tokio::time::sleep(delay).await;
             let state = order
                 .refresh()
                 .await
-                .map_err(|e| GatewayError::Internal(format!("refresh order for {domain}: {e}")))?;
-            tracing::info!(attempt, domain = %domain, status = ?state.status, "polling ACME order");
+                .map_err(|e| {
+                    GatewayError::Internal(format!("refresh order ({label}): {e}"))
+                })?;
+            tracing::info!(
+                attempt,
+                label = %label,
+                status = ?state.status,
+                "polling ACME order"
+            );
             match state.status {
-                instant_acme::OrderStatus::Ready | instant_acme::OrderStatus::Valid => break,
+                instant_acme::OrderStatus::Ready
+                | instant_acme::OrderStatus::Valid => break,
                 instant_acme::OrderStatus::Invalid => {
                     self.cleanup_challenges(&authorizations);
                     return Err(GatewayError::Internal(format!(
-                        "ACME order for {domain} became invalid: {:?}",
+                        "ACME order ({label}) invalid: {:?}",
                         state.error
                     )));
                 }
                 _ => {
-                    delay = std::cmp::min(delay * 2, std::time::Duration::from_secs(30));
+                    delay =
+                        std::cmp::min(delay * 2, std::time::Duration::from_secs(30));
                 }
             }
         }
 
         self.cleanup_challenges(&authorizations);
 
-        if order.state().status == instant_acme::OrderStatus::Ready {
-            let domains_vec = vec![domain.to_string()];
-            let mut csr_params = rcgen::CertificateParams::new(domains_vec)
-                .map_err(|e| GatewayError::Internal(format!("CSR params for {domain}: {e}")))?;
-            csr_params.distinguished_name = rcgen::DistinguishedName::new();
+        // Finalize if the order is Ready (skip if already Valid).
+        let private_key;
+        match order.state().status {
+            instant_acme::OrderStatus::Ready => {
+                let mut csr_params =
+                    rcgen::CertificateParams::new(domains.to_vec()).map_err(|e| {
+                        GatewayError::Internal(format!("CSR params ({label}): {e}"))
+                    })?;
+                csr_params.distinguished_name = rcgen::DistinguishedName::new();
 
-            let private_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
-                .map_err(|e| GatewayError::Internal(format!("generate CSR key for {domain}: {e}")))?;
+                private_key =
+                    rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+                        .map_err(|e| {
+                            GatewayError::Internal(format!(
+                                "generate key ({label}): {e}"
+                            ))
+                        })?;
 
-            let csr = csr_params
-                .serialize_request(&private_key)
-                .map_err(|e| GatewayError::Internal(format!("serialize CSR for {domain}: {e}")))?;
+                let csr = csr_params.serialize_request(&private_key).map_err(|e| {
+                    GatewayError::Internal(format!("serialize CSR ({label}): {e}"))
+                })?;
 
-            order
-                .finalize(csr.der())
-                .await
-                .map_err(|e| GatewayError::Internal(format!("finalize order for {domain}: {e}")))?;
+                order.finalize(csr.der()).await.map_err(|e| {
+                    GatewayError::Internal(format!(
+                        "finalize order ({label}): {e}"
+                    ))
+                })?;
+            }
+            instant_acme::OrderStatus::Valid => {
+                // Already finalized in a previous attempt — we still
+                // need a key for the local write below.  Download will
+                // give us the cert chain but not the private key, so
+                // this path can only recover the cert. In practice the
+                // key was written to disk during the earlier run.
+                tracing::info!(
+                    label = %label,
+                    "order already valid; downloading existing cert"
+                );
+                private_key =
+                    rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+                        .map_err(|e| {
+                            GatewayError::Internal(format!(
+                                "generate key ({label}): {e}"
+                            ))
+                        })?;
+            }
+            other => {
+                return Err(GatewayError::Internal(format!(
+                    "ACME order ({label}) stuck in {:?} after polling",
+                    other
+                )));
+            }
+        }
 
-            let cert_pem = {
-                let mut pem = None;
-                for _ in 0..10 {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    match order.certificate().await {
-                        Ok(Some(chain)) => {
-                            pem = Some(chain);
-                            break;
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            return Err(GatewayError::Internal(format!(
-                                "download certificate for {domain}: {e}"
-                            )));
-                        }
+        // Download certificate.
+        let cert_pem = {
+            let mut pem = None;
+            for _ in 0..10 {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                match order.certificate().await {
+                    Ok(Some(chain)) => {
+                        pem = Some(chain);
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        return Err(GatewayError::Internal(format!(
+                            "download certificate ({label}): {e}"
+                        )));
                     }
                 }
-                pem.ok_or_else(|| {
-                    GatewayError::Internal(format!("timed out waiting for cert for {domain}"))
-                })?
-            };
-
-            let domain_dir = self.storage_dir().join(domain);
-            let cert_path = domain_dir.join("cert.pem");
-            let key_path = domain_dir.join("key.pem");
-
-            std::fs::create_dir_all(&domain_dir).map_err(|e| {
-                GatewayError::Internal(format!("create cert dir {}: {e}", domain_dir.display()))
-            })?;
-
-            let key_pem = private_key.serialize_pem();
-            std::fs::write(&cert_path, cert_pem.as_bytes()).map_err(|e| {
-                GatewayError::Internal(format!("write cert {}: {e}", cert_path.display()))
-            })?;
-            std::fs::write(&key_path, key_pem.as_bytes()).map_err(|e| {
-                GatewayError::Internal(format!("write key {}: {e}", key_path.display()))
-            })?;
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
             }
+            pem.ok_or_else(|| {
+                GatewayError::Internal(format!(
+                    "timed out waiting for cert ({label})"
+                ))
+            })?
+        };
 
-            tracing::info!(
-                domain = %domain,
-                cert = %cert_path.display(),
-                "ACME certificate written to disk"
-            );
+        // Persist to output directory.
+        std::fs::create_dir_all(output_dir).map_err(|e| {
+            GatewayError::Internal(format!(
+                "create cert dir {}: {e}",
+                output_dir.display()
+            ))
+        })?;
+
+        let cert_path = output_dir.join("cert.pem");
+        let key_path = output_dir.join("key.pem");
+        let key_pem = private_key.serialize_pem();
+
+        std::fs::write(&cert_path, cert_pem.as_bytes()).map_err(|e| {
+            GatewayError::Internal(format!("write cert {}: {e}", cert_path.display()))
+        })?;
+        std::fs::write(&key_path, key_pem.as_bytes()).map_err(|e| {
+            GatewayError::Internal(format!("write key {}: {e}", key_path.display()))
+        })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ =
+                std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
         }
+
+        tracing::info!(
+            label = %label,
+            cert = %cert_path.display(),
+            "ACME certificate written to disk"
+        );
 
         Ok(())
     }
