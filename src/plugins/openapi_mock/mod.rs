@@ -275,7 +275,10 @@ paths:
         match res {
             Err(PluginError::ShortCircuit { status, body, .. }) => {
                 assert_eq!(status, 200);
-                let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                use http_body_util::BodyExt;
+                let b = body.take().unwrap();
+                let collected = b.collect().await.unwrap().to_bytes();
+                let v: serde_json::Value = serde_json::from_slice(&collected).unwrap();
                 assert_eq!(v["greeting"], "hi");
             }
             other => panic!("expected short-circuit, got {other:?}"),

@@ -79,13 +79,16 @@ fn build_request(body: serde_json::Value) -> Request<Body> {
         .unwrap()
 }
 
-fn unwrap_short_circuit(err: PluginError) -> (u16, Vec<(String, String)>, Vec<u8>) {
+async fn unwrap_short_circuit(err: PluginError) -> (u16, Vec<(String, String)>, Vec<u8>) {
     match err {
         PluginError::ShortCircuit {
             status,
             headers,
             body,
-        } => (status, headers, body),
+        } => {
+            let bytes = body.into_bytes().await;
+            (status, headers, bytes)
+        }
         other => panic!("expected ShortCircuit, got {other:?}"),
     }
 }
@@ -109,23 +112,23 @@ async fn cache_hit_on_second_call() {
 
     let mut r1 = build_request(body.clone());
     let err1 = plugin.on_request(&mut r1).await.expect_err("short-circuit");
-    let (s1, h1, _) = unwrap_short_circuit(err1);
+    let (s1, h1, _) = unwrap_short_circuit(err1).await;
     assert_eq!(s1, 200);
     assert!(h1
         .iter()
-        .any(|(k, v)| k == "x-lynxx-llm-cache" && v == "MISS"));
-    assert!(h1.iter().any(|(k, _)| k == "x-lynxx-llm-tokens-in"));
+        .any(|(k, v)| k == "X-Lynxx-LLM-Cache" && v == "MISS"));
+    assert!(h1.iter().any(|(k, _)| k == "X-Lynxx-LLM-Tokens-In"));
     assert!(h1
         .iter()
-        .any(|(k, v)| k == "x-lynxx-llm-tokens-out" && v == "5"));
+        .any(|(k, v)| k == "X-Lynxx-LLM-Tokens-Out" && v == "5"));
 
     let mut r2 = build_request(body);
     let err2 = plugin.on_request(&mut r2).await.expect_err("short-circuit");
-    let (s2, h2, _) = unwrap_short_circuit(err2);
+    let (s2, h2, _) = unwrap_short_circuit(err2).await;
     assert_eq!(s2, 200);
     assert!(
         h2.iter()
-            .any(|(k, v)| k == "x-lynxx-llm-cache" && v == "HIT"),
+            .any(|(k, v)| k == "X-Lynxx-LLM-Cache" && v == "HIT"),
         "second request should be a cache hit"
     );
 }
@@ -146,7 +149,7 @@ async fn injection_blocks_request_with_400() {
     });
     let mut r = build_request(body);
     let err = plugin.on_request(&mut r).await.expect_err("short-circuit");
-    let (status, _, body) = unwrap_short_circuit(err);
+    let (status, _, body) = unwrap_short_circuit(err).await;
     assert_eq!(status, 400);
     let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
@@ -171,10 +174,10 @@ async fn pii_email_is_redacted_before_forwarding() {
     });
     let mut r = build_request(body);
     let err = plugin.on_request(&mut r).await.expect_err("short-circuit");
-    let (_, headers, _) = unwrap_short_circuit(err);
+    let (_, headers, _) = unwrap_short_circuit(err).await;
     assert!(headers
         .iter()
-        .any(|(k, v)| k == "x-lynxx-llm-redacted" && v == "1"));
+        .any(|(k, v)| k == "X-Lynxx-LLM-Redacted" && v == "1"));
 
     let recorded = server.received_requests().await.expect("received requests");
     assert_eq!(recorded.len(), 1);
@@ -211,12 +214,12 @@ async fn fallback_walks_chain_on_5xx() {
     let body = json!({"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]});
     let mut r = build_request(body);
     let err = plugin.on_request(&mut r).await.expect_err("short-circuit");
-    let (status, headers, _) = unwrap_short_circuit(err);
+    let (status, headers, _) = unwrap_short_circuit(err).await;
     assert_eq!(status, 200);
     assert!(headers
         .iter()
-        .any(|(k, v)| k == "x-lynxx-llm-provider" && v == "secondary"));
+        .any(|(k, v)| k == "X-Lynxx-LLM-Provider" && v == "secondary"));
     assert!(headers
         .iter()
-        .any(|(k, v)| k == "x-lynxx-llm-fallback" && v == "1"));
+        .any(|(k, v)| k == "X-Lynxx-LLM-Fallback" && v == "1"));
 }

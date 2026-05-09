@@ -25,13 +25,16 @@ fn build(cfg: serde_json::Value) -> GraphqlGuardPlugin {
     GraphqlGuardPlugin::from_config(&cfg).expect("plugin builds")
 }
 
-fn assert_short_circuit(err: PluginError, status: u16, code: &str) {
+async fn assert_short_circuit(err: PluginError, status: u16, code: &str) {
     match err {
         PluginError::ShortCircuit {
             status: s, body, ..
         } => {
             assert_eq!(s, status, "status mismatch");
-            let parsed: serde_json::Value = serde_json::from_slice(&body).expect("body is JSON");
+            use http_body_util::BodyExt;
+            let b = body.take().unwrap();
+            let collected = b.collect().await.unwrap().to_bytes();
+            let parsed: serde_json::Value = serde_json::from_slice(&collected).expect("body is JSON");
             let actual = parsed
                 .pointer("/errors/0/extensions/code")
                 .and_then(|v| v.as_str())
@@ -49,7 +52,7 @@ async fn depth_limit_triggers() {
         "query": "{ a { b { c { d { e } } } } }"
     }));
     let err = p.on_request(&mut req).await.unwrap_err();
-    assert_short_circuit(err, 400, "QUERY_TOO_DEEP");
+    assert_short_circuit(err, 400, "QUERY_TOO_DEEP").await;
 }
 
 #[tokio::test]
@@ -63,7 +66,7 @@ async fn complexity_limit_triggers() {
         "query": "{ users { id } posts { id } }"
     }));
     let err = p.on_request(&mut req).await.unwrap_err();
-    assert_short_circuit(err, 400, "QUERY_TOO_COMPLEX");
+    assert_short_circuit(err, 400, "QUERY_TOO_COMPLEX").await;
 }
 
 #[tokio::test]
@@ -73,7 +76,7 @@ async fn alias_count_triggers() {
         "query": "{ a: x b: x c: x d: x }"
     }));
     let err = p.on_request(&mut req).await.unwrap_err();
-    assert_short_circuit(err, 400, "TOO_MANY_ALIASES");
+    assert_short_circuit(err, 400, "TOO_MANY_ALIASES").await;
 }
 
 #[tokio::test]
@@ -116,7 +119,7 @@ async fn persisted_query_miss_strict() {
         "extensions": { "persistedQuery": { "sha256Hash": "missing" } }
     }));
     let err = p.on_request(&mut req).await.unwrap_err();
-    assert_short_circuit(err, 400, "PERSISTED_QUERY_NOT_FOUND");
+    assert_short_circuit(err, 400, "PERSISTED_QUERY_NOT_FOUND").await;
 }
 
 #[tokio::test]
@@ -129,7 +132,7 @@ async fn introspection_blocked_in_production() {
         "query": "{ __schema { types { name } } }"
     }));
     let err = p.on_request(&mut req).await.unwrap_err();
-    assert_short_circuit(err, 403, "INTROSPECTION_DISABLED");
+    assert_short_circuit(err, 403, "INTROSPECTION_DISABLED").await;
 }
 
 #[tokio::test]
@@ -173,7 +176,7 @@ async fn mutations_blocked_for_anonymous() {
         "query": "mutation { deleteUser(id: \"1\") { ok } }"
     }));
     let err = p.on_request(&mut req).await.unwrap_err();
-    assert_short_circuit(err, 401, "ANONYMOUS_MUTATIONS_BLOCKED");
+    assert_short_circuit(err, 401, "ANONYMOUS_MUTATIONS_BLOCKED").await;
 }
 
 #[tokio::test]
@@ -194,7 +197,7 @@ async fn operation_name_required() {
         "query": "query { user { id } }"
     }));
     let err = p.on_request(&mut req).await.unwrap_err();
-    assert_short_circuit(err, 400, "OPERATION_NAME_REQUIRED");
+    assert_short_circuit(err, 400, "OPERATION_NAME_REQUIRED").await;
 }
 
 #[tokio::test]
@@ -239,7 +242,7 @@ async fn parse_error_returns_graphql_parse_failed() {
     let p = build(json!({}));
     let mut req = req_with_body(json!({ "query": "this is not valid graphql {{{" }));
     let err = p.on_request(&mut req).await.unwrap_err();
-    assert_short_circuit(err, 400, "GRAPHQL_PARSE_FAILED");
+    assert_short_circuit(err, 400, "GRAPHQL_PARSE_FAILED").await;
 }
 
 #[tokio::test]

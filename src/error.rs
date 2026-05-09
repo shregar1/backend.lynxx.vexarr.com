@@ -87,6 +87,16 @@ impl SyncBody {
     pub fn take(&self) -> Option<Body> {
         self.0.lock().ok()?.take()
     }
+
+    /// Drain the buffered/streaming body into a single byte vec (e.g. tests).
+    pub async fn into_bytes(self) -> Vec<u8> {
+        use http_body_util::BodyExt;
+        let b = self.take().unwrap_or_else(Body::empty);
+        match b.collect().await {
+            Ok(collected) => collected.to_bytes().to_vec(),
+            Err(_) => Vec::new(),
+        }
+    }
 }
 
 impl From<Body> for SyncBody {

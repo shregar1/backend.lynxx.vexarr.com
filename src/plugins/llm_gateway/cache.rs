@@ -42,11 +42,14 @@ pub struct ResponseCache {
 }
 
 impl ResponseCache {
-    pub fn new(enabled: bool,
-    strategy: String,
-    reusex_url: Option<String>,
-    reusex_api_key: Option<String>,
-    _http: Client, ttl_seconds: u64) -> Arc<Self> {
+    pub fn new(
+        enabled: bool,
+        strategy: String,
+        reusex_url: Option<String>,
+        reusex_api_key: Option<String>,
+        http: Client,
+        ttl_seconds: u64,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store: DashMap::new(),
             ttl: Duration::from_secs(ttl_seconds.max(1)),
@@ -54,8 +57,22 @@ impl ResponseCache {
             strategy,
             reusex_url,
             reusex_api_key,
-            http: Client::new(),
+            http,
         })
+    }
+
+    /// Exact-match strategy only, no ReuseX / semantic backend — builds its own [`Client`].
+    ///
+    /// Prefer [`Self::new`] when strategy, ReuseX URL/key, or a shared HTTP client matter.
+    pub fn new_exact(enabled: bool, ttl_seconds: u64) -> Arc<Self> {
+        Self::new(
+            enabled,
+            "exact".to_string(),
+            None,
+            None,
+            Client::new(),
+            ttl_seconds,
+        )
     }
 
     pub fn enabled(&self) -> bool {
@@ -195,7 +212,7 @@ mod tests {
 
     #[test]
     fn keys_stable_for_equal_inputs() {
-        let c = ResponseCache::new(true, 60);
+        let c = ResponseCache::new_exact(true, 60);
         let body = serde_json::json!({
             "messages": [{"role":"user","content":"hi"}],
             "temperature": 0.5,
@@ -205,7 +222,7 @@ mod tests {
 
     #[test]
     fn keys_differ_on_temperature() {
-        let c = ResponseCache::new(true, 60);
+        let c = ResponseCache::new_exact(true, 60);
         let a = serde_json::json!({"messages":[],"temperature":0.0});
         let b = serde_json::json!({"messages":[],"temperature":0.7});
         assert_ne!(c.key("gpt-4o", &a), c.key("gpt-4o", &b));
@@ -213,7 +230,7 @@ mod tests {
 
     #[test]
     fn put_and_get_roundtrip() {
-        let c = ResponseCache::new(true, 60);
+        let c = ResponseCache::new_exact(true, 60);
         c.put("k".into(), 200, vec![], b"hello".to_vec());
         let got = c.get("k").expect("hit");
         assert_eq!(got.body, b"hello");
@@ -221,7 +238,7 @@ mod tests {
 
     #[test]
     fn disabled_never_hits() {
-        let c = ResponseCache::new(false, 60);
+        let c = ResponseCache::new_exact(false, 60);
         c.put("k".into(), 200, vec![], b"hello".to_vec());
         assert!(c.get("k").is_none());
     }

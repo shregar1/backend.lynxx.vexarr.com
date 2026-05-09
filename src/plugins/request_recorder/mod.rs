@@ -398,7 +398,15 @@ mod tests {
         async fn list_recordings(&self, _f: &crate::recording::RecordingFilter) -> Result<Vec<RecordingIndexRow>, GatewayError> { Ok(vec![]) }
         async fn get_recording_index(&self, _id: &str) -> Result<Option<RecordingIndexRow>, GatewayError> { Ok(None) }
         async fn delete_recording(&self, _id: &str) -> Result<bool, GatewayError> { Ok(false) }
-        async fn delete_recordings_before(&self, _ts: chrono::DateTime<Utc>) -> Result<u64, GatewayError> { Ok(0) }
+        async fn delete_recordings_before(&self, _ts: chrono::DateTime<chrono::Utc>) -> Result<u64, GatewayError> { Ok(0) }
+        async fn get_device_fingerprint(&self, _customer_id: i64, _hardware_id: &str) -> Result<Option<crate::models::DeviceFingerprint>, GatewayError> { Ok(None) }
+        async fn create_device_fingerprint(&self, _device: &crate::models::DeviceFingerprint) -> Result<(), GatewayError> { Ok(()) }
+        async fn update_device_last_seen(&self, _id: &uuid::Uuid, _ts: chrono::DateTime<chrono::Utc>) -> Result<(), GatewayError> { Ok(()) }
+        async fn create_runtime_grant(&self, _grant: &crate::models::RuntimeGrant) -> Result<(), GatewayError> { Ok(()) }
+        async fn get_runtime_grant_by_token_id(&self, _token_id: &str) -> Result<Option<crate::models::RuntimeGrant>, GatewayError> { Ok(None) }
+        async fn update_grant_heartbeat(&self, _token_id: &str, _ts: chrono::DateTime<chrono::Utc>) -> Result<(), GatewayError> { Ok(()) }
+        async fn revoke_grant(&self, _token_id: &str) -> Result<bool, GatewayError> { Ok(false) }
+        async fn get_api_key_by_prefix(&self, _prefix: &str) -> Result<Option<crate::models::ApiKeyRow>, GatewayError> { Ok(None) }
     }
 
     #[tokio::test]
