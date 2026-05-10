@@ -4,7 +4,7 @@ use axum::http::{HeaderName, HeaderValue, Request, Response, Uri};
 use futures_util::StreamExt;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::{TokioExecutor, TokioTimer};
 
 /// HTTP/2 (h2c) client used for gRPC streaming. Built once and shared.
 pub type GrpcClient = Client<HttpConnector, Body>;
@@ -13,6 +13,7 @@ pub fn build_grpc_client() -> GrpcClient {
     let mut connector = HttpConnector::new();
     connector.enforce_http(false);
     Client::builder(TokioExecutor::new())
+        .timer(TokioTimer::new())
         .http2_only(true)
         .build(connector)
 }

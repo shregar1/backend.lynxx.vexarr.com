@@ -49,7 +49,7 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::connect::dns::Name;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::{TokioExecutor, TokioTimer};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
@@ -170,10 +170,9 @@ pub fn build_http_proxy_client() -> anyhow::Result<HttpProxyClient> {
         .wrap_connector(http);
 
     let client = Client::builder(TokioExecutor::new())
-        // Long-tail tuning: keep more warm connections, hold them longer.
+        .timer(TokioTimer::new())
         .pool_idle_timeout(Duration::from_secs(120))
         .pool_max_idle_per_host(128)
-        // Keep h2 connections alive through L4 NATs that prune at ~60s.
         .http2_keep_alive_interval(Duration::from_secs(10))
         .http2_keep_alive_while_idle(true)
         .build(https);
@@ -283,6 +282,7 @@ impl ProxyClientPool {
             .wrap_connector(http);
 
         let client = Client::builder(TokioExecutor::new())
+            .timer(TokioTimer::new())
             .pool_idle_timeout(Duration::from_secs(120))
             .pool_max_idle_per_host(128)
             .http2_keep_alive_interval(Duration::from_secs(10))
