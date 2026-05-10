@@ -460,6 +460,7 @@ async fn async_main() -> anyhow::Result<()> {
         router
             .fallback(proxy_handler)
             .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
+            .layer(tower_http::trace::TraceLayer::new_for_http())
             .with_state(proxy_state)
     };
 
