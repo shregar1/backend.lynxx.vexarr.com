@@ -92,32 +92,53 @@ pub fn build_challenge_cert(
     Ok(CertifiedKey::new(vec![cert_der], signing_key))
 }
 
-/// rustls cert resolver that presents TLS-ALPN-01 challenge certs when
-/// asked, and otherwise delegates to a static "production" cert.
+/// rustls cert resolver that routes production certs by SNI hostname
+/// (SAN-indexed) and presents TLS-ALPN-01 challenge certs for ACME.
 ///
-/// `inner` is the production cert (cloned in via `Arc`) and is what
-/// every non-challenge connection sees. `lookup` is the closure the
-/// `AcmeManager` injects so the resolver can ask "do we have a
-/// challenge for this SNI?" without holding a hard reference to the
-/// manager.
+/// `cert_map` maps every DNS name found in SAN lists across all loaded
+/// certs to the corresponding `CertifiedKey`. When two certs cover the
+/// same name, the one with more SANs wins (multi-domain preferred over
+/// single-domain fallback).
+///
+/// `default_cert` is the fallback when no SAN matches the requested SNI
+/// — typically the primary multi-domain cert.
 pub struct AcmeChallengeResolver {
-    inner: Arc<CertifiedKey>,
+    pub(crate) cert_map: std::collections::HashMap<String, Arc<CertifiedKey>>,
+    default_cert: Arc<CertifiedKey>,
     lookup: Box<dyn Fn(&str) -> Option<Arc<CertifiedKey>> + Send + Sync>,
 }
 
 impl std::fmt::Debug for AcmeChallengeResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AcmeChallengeResolver").finish()
+        f.debug_struct("AcmeChallengeResolver")
+            .field("san_count", &self.cert_map.len())
+            .finish()
     }
 }
 
 impl AcmeChallengeResolver {
-    pub fn new<F>(inner: Arc<CertifiedKey>, lookup: F) -> Self
+    pub fn new<F>(default_cert: Arc<CertifiedKey>, lookup: F) -> Self
     where
         F: Fn(&str) -> Option<Arc<CertifiedKey>> + Send + Sync + 'static,
     {
         Self {
-            inner,
+            cert_map: std::collections::HashMap::new(),
+            default_cert,
+            lookup: Box::new(lookup),
+        }
+    }
+
+    pub fn with_cert_map<F>(
+        cert_map: std::collections::HashMap<String, Arc<CertifiedKey>>,
+        default_cert: Arc<CertifiedKey>,
+        lookup: F,
+    ) -> Self
+    where
+        F: Fn(&str) -> Option<Arc<CertifiedKey>> + Send + Sync + 'static,
+    {
+        Self {
+            cert_map,
+            default_cert,
             lookup: Box::new(lookup),
         }
     }
@@ -141,8 +162,35 @@ impl ResolvesServerCert for AcmeChallengeResolver {
                  falling back to production cert"
             );
         }
-        Some(Arc::clone(&self.inner))
+
+        if let Some(sni) = hello.server_name() {
+            if let Some(cert) = self.cert_map.get(sni) {
+                return Some(Arc::clone(cert));
+            }
+            tracing::debug!(sni = %sni, "no SAN match; serving default cert");
+        }
+        Some(Arc::clone(&self.default_cert))
     }
+}
+
+/// Extract all DNS SAN entries from a DER-encoded certificate.
+pub fn extract_san_dns_names(cert_der: &[u8]) -> Vec<String> {
+    let Ok((_, parsed)) = x509_parser::parse_x509_certificate(cert_der) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for ext in parsed.extensions() {
+        if let x509_parser::extensions::ParsedExtension::SubjectAlternativeName(san) =
+            ext.parsed_extension()
+        {
+            for name in &san.general_names {
+                if let x509_parser::extensions::GeneralName::DNSName(dns) = name {
+                    names.push(dns.to_lowercase());
+                }
+            }
+        }
+    }
+    names
 }
 
 /// Parse a chain + key on disk into a [`CertifiedKey`]. Used by the

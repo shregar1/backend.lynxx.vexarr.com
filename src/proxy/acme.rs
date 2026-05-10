@@ -46,7 +46,8 @@
 use crate::config::AcmeConfig;
 use crate::error::GatewayError;
 use crate::proxy::tls_alpn::{
-    build_challenge_cert, certified_key_from_pem, AcmeChallengeResolver, ACME_TLS_ALPN_NAME,
+    build_challenge_cert, certified_key_from_pem, extract_san_dns_names, AcmeChallengeResolver,
+    ACME_TLS_ALPN_NAME,
 };
 use dashmap::DashMap;
 use rustls::sign::CertifiedKey;
@@ -164,62 +165,177 @@ impl AcmeManager {
         Ok(false)
     }
 
-    /// Try to load cert.pem + key.pem from disk and build a `ServerConfig`.
-    /// Returns `Ok(true)` if successful.
+    /// Load all cert/key pairs from the ACME storage directory, build a
+    /// SAN-indexed `dns_name → CertifiedKey` map, and construct a
+    /// `ServerConfig` whose resolver picks the right cert per SNI.
     ///
-    /// The built `ServerConfig` uses [`AcmeChallengeResolver`] so the
-    /// same listener can serve production traffic *and* TLS-ALPN-01
-    /// challenge certs without any restart — the resolver picks based
-    /// on the ALPN protocol negotiated on the inbound ClientHello.
+    /// Scans:
+    ///   - `{storage_dir}/{primary_domain}/` — multi-domain cert
+    ///   - `{storage_dir}/_fallback/{domain}/` — per-domain fallback certs
+    ///   - any other `{storage_dir}/{dir}/` containing cert.pem + key.pem
+    ///
+    /// When two certs cover the same DNS name, the one with more SANs
+    /// wins (multi-domain preferred over single-domain fallback).
     async fn try_load_cert(&self) -> Result<bool, GatewayError> {
-        let cert_path = match self.cert_path() {
-            Some(p) => p,
-            None => return Ok(false),
-        };
-        let key_path = match self.key_path() {
-            Some(p) => p,
-            None => return Ok(false),
-        };
+        let storage = self.storage_dir();
 
-        if !cert_path.exists() || !key_path.exists() {
+        // Collect all (cert_pem, key_pem, dir_path) pairs.
+        let cert_dirs = self.discover_cert_dirs(&storage);
+        if cert_dirs.is_empty() {
             return Ok(false);
         }
 
-        let cert_pem = std::fs::read(&cert_path).map_err(|e| {
-            GatewayError::Internal(format!("read cert {}: {e}", cert_path.display()))
-        })?;
-        let key_pem = std::fs::read(&key_path)
-            .map_err(|e| GatewayError::Internal(format!("read key {}: {e}", key_path.display())))?;
-        let production_key = Arc::new(certified_key_from_pem(&cert_pem, &key_pem)?);
+        let mut cert_map: std::collections::HashMap<String, Arc<CertifiedKey>> =
+            std::collections::HashMap::new();
+        // Track SAN count per dns_name so multi-domain certs win ties.
+        let mut san_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut default_cert: Option<Arc<CertifiedKey>> = None;
+        let mut primary_mtime: Option<SystemTime> = None;
+
+        for dir in &cert_dirs {
+            let cert_path = dir.join("cert.pem");
+            let key_path = dir.join("key.pem");
+            if !cert_path.exists() || !key_path.exists() {
+                continue;
+            }
+
+            let cert_pem = match std::fs::read(&cert_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(path = %cert_path.display(), error = %e, "skipping unreadable cert");
+                    continue;
+                }
+            };
+            let key_pem = match std::fs::read(&key_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(path = %key_path.display(), error = %e, "skipping unreadable key");
+                    continue;
+                }
+            };
+            let ck = match certified_key_from_pem(&cert_pem, &key_pem) {
+                Ok(ck) => Arc::new(ck),
+                Err(e) => {
+                    tracing::warn!(path = %cert_path.display(), error = %e, "skipping invalid cert/key pair");
+                    continue;
+                }
+            };
+
+            let san_names: Vec<String> = ck
+                .cert
+                .iter()
+                .flat_map(|c| extract_san_dns_names(c.as_ref()))
+                .collect();
+            let this_san_count = san_names.len();
+
+            tracing::info!(
+                dir = %dir.display(),
+                sans = ?san_names,
+                "loaded cert with {} SAN(s)",
+                this_san_count
+            );
+
+            for name in &san_names {
+                let prev_count = san_counts.get(name).copied().unwrap_or(0);
+                if this_san_count >= prev_count {
+                    cert_map.insert(name.clone(), Arc::clone(&ck));
+                    san_counts.insert(name.clone(), this_san_count);
+                }
+            }
+
+            // Primary domain cert is the default fallback.
+            let is_primary = self
+                .primary_domain()
+                .map(|p| dir.ends_with(p))
+                .unwrap_or(false);
+            if is_primary {
+                default_cert = Some(Arc::clone(&ck));
+                if let Ok(meta) = std::fs::metadata(&cert_path) {
+                    primary_mtime = meta.modified().ok();
+                }
+            } else if default_cert.is_none() {
+                default_cert = Some(Arc::clone(&ck));
+            }
+        }
+
+        let default_cert = match default_cert {
+            Some(c) => c,
+            None => return Ok(false),
+        };
 
         let lookup_map = Arc::clone(&self.tls_alpn_challenges);
-        let resolver = AcmeChallengeResolver::new(production_key, move |sni| {
-            lookup_map.get(sni).map(|v| Arc::clone(v.value()))
-        });
+        let resolver =
+            AcmeChallengeResolver::with_cert_map(cert_map, default_cert, move |sni| {
+                lookup_map.get(sni).map(|v| Arc::clone(v.value()))
+            });
+
+        tracing::info!(
+            san_entries = resolver.cert_map.len(),
+            "built SAN-indexed cert resolver"
+        );
 
         let mut server_config = ServerConfig::builder()
             .with_no_client_auth()
             .with_cert_resolver(Arc::new(resolver));
 
-        // Order matters: the validator advertises *only* `acme-tls/1`
-        // for challenges, while production clients negotiate `h2` /
-        // `http/1.1`. Including `acme-tls/1` here makes rustls accept
-        // it during the ALPN check. The resolver picks the right cert.
         server_config.alpn_protocols = vec![
             b"h2".to_vec(),
             b"http/1.1".to_vec(),
             ACME_TLS_ALPN_NAME.to_vec(),
         ];
 
-        // Record mtime for the file watcher.
-        if let Ok(meta) = std::fs::metadata(&cert_path) {
-            if let Ok(mtime) = meta.modified() {
-                *self.last_cert_mtime.write().await = Some(mtime);
-            }
+        if let Some(mtime) = primary_mtime {
+            *self.last_cert_mtime.write().await = Some(mtime);
         }
 
         *self.current_config.write().await = Some(Arc::new(server_config));
         Ok(true)
+    }
+
+    /// Walk the ACME storage directory and return all directories that
+    /// contain a cert.pem + key.pem pair.
+    fn discover_cert_dirs(&self, storage: &Path) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        let Ok(entries) = std::fs::read_dir(storage) else {
+            return dirs;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str == "_fallback" {
+                // Recurse one level into _fallback/{domain}/
+                if let Ok(fb_entries) = std::fs::read_dir(&path) {
+                    for fb in fb_entries.flatten() {
+                        let fb_path = fb.path();
+                        if fb_path.is_dir()
+                            && fb_path.join("cert.pem").exists()
+                            && fb_path.join("key.pem").exists()
+                        {
+                            dirs.push(fb_path);
+                        }
+                    }
+                }
+            } else if name_str.starts_with('.') || name_str == "account.json" {
+                continue;
+            } else if path.join("cert.pem").exists() && path.join("key.pem").exists() {
+                // Primary domain dirs go first so they become the default.
+                let is_primary = self
+                    .primary_domain()
+                    .map(|p| name_str == p)
+                    .unwrap_or(false);
+                if is_primary {
+                    dirs.insert(0, path);
+                } else {
+                    dirs.push(path);
+                }
+            }
+        }
+        dirs
     }
 
     // ------------------------------------------------------------------

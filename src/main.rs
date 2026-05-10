@@ -182,21 +182,12 @@ async fn async_main() -> anyhow::Result<()> {
     let repo: Arc<dyn Repository> = crate::db::connect(&config.gateway.database_url).await?;
     tracing::info!(database_url = %config.gateway.database_url, "database ready");
 
-    // Services, routes, plugins, and consumers live in this database. Replacing the
-    // `lynxx-gateway` binary does not touch them. Initial seed from config.toml runs
-    // only when [gateway].seed_from_config is true *and* the DB has no rows yet.
-    let db_empty = repo.is_empty().await?;
-    if args.reseed {
-        tracing::info!("--reseed: forcing re-seed from config.toml (overwriting DB state)");
+    // Config-seeded rows are tagged `source = 'config'`; admin-API rows
+    // are `source = 'api'`. Seeding only replaces config-sourced entries,
+    // so dynamic state created via the admin API always survives.
+    if args.reseed || config.gateway.seed_from_config {
+        tracing::info!("syncing config.toml → database (config-sourced rows only)");
         repo.seed_from_config(&config).await?;
-    } else if config.gateway.seed_from_config && db_empty {
-        tracing::info!("database empty; seeding from config.toml (first boot only)");
-        repo.seed_from_config(&config).await?;
-    } else if config.gateway.seed_from_config && !db_empty {
-        tracing::info!(
-            "seed_from_config is set but database already has data; skipping \
-             (use --reseed to force). Config changes won't take effect until --reseed or admin API."
-        );
     }
 
     // ---------- admin auth bootstrap ----------

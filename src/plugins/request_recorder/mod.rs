@@ -374,6 +374,8 @@ mod tests {
         async fn delete_target(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
         async fn is_empty(&self) -> Result<bool, GatewayError> { Ok(true) }
         async fn seed_from_config(&self, _config: &crate::config::GatewayConfig) -> Result<(), GatewayError> { Ok(()) }
+        async fn clear_config_seed(&self) -> Result<(), GatewayError> { Ok(()) }
+        async fn mark_config_source(&self, _s: &[uuid::Uuid], _r: &[uuid::Uuid], _p: &[uuid::Uuid]) -> Result<(), GatewayError> { Ok(()) }
         async fn list_admin_tokens(&self) -> Result<Vec<crate::auth::AdminToken>, GatewayError> { Ok(vec![]) }
         async fn get_admin_token_by_hash(&self, _h: &str) -> Result<Option<crate::auth::AdminToken>, GatewayError> { Ok(None) }
         async fn get_admin_token(&self, _id: &uuid::Uuid) -> Result<Option<crate::auth::AdminToken>, GatewayError> { Ok(None) }

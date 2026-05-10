@@ -408,6 +408,46 @@ impl Repository for SqliteRepository {
         seed_from_config_generic(self, config).await
     }
 
+    async fn clear_config_seed(&self) -> Result<(), GatewayError> {
+        sqlx::query("DELETE FROM plugins WHERE source = 'config'")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM routes WHERE source = 'config'")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM services WHERE source = 'config'")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn mark_config_source(
+        &self,
+        service_ids: &[Uuid],
+        route_ids: &[Uuid],
+        plugin_ids: &[Uuid],
+    ) -> Result<(), GatewayError> {
+        for id in service_ids {
+            sqlx::query("UPDATE services SET source = 'config' WHERE id = ?")
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
+        }
+        for id in route_ids {
+            sqlx::query("UPDATE routes SET source = 'config' WHERE id = ?")
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
+        }
+        for id in plugin_ids {
+            sqlx::query("UPDATE plugins SET source = 'config' WHERE id = ?")
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
     fn cluster_bus(&self) -> Arc<dyn ClusterBus> {
         Arc::new(SqliteBus::new(self.pool.clone()))
     }
@@ -836,21 +876,19 @@ impl Repository for SqliteRepository {
 
 /// Shared seed logic — both repos express the same flow against the trait
 /// surface, so we factor it out.
+///
+/// Only removes rows whose `source = 'config'`. Admin-API rows
+/// (`source = 'api'`) are untouched, so dynamic state survives
+/// `--reseed` and normal restarts with `seed_from_config = true`.
 pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
     repo: &R,
     config: &GatewayConfig,
 ) -> Result<(), GatewayError> {
-    // Wipe existing services, routes, and plugins so --reseed is
-    // idempotent. Order matters: routes reference services via FK.
-    for p in repo.list_plugins().await? {
-        repo.delete_plugin(&p.id).await?;
-    }
-    for r in repo.list_routes().await? {
-        repo.delete_route(&r.id).await?;
-    }
-    for s in repo.list_services().await? {
-        repo.delete_service(&s.id).await?;
-    }
+    repo.clear_config_seed().await?;
+
+    let mut service_ids = Vec::new();
+    let mut route_ids = Vec::new();
+    let mut plugin_ids = Vec::new();
 
     let mut services_by_name = std::collections::HashMap::new();
     for svc_cfg in &config.services {
@@ -861,6 +899,7 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
             svc_cfg.connect_timeout_ms,
         );
         repo.create_service(&service).await?;
+        service_ids.push(service.id);
         services_by_name.insert(service.name.clone(), service.id);
     }
 
@@ -880,6 +919,7 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
             rt_cfg.strip_path,
         );
         repo.create_route(&route).await?;
+        route_ids.push(route.id);
     }
 
     for plugin_cfg in &config.plugins {
@@ -897,7 +937,11 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
             updated_at: now,
         };
         repo.create_plugin(&plugin).await?;
+        plugin_ids.push(plugin.id);
     }
+
+    repo.mark_config_source(&service_ids, &route_ids, &plugin_ids)
+        .await?;
 
     Ok(())
 }

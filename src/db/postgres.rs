@@ -405,6 +405,46 @@ impl Repository for PostgresRepository {
         seed_from_config_generic(self, config).await
     }
 
+    async fn clear_config_seed(&self) -> Result<(), GatewayError> {
+        sqlx::query("DELETE FROM plugins WHERE source = 'config'")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM routes WHERE source = 'config'")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM services WHERE source = 'config'")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn mark_config_source(
+        &self,
+        service_ids: &[Uuid],
+        route_ids: &[Uuid],
+        plugin_ids: &[Uuid],
+    ) -> Result<(), GatewayError> {
+        for id in service_ids {
+            sqlx::query("UPDATE services SET source = 'config' WHERE id = $1")
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        }
+        for id in route_ids {
+            sqlx::query("UPDATE routes SET source = 'config' WHERE id = $1")
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        }
+        for id in plugin_ids {
+            sqlx::query("UPDATE plugins SET source = 'config' WHERE id = $1")
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
     fn cluster_bus(&self) -> Arc<dyn ClusterBus> {
         Arc::new(PostgresBus::new(self.pool.clone()))
     }

@@ -73,6 +73,16 @@ pub trait Repository: Send + Sync {
 
     async fn is_empty(&self) -> Result<bool, GatewayError>;
     async fn seed_from_config(&self, config: &GatewayConfig) -> Result<(), GatewayError>;
+    /// Delete all services, routes, and plugins whose `source = 'config'`.
+    /// Admin-API-created rows (`source = 'api'`) are untouched.
+    async fn clear_config_seed(&self) -> Result<(), GatewayError>;
+    /// Mark a set of rows as config-sourced after creation.
+    async fn mark_config_source(
+        &self,
+        service_ids: &[Uuid],
+        route_ids: &[Uuid],
+        plugin_ids: &[Uuid],
+    ) -> Result<(), GatewayError>;
 
     // ---------- admin tokens ----------
 
