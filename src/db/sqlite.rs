@@ -840,7 +840,18 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
     repo: &R,
     config: &GatewayConfig,
 ) -> Result<(), GatewayError> {
-    // services first so route FKs resolve
+    // Wipe existing services, routes, and plugins so --reseed is
+    // idempotent. Order matters: routes reference services via FK.
+    for p in repo.list_plugins().await? {
+        repo.delete_plugin(&p.id).await?;
+    }
+    for r in repo.list_routes().await? {
+        repo.delete_route(&r.id).await?;
+    }
+    for s in repo.list_services().await? {
+        repo.delete_service(&s.id).await?;
+    }
+
     let mut services_by_name = std::collections::HashMap::new();
     for svc_cfg in &config.services {
         let service = Service::new(
