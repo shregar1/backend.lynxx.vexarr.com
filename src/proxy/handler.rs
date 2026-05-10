@@ -360,7 +360,7 @@ pub async fn proxy_handler(
     // type, but no heap copy beyond that.
     //
     // Expected win: ~80-150µs at p50 in synthetic benchmarks against
-    // `nginx:alpine`, with a larger win at p99 due to fewer allocator hits.
+    // a tiny echo upstream, with a larger win at p99 due to fewer allocator hits.
     let upstream_uri: Uri = upstream_url
         .parse()
         .map_err(|e| GatewayError::BadRequest(format!("invalid upstream uri: {e}")))?;
@@ -390,7 +390,7 @@ pub async fn proxy_handler(
         }
     }
     // Force HTTP/1.1 over the wire — the connector negotiates h2 via ALPN
-    // for https. For http:// we use HTTP/1.1 which is what nginx + most
+    // for https. For http:// we use HTTP/1.1 which is what most
     // upstreams expect from a forward proxy.
     parts.version = axum::http::Version::HTTP_11;
 

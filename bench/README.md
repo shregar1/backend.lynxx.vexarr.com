@@ -17,7 +17,7 @@ cargo build --release -p lynxx-bench
 
 ## Reference results (M1 Mac, 2026-05-05)
 
-`nginx:alpine` upstream, 30s @ 2000 RPS via 64 connections, plugin chain disabled
+`hashicorp/http-echo` upstream, 30s @ 2000 RPS via 64 connections, plugin chain disabled
 on both gateways.
 
 ```
@@ -31,7 +31,7 @@ errors             0          0          0
 ```
 
 **Lynxx beats Kong on every latency percentile.** The gap widens at higher
-percentiles where Kong's nginx event-loop variance shows up more.
+percentiles where Kong's proxy event-loop variance shows up more.
 
 The wins came from:
 - mimalloc as the global allocator (long-tail allocator pauses gone)
@@ -48,7 +48,7 @@ The wins came from:
 
 ```bash
 # upstream
-docker run -d --name bench-upstream -p 18080:80 nginx:alpine
+docker run -d --name bench-upstream -p 18080:5678 hashicorp/http-echo -text=ok
 
 # kong (db-less mode)
 docker network create bench-net
@@ -57,7 +57,7 @@ cat > /tmp/kong.yml <<EOK
 _format_version: "3.0"
 services:
   - name: bench
-    url: http://bench-upstream
+    url: http://bench-upstream:5678
     routes: [{ name: bench, paths: [/bench], strip_path: true }]
 EOK
 docker run -d --name bench-kong --network bench-net \
@@ -67,7 +67,7 @@ docker run -d --name bench-kong --network bench-net \
 
 # lynxx
 cargo run --release --bin lynxx-gateway &
-lynxx services create --name local-bench --url http://127.0.0.1:18080
+lynxx services create --name local-bench --url http://127.0.0.1:18080/
 lynxx routes create --service local-bench --paths /bench --strip-path
 ```
 
@@ -85,8 +85,8 @@ lynxx routes create --service local-bench --paths /bench --strip-path
 "will it survive a bad day" suite. Two extra binaries ship with the same
 crate:
 
-- `lynxx-mock-upstream` — a controllable HTTP server. Substitutes for nginx
-  when a scenario needs to inject latency, status codes, or echo the request
+- `lynxx-mock-upstream` — a controllable HTTP server. Substitutes for a dumb echo
+  container when a scenario needs to inject latency, status codes, or echo the request
   back as JSON.
 - `lynxx-chaos` — the orchestrator. Each subcommand is one scenario; `all`
   runs every scenario sequentially with shorter defaults.

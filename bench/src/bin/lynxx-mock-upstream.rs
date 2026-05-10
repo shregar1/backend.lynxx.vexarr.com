@@ -1,6 +1,6 @@
 //! lynxx-mock-upstream — a controllable HTTP server for chaos tests.
 //!
-//! Replaces nginx for scenarios that need to inject failures or latency. Not
+//! Replaces a fixed-response echo container when scenarios need to inject failures or latency. Not
 //! optimised — just correct. The `--echo` mode reflects request data back as
 //! JSON so plugin chains can be verified end-to-end.
 

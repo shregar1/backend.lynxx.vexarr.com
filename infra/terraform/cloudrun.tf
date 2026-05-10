@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # Cloud Run — website (lynxx.vexarr.com) and dashboard
-# (app.lynxx.vexarr.com). Both are static SPAs served by nginx inside
-# the container.
+# (app.lynxx.vexarr.com). Both are static SPAs served by a small static
+# file server inside each container image.
 #
 # Initial image is a placeholder — the CI/CD pipeline (deploy-gcp.yml)
 # deploys the real images on every push to main.
