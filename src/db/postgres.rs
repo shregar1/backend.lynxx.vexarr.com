@@ -71,6 +71,20 @@ impl Repository for PostgresRepository {
         row.map(row_to_service).transpose()
     }
 
+    async fn get_service_by_name(&self, name: &str) -> Result<Option<Service>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, \
+                    tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
+                    created_at, updated_at \
+             FROM services WHERE name = $1",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(row_to_service).transpose()
+    }
+
     async fn create_service(&self, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
             "INSERT INTO services (id, name, url, retries, connect_timeout_ms, lb_strategy, \

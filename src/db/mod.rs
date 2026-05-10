@@ -71,6 +71,8 @@ pub trait Repository: Send + Sync {
     async fn update_target(&self, id: &Uuid, target: &Target) -> Result<(), GatewayError>;
     async fn delete_target(&self, id: &Uuid) -> Result<bool, GatewayError>;
 
+    async fn get_service_by_name(&self, name: &str) -> Result<Option<Service>, GatewayError>;
+
     async fn is_empty(&self) -> Result<bool, GatewayError>;
     async fn seed_from_config(&self, config: &GatewayConfig) -> Result<(), GatewayError>;
     /// Delete all services, routes, and plugins whose `source = 'config'`.

@@ -350,6 +350,7 @@ mod tests {
     impl Repository for StubRepo {
         async fn list_services(&self) -> Result<Vec<crate::models::Service>, GatewayError> { Ok(vec![]) }
         async fn get_service(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::Service>, GatewayError> { Ok(None) }
+        async fn get_service_by_name(&self, _name: &str) -> Result<Option<crate::models::Service>, GatewayError> { Ok(None) }
         async fn create_service(&self, _svc: &crate::models::Service) -> Result<(), GatewayError> { Ok(()) }
         async fn update_service(&self, _id: &uuid::Uuid, _svc: &crate::models::Service) -> Result<(), GatewayError> { Ok(()) }
         async fn delete_service(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }

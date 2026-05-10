@@ -69,6 +69,20 @@ impl Repository for SqliteRepository {
         row.map(row_to_service).transpose()
     }
 
+    async fn get_service_by_name(&self, name: &str) -> Result<Option<Service>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, \
+                    tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
+                    created_at, updated_at \
+             FROM services WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(row_to_service).transpose()
+    }
+
     async fn create_service(&self, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
             "INSERT INTO services (id, name, url, retries, connect_timeout_ms, lb_strategy, \
@@ -880,29 +894,71 @@ impl Repository for SqliteRepository {
 /// Only removes rows whose `source = 'config'`. Admin-API rows
 /// (`source = 'api'`) are untouched, so dynamic state survives
 /// `--reseed` and normal restarts with `seed_from_config = true`.
+/// Idempotent config-to-DB sync. Services are upserted by name so their
+/// UUIDs are stable across restarts — routes, plugins, and any admin-API
+/// state that references a service by ID won't break.
+///
+/// Routes are matched by (hosts, service_id) and plugins by (name, scope).
+/// Rows created here are tagged `source = 'config'`; admin-API rows
+/// (`source = 'api'`) are never touched.
 pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
     repo: &R,
     config: &GatewayConfig,
 ) -> Result<(), GatewayError> {
+    // Phase 1: delete config-sourced rows that are NO LONGER in config.toml.
+    // We collect the names/hosts we're about to upsert, then remove stale
+    // config-sourced rows that don't match.
+    // Delete config-sourced rows that are no longer in config.toml,
+    // then we'll upsert the current config entries below.
     repo.clear_config_seed().await?;
 
     let mut service_ids = Vec::new();
     let mut route_ids = Vec::new();
     let mut plugin_ids = Vec::new();
 
+    // Phase 2: upsert services by name. If a service with the same name
+    // already exists (from admin API or a previous seed), reuse its UUID
+    // and just update the url/retries/timeout.
     let mut services_by_name = std::collections::HashMap::new();
     for svc_cfg in &config.services {
-        let service = Service::new(
-            svc_cfg.name.clone(),
-            svc_cfg.url.clone(),
-            svc_cfg.retries,
-            svc_cfg.connect_timeout_ms,
-        );
-        repo.create_service(&service).await?;
-        service_ids.push(service.id);
-        services_by_name.insert(service.name.clone(), service.id);
+        if let Some(existing) = repo.get_service_by_name(&svc_cfg.name).await? {
+            // Service exists — update in place, preserving UUID.
+            let updated = Service {
+                id: existing.id,
+                name: svc_cfg.name.clone(),
+                url: svc_cfg.url.clone(),
+                retries: svc_cfg.retries,
+                connect_timeout_ms: svc_cfg.connect_timeout_ms,
+                lb_strategy: existing.lb_strategy.clone(),
+                tls_verify: existing.tls_verify,
+                tls_client_cert_path: existing.tls_client_cert_path.clone(),
+                tls_client_key_path: existing.tls_client_key_path.clone(),
+                tls_ca_path: existing.tls_ca_path.clone(),
+                created_at: existing.created_at,
+                updated_at: Utc::now(),
+            };
+            repo.update_service(&existing.id, &updated).await?;
+            service_ids.push(existing.id);
+            services_by_name.insert(svc_cfg.name.clone(), existing.id);
+            tracing::debug!(name = %svc_cfg.name, id = %existing.id, "config seed: updated existing service");
+        } else {
+            // New service — create with a fresh UUID.
+            let service = Service::new(
+                svc_cfg.name.clone(),
+                svc_cfg.url.clone(),
+                svc_cfg.retries,
+                svc_cfg.connect_timeout_ms,
+            );
+            repo.create_service(&service).await?;
+            service_ids.push(service.id);
+            services_by_name.insert(service.name.clone(), service.id);
+            tracing::debug!(name = %svc_cfg.name, id = %service.id, "config seed: created new service");
+        }
     }
 
+    // Phase 3: upsert routes. Match by (hosts, service_id) to avoid
+    // duplicates when the same route is seeded on every restart.
+    let existing_routes = repo.list_routes().await?;
     for rt_cfg in &config.routes {
         let Some(service_id) = services_by_name.get(&rt_cfg.service).copied() else {
             tracing::warn!(
@@ -911,33 +967,78 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
             );
             continue;
         };
-        let route = Route::new(
-            rt_cfg.paths.clone(),
-            rt_cfg.methods.clone(),
-            rt_cfg.hosts.clone(),
-            service_id,
-            rt_cfg.strip_path,
-        );
-        repo.create_route(&route).await?;
-        route_ids.push(route.id);
+
+        // Check if a route with the same hosts+service already exists.
+        let already = existing_routes.iter().find(|r| {
+            r.service_id == service_id && r.hosts == rt_cfg.hosts
+        });
+
+        if let Some(existing) = already {
+            // Update in place.
+            let updated = Route {
+                id: existing.id,
+                paths: rt_cfg.paths.clone(),
+                methods: rt_cfg.methods.clone(),
+                hosts: rt_cfg.hosts.clone(),
+                service_id,
+                strip_path: rt_cfg.strip_path,
+                created_at: existing.created_at,
+                updated_at: Utc::now(),
+            };
+            repo.update_route(&existing.id, &updated).await?;
+            route_ids.push(existing.id);
+        } else {
+            let route = Route::new(
+                rt_cfg.paths.clone(),
+                rt_cfg.methods.clone(),
+                rt_cfg.hosts.clone(),
+                service_id,
+                rt_cfg.strip_path,
+            );
+            repo.create_route(&route).await?;
+            route_ids.push(route.id);
+        }
     }
 
+    // Phase 4: upsert global plugins by name.
+    let existing_plugins = repo.list_plugins().await?;
     for plugin_cfg in &config.plugins {
-        let now = Utc::now();
         let config_value =
             serde_json::to_value(&plugin_cfg.config).unwrap_or(serde_json::Value::Null);
-        let plugin = PluginInstance {
-            id: Uuid::new_v4(),
-            name: plugin_cfg.name.clone(),
-            service_id: None,
-            route_id: None,
-            enabled: plugin_cfg.enabled,
-            config: config_value,
-            created_at: now,
-            updated_at: now,
-        };
-        repo.create_plugin(&plugin).await?;
-        plugin_ids.push(plugin.id);
+
+        // Match global plugins (no service/route scope) by name.
+        let already = existing_plugins.iter().find(|p| {
+            p.name == plugin_cfg.name && p.service_id.is_none() && p.route_id.is_none()
+        });
+
+        if let Some(existing) = already {
+            let updated = PluginInstance {
+                id: existing.id,
+                name: plugin_cfg.name.clone(),
+                service_id: None,
+                route_id: None,
+                enabled: plugin_cfg.enabled,
+                config: config_value,
+                created_at: existing.created_at,
+                updated_at: Utc::now(),
+            };
+            repo.update_plugin(&existing.id, &updated).await?;
+            plugin_ids.push(existing.id);
+        } else {
+            let now = Utc::now();
+            let plugin = PluginInstance {
+                id: Uuid::new_v4(),
+                name: plugin_cfg.name.clone(),
+                service_id: None,
+                route_id: None,
+                enabled: plugin_cfg.enabled,
+                config: config_value,
+                created_at: now,
+                updated_at: now,
+            };
+            repo.create_plugin(&plugin).await?;
+            plugin_ids.push(plugin.id);
+        }
     }
 
     repo.mark_config_source(&service_ids, &route_ids, &plugin_ids)
