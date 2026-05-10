@@ -137,27 +137,66 @@ fn main() -> anyhow::Result<()> {
 
 async fn async_main() -> anyhow::Result<()> {
     // --- Telemetry init -------------------------------------------------
-    // When FLUXX_OTEL_ENDPOINT is set, export tracing spans to the local
-    // Fluxx agent via OTLP/HTTP. When unset, telemetry is off — the
-    // gateway works identically without Fluxx.
+    // Build the tracing subscriber with an optional OTel layer. The OTel
+    // TracerProvider supports multiple exporters:
+    //
+    //  1. Primary exporter — controlled by OTEL_EXPORTER_OTLP_ENDPOINT
+    //     (standard env var). Points at whatever collector the deployment
+    //     uses (Jaeger, Datadog, Grafana Tempo, …).
+    //
+    //  2. Fluxx exporter — controlled by FLUXX_OTEL_ENDPOINT. Sends a
+    //     copy of every span to the local Fluxx agent over OTLP/HTTP on
+    //     loopback. Non-blocking; the gateway boots and runs identically
+    //     when the var is absent.
+    //
+    // When neither var is set the OTel layer is omitted entirely and the
+    // subscriber is plain fmt + env-filter.
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("lynxx_gateway=info,tower_http=debug"));
     let fmt_layer = tracing_subscriber::fmt::layer();
 
-    if let Ok(endpoint) = std::env::var("FLUXX_OTEL_ENDPOINT") {
+    let primary_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let fluxx_endpoint = std::env::var("FLUXX_OTEL_ENDPOINT")
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    if primary_endpoint.is_some() || fluxx_endpoint.is_some() {
         let svc_name = std::env::var("OTEL_SERVICE_NAME")
             .unwrap_or_else(|_| "lynxx-gateway".into());
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_http()
-            .with_endpoint(format!("{endpoint}/v1/traces"))
-            .build()
-            .expect("fluxx otlp exporter");
-        let provider = opentelemetry_sdk::trace::TracerProvider::builder()
-            .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+
+        let mut provider_builder = opentelemetry_sdk::trace::TracerProvider::builder()
             .with_resource(opentelemetry_sdk::Resource::new(vec![
                 opentelemetry::KeyValue::new("service.name", svc_name),
-            ]))
-            .build();
+            ]));
+
+        // --- primary exporter ---
+        if let Some(ref endpoint) = primary_endpoint {
+            let exporter = opentelemetry_otlp::SpanExporter::builder()
+                .with_http()
+                .with_endpoint(format!("{endpoint}/v1/traces"))
+                .build()
+                .expect("primary otlp exporter");
+            provider_builder =
+                provider_builder.with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio);
+            tracing::info!("primary otel exporter → {endpoint}");
+        }
+
+        // --- fluxx exporter (additional, loopback-only) ---
+        if let Some(ref endpoint) = fluxx_endpoint {
+            if let Ok(fluxx_exporter) = opentelemetry_otlp::SpanExporter::builder()
+                .with_http()
+                .with_endpoint(format!("{endpoint}/v1/traces"))
+                .build()
+            {
+                provider_builder = provider_builder
+                    .with_batch_exporter(fluxx_exporter, opentelemetry_sdk::runtime::Tokio);
+                tracing::info!("fluxx telemetry enabled → {endpoint}");
+            }
+        }
+
+        let provider = provider_builder.build();
         opentelemetry::global::set_tracer_provider(provider.clone());
         let otel_layer = tracing_opentelemetry::layer()
             .with_tracer(provider.tracer("lynxx-gateway"));
@@ -166,7 +205,6 @@ async fn async_main() -> anyhow::Result<()> {
             .with(fmt_layer)
             .with(otel_layer)
             .init();
-        tracing::info!("fluxx telemetry enabled → {endpoint}");
     } else {
         tracing_subscriber::registry()
             .with(env_filter)

@@ -22,6 +22,10 @@ services:
     environment:
       LYNXX_CONFIG: /etc/lynxx/config.toml
       DATABASE_URL: postgres://lynxx:lynxx@postgres:5432/lynxx
+      # Fluxx telemetry (OTel → local agent); remove to disable.
+      FLUXX_OTEL_ENDPOINT: http://127.0.0.1:4318
+      OTEL_SERVICE_NAME: lynxx-gateway
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment=production
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -37,6 +41,9 @@ services:
     environment:
       LYNXX_CONFIG: /etc/lynxx/config.toml
       DATABASE_URL: postgres://lynxx:lynxx@postgres:5432/lynxx
+      FLUXX_OTEL_ENDPOINT: http://127.0.0.1:4318
+      OTEL_SERVICE_NAME: lynxx-gateway
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment=production
     ports:
       - "9100:9000"
       - "9101:9001"
