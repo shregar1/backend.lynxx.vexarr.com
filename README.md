@@ -52,6 +52,12 @@ public support channel during beta.
 
 ---
 
+## Operations
+
+**Telemetry:** when `FLUXX_OTEL_ENDPOINT` is set, traces and request spans are exported to the local Fluxx agent via OTLP/HTTP.
+
+---
+
 *This README is the private-beta landing page applied as part of the
 project lockdown. Engineering documentation has moved to the private
 docs index — beta participants have the URL.*

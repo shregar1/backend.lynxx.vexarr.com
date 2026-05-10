@@ -25,6 +25,9 @@ x-gateway-base: &gateway-base
     LYNXX_CONFIG: /etc/lynxx/config.toml
     DATABASE_URL: postgres://lynxx:${POSTGRES_PASSWORD}@postgres:5432/lynxx
     RUST_LOG: ${RUST_LOG:-info}
+    FLUXX_OTEL_ENDPOINT: ${FLUXX_OTEL_ENDPOINT:-}
+    OTEL_SERVICE_NAME: lynxx-gateway
+    OTEL_RESOURCE_ATTRIBUTES: deployment.environment=production
   depends_on:
     postgres:
       condition: service_healthy

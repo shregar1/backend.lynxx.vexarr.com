@@ -40,6 +40,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry::trace::TracerProvider as _;
 use uuid::Uuid;
 
 /// Command-line arguments for the Lynxx gateway.
@@ -132,12 +136,43 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("lynxx_gateway=info,tower_http=debug")),
-        )
-        .init();
+    // --- Telemetry init -------------------------------------------------
+    // When FLUXX_OTEL_ENDPOINT is set, export tracing spans to the local
+    // Fluxx agent via OTLP/HTTP. When unset, telemetry is off — the
+    // gateway works identically without Fluxx.
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("lynxx_gateway=info,tower_http=debug"));
+    let fmt_layer = tracing_subscriber::fmt::layer();
+
+    if let Ok(endpoint) = std::env::var("FLUXX_OTEL_ENDPOINT") {
+        let svc_name = std::env::var("OTEL_SERVICE_NAME")
+            .unwrap_or_else(|_| "lynxx-gateway".into());
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_http()
+            .with_endpoint(format!("{endpoint}/v1/traces"))
+            .build()
+            .expect("fluxx otlp exporter");
+        let provider = opentelemetry_sdk::trace::TracerProvider::builder()
+            .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+            .with_resource(opentelemetry_sdk::Resource::new(vec![
+                opentelemetry::KeyValue::new("service.name", svc_name),
+            ]))
+            .build();
+        opentelemetry::global::set_tracer_provider(provider.clone());
+        let otel_layer = tracing_opentelemetry::layer()
+            .with_tracer(provider.tracer("lynxx-gateway"));
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
+            .with(otel_layer)
+            .init();
+        tracing::info!("fluxx telemetry enabled → {endpoint}");
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
+            .init();
+    }
 
     let metrics_handle = metrics::install();
     metrics::describe();
@@ -739,6 +774,9 @@ async fn async_main() -> anyhow::Result<()> {
             }
         }
     }
+
+    // Flush any pending OTel spans before exit.
+    opentelemetry::global::shutdown_tracer_provider();
 
     Ok(())
 }
