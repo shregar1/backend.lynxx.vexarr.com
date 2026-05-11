@@ -592,14 +592,12 @@ impl Plugin for ScriptRunnerPlugin {
                     })
                     .collect();
 
-                return Err(PluginError::ShortCircuit {
+                Err(PluginError::ShortCircuit {
                     status,
                     headers,
                     body: SyncBody::from(body_bytes.to_vec()),
-                });
+                })
             }
         }
-
-        Ok(())
     }
 }
