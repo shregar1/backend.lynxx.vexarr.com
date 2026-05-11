@@ -198,9 +198,16 @@ pub async fn proxy_handler(
         .map(|h| h.split(':').next().unwrap_or(h).to_string())
         .or_else(|| req.uri().host().map(|h| h.to_string()));
 
+    let query_string = req.uri().query().map(|q| q.to_string());
     let (route, service) = match state
         .route_table
-        .match_route(&path, &method, host.as_deref())
+        .match_route_full(
+            &path,
+            &method,
+            host.as_deref(),
+            Some(req.headers()),
+            query_string.as_deref(),
+        )
     {
         Some(pair) => pair,
         None => {
@@ -358,12 +365,35 @@ pub async fn proxy_handler(
                 .get(axum::http::header::ACCEPT_ENCODING)
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
-            let mut file_resp = crate::proxy::static_files::serve(
+            let if_none_match = req
+                .headers()
+                .get(axum::http::header::IF_NONE_MATCH)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            let if_modified_since = req
+                .headers()
+                .get(axum::http::header::IF_MODIFIED_SINCE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            let range_header = req
+                .headers()
+                .get(axum::http::header::RANGE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            let serve_opts = crate::proxy::static_files::ServeOptions {
+                hide_patterns: &[],
+                cache_control: None,
+                if_none_match: if_none_match.as_deref(),
+                if_modified_since: if_modified_since.as_deref(),
+                range: range_header.as_deref(),
+            };
+            let mut file_resp = crate::proxy::static_files::serve_with_options(
                 root,
                 &service.index_file,
                 service.spa_fallback,
                 &path,
                 accept_enc,
+                &serve_opts,
             )
             .await;
 
@@ -693,8 +723,10 @@ pub async fn proxy_handler(
     };
 
     let max_attempts = (service.retries + 1).max(1) as usize;
-    // Force buffering when route.buffer_request is set, or when retries > 0.
-    let force_buffer = route.buffer_request;
+    let retry_on_status = &route.retry_on_status;
+    // Force buffering when route.buffer_request is set, or when retries > 0,
+    // or when retry_on_status is configured (need to re-read body on retry).
+    let force_buffer = route.buffer_request || !retry_on_status.is_empty();
     let mut last_err = String::new();
     let mut upstream_resp = None;
 
@@ -733,6 +765,19 @@ pub async fn proxy_handler(
             let upstream_req = Request::from_parts(parts.clone(), retry_body);
             match client.request(upstream_req).await {
                 Ok(r) => {
+                    // Check if we should retry based on status code.
+                    if !retry_on_status.is_empty()
+                        && retry_on_status.contains(&r.status().as_u16())
+                        && attempt + 1 < max_attempts
+                    {
+                        last_err = format!("upstream returned {}", r.status());
+                        metrics::counter!(
+                            "lynxx_upstream_retries_total",
+                            "service" => svc_name.clone(),
+                        )
+                        .increment(1);
+                        continue;
+                    }
                     upstream_resp = Some(r);
                     break;
                 }

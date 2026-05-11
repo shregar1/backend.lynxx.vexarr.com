@@ -325,6 +325,170 @@ pub async fn wait_for_propagation(
     }
 }
 
+// ── DigitalOcean ───────────────────────────────────────────────────
+
+#[derive(Debug)]
+pub struct DigitalOceanDns {
+    token: String,
+    client: reqwest::Client,
+}
+
+impl DigitalOceanDns {
+    pub fn new(token: String) -> Self {
+        Self {
+            token,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    fn extract_domain(fqdn: &str) -> (&str, &str) {
+        // Split "sub.example.com" into ("example.com", "sub").
+        let parts: Vec<&str> = fqdn.rsplitn(3, '.').collect();
+        if parts.len() >= 2 {
+            let domain = &fqdn[fqdn.len() - parts[0].len() - parts[1].len() - 1..];
+            let subdomain = &fqdn[..fqdn.len() - domain.len() - 1];
+            (domain, subdomain)
+        } else {
+            (fqdn, "@")
+        }
+    }
+}
+
+#[async_trait]
+impl DnsProvider for DigitalOceanDns {
+    async fn set_txt_record(
+        &self,
+        fqdn: &str,
+        value: &str,
+    ) -> Result<String, GatewayError> {
+        let acme_fqdn = build_acme_dns_name(fqdn);
+        let (domain, name) = Self::extract_domain(&acme_fqdn);
+
+        let resp = self
+            .client
+            .post(format!(
+                "https://api.digitalocean.com/v2/domains/{domain}/records"
+            ))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({
+                "type": "TXT",
+                "name": name,
+                "data": value,
+                "ttl": TXT_TTL,
+            }))
+            .send()
+            .await
+            .map_err(|e| GatewayError::Internal(format!("digitalocean api: {e}")))?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(GatewayError::Internal(format!(
+                "digitalocean dns create failed: {body}"
+            )));
+        }
+
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| GatewayError::Internal(format!("digitalocean parse: {e}")))?;
+        let id = json["domain_record"]["id"]
+            .as_u64()
+            .map(|n| format!("{domain}:{n}"))
+            .unwrap_or_default();
+
+        let _ = wait_for_propagation(&acme_fqdn, value).await;
+        Ok(id)
+    }
+
+    async fn clear_txt_record(&self, record_id: &str) -> Result<(), GatewayError> {
+        if let Some((domain, id)) = record_id.split_once(':') {
+            let _ = self
+                .client
+                .delete(format!(
+                    "https://api.digitalocean.com/v2/domains/{domain}/records/{id}"
+                ))
+                .bearer_auth(&self.token)
+                .send()
+                .await;
+        }
+        Ok(())
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "digitalocean"
+    }
+}
+
+// ── Google Cloud DNS ───────────────────────────────────────────────
+
+#[derive(Debug)]
+pub struct GoogleCloudDns {
+    token: String,
+    managed_zone: String,
+    client: reqwest::Client,
+}
+
+impl GoogleCloudDns {
+    pub fn new(token: String, managed_zone: String) -> Self {
+        Self {
+            token,
+            managed_zone,
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl DnsProvider for GoogleCloudDns {
+    async fn set_txt_record(
+        &self,
+        fqdn: &str,
+        value: &str,
+    ) -> Result<String, GatewayError> {
+        let acme_fqdn = format!("{}.", build_acme_dns_name(fqdn));
+        let project = &self.managed_zone;
+
+        let resp = self
+            .client
+            .post(format!(
+                "https://dns.googleapis.com/dns/v1/projects/{project}/managedZones/{}/changes",
+                project
+            ))
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({
+                "additions": [{
+                    "name": acme_fqdn,
+                    "type": "TXT",
+                    "ttl": TXT_TTL,
+                    "rrdatas": [format!("\"{}\"", value)]
+                }]
+            }))
+            .send()
+            .await
+            .map_err(|e| GatewayError::Internal(format!("gcloud dns api: {e}")))?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(GatewayError::Internal(format!(
+                "gcloud dns create failed: {body}"
+            )));
+        }
+
+        let _ = wait_for_propagation(acme_fqdn.trim_end_matches('.'), value).await;
+        Ok(acme_fqdn)
+    }
+
+    async fn clear_txt_record(&self, record_id: &str) -> Result<(), GatewayError> {
+        // Google Cloud DNS requires a deletion change; simplified here.
+        tracing::debug!(record = %record_id, "gcloud dns cleanup (manual)");
+        Ok(())
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "gcloud"
+    }
+}
+
 pub fn from_config(
     cfg: &crate::config::Dns01Config,
 ) -> Result<Arc<dyn DnsProvider>, GatewayError> {
@@ -368,8 +532,40 @@ pub fn from_config(
                 secret_key,
             )))
         }
+        "digitalocean" => {
+            let token = if cfg.api_token.is_empty() {
+                std::env::var("DIGITALOCEAN_TOKEN").unwrap_or_default()
+            } else {
+                cfg.api_token.clone()
+            };
+            if token.is_empty() {
+                return Err(GatewayError::ConfigError(
+                    "dns-01 digitalocean requires api_token or DIGITALOCEAN_TOKEN env".into(),
+                ));
+            }
+            Ok(Arc::new(DigitalOceanDns::new(token)))
+        }
+        "gcloud" | "google" | "google-cloud" => {
+            let token = if cfg.api_token.is_empty() {
+                std::env::var("GCLOUD_DNS_TOKEN").unwrap_or_default()
+            } else {
+                cfg.api_token.clone()
+            };
+            let project = if cfg.zone_id.is_empty() {
+                std::env::var("GCLOUD_PROJECT").unwrap_or_default()
+            } else {
+                // Reuse zone_id field for the managed zone name.
+                cfg.zone_id.clone()
+            };
+            if token.is_empty() || project.is_empty() {
+                return Err(GatewayError::ConfigError(
+                    "dns-01 gcloud requires api_token and zone_id (managed zone)".into(),
+                ));
+            }
+            Ok(Arc::new(GoogleCloudDns::new(token, project)))
+        }
         other => Err(GatewayError::ConfigError(format!(
-            "unknown dns-01 provider: {other} (supported: cloudflare, route53)"
+            "unknown dns-01 provider: {other} (supported: cloudflare, route53, digitalocean, gcloud)"
         ))),
     }
 }

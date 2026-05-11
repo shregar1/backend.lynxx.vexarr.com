@@ -132,6 +132,18 @@ impl RouteTable {
         method: &str,
         host: Option<&str>,
     ) -> Option<(Route, Service)> {
+        self.match_route_full(path, method, host, None, None)
+    }
+
+    /// Full route match with optional header and query parameter matching.
+    pub fn match_route_full(
+        &self,
+        path: &str,
+        method: &str,
+        host: Option<&str>,
+        req_headers: Option<&axum::http::HeaderMap>,
+        query_string: Option<&str>,
+    ) -> Option<(Route, Service)> {
         // Fast path: exact-path lookup. Avoids the O(N) scan for the common
         // case of a busy API with literal route paths.
         if let Some(id_ref) = self.exact_index.get(path) {
@@ -145,7 +157,11 @@ impl RouteTable {
                     || host.map_or(false, |h| {
                         route.hosts.iter().any(|rh| rh.eq_ignore_ascii_case(h))
                     });
-                if method_matches && host_matches {
+                let headers_match = route.headers.is_empty()
+                    || match_headers(&route.headers, req_headers);
+                let query_match = route.query_params.is_empty()
+                    || match_query(&route.query_params, query_string);
+                if method_matches && host_matches && headers_match && query_match {
                     if let Some(service) = self.get_service(&route.service_id) {
                         return Some((route.clone(), service));
                     }
@@ -160,16 +176,25 @@ impl RouteTable {
         for entry in self.routes.iter() {
             let route = entry.value();
 
-            let path_matches = route.paths.iter().any(|p| {
-                if p.ends_with('*') {
-                    let prefix = &p[..p.len() - 1];
-                    path.starts_with(prefix)
-                } else if p == "/" {
-                    true
-                } else {
-                    path == p || path.starts_with(&format!("{p}/"))
-                }
-            });
+            // Path matching: check regex patterns first, then literal paths.
+            let path_matches = if !route.path_regexes.is_empty() {
+                route.path_regexes.iter().any(|pattern| {
+                    regex::Regex::new(pattern)
+                        .map(|re| re.is_match(path))
+                        .unwrap_or(false)
+                })
+            } else {
+                route.paths.iter().any(|p| {
+                    if p.ends_with('*') {
+                        let prefix = &p[..p.len() - 1];
+                        path.starts_with(prefix)
+                    } else if p == "/" {
+                        true
+                    } else {
+                        path == p || path.starts_with(&format!("{p}/"))
+                    }
+                })
+            };
 
             if !path_matches {
                 continue;
@@ -188,6 +213,16 @@ impl RouteTable {
                 });
 
             if !host_matches {
+                continue;
+            }
+
+            // Header-based matching.
+            if !route.headers.is_empty() && !match_headers(&route.headers, req_headers) {
+                continue;
+            }
+
+            // Query-parameter matching.
+            if !route.query_params.is_empty() && !match_query(&route.query_params, query_string) {
                 continue;
             }
 
@@ -237,6 +272,53 @@ impl Default for RouteTable {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Check whether all required headers are present with matching values.
+fn match_headers(
+    required: &std::collections::HashMap<String, String>,
+    req_headers: Option<&axum::http::HeaderMap>,
+) -> bool {
+    let headers = match req_headers {
+        Some(h) => h,
+        None => return false,
+    };
+    for (name, expected) in required {
+        match headers.get(name.as_str()) {
+            Some(val) => {
+                if let Ok(v) = val.to_str() {
+                    if !v.eq_ignore_ascii_case(expected) {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Check whether all required query parameters are present with matching values.
+fn match_query(
+    required: &std::collections::HashMap<String, String>,
+    query_string: Option<&str>,
+) -> bool {
+    let qs = match query_string {
+        Some(q) => q,
+        None => return false,
+    };
+    for (key, expected) in required {
+        let found = qs
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .any(|(k, v)| k == key.as_str() && v == expected.as_str());
+        if !found {
+            return false;
+        }
+    }
+    true
 }
 
 pub type SharedRouteTable = Arc<RouteTable>;

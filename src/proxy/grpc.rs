@@ -2,12 +2,16 @@ use crate::error::GatewayError;
 use axum::body::Body;
 use axum::http::{HeaderName, HeaderValue, Request, Response, Uri};
 use futures_util::StreamExt;
+use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 
 /// HTTP/2 (h2c) client used for gRPC streaming. Built once and shared.
 pub type GrpcClient = Client<HttpConnector, Body>;
+/// HTTPS-capable gRPC client (h2 over TLS).
+pub type GrpcTlsClient =
+    Client<hyper_rustls::HttpsConnector<HttpConnector>, Body>;
 
 pub fn build_grpc_client() -> GrpcClient {
     let mut connector = HttpConnector::new();
@@ -16,6 +20,20 @@ pub fn build_grpc_client() -> GrpcClient {
         .timer(TokioTimer::new())
         .http2_only(true)
         .build(connector)
+}
+
+pub fn build_grpc_tls_client() -> GrpcTlsClient {
+    let mut http = HttpConnector::new();
+    http.enforce_http(false);
+    let https = HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http2()
+        .wrap_connector(http);
+    Client::builder(TokioExecutor::new())
+        .timer(TokioTimer::new())
+        .http2_only(true)
+        .build(https)
 }
 
 /// Forwards a gRPC request (HTTP/2 + trailers + streaming) to the upstream
@@ -28,7 +46,7 @@ pub async fn handle_grpc(
     let parsed = url::Url::parse(&upstream_url)
         .map_err(|e| GatewayError::BadRequest(format!("invalid upstream url: {e}")))?;
 
-    // Accept http:// and h2c:// for clear-text HTTP/2.
+    // Accept http://, h2c://, and https:// for gRPC.
     let normalized = match parsed.scheme() {
         "http" | "h2c" => {
             let mut s = upstream_url.clone();
@@ -38,9 +56,22 @@ pub async fn handle_grpc(
             s
         }
         "https" => {
-            return Err(GatewayError::BadRequest(
-                "https grpc upstream not yet supported, use http:// or h2c://".into(),
-            ));
+            // For HTTPS gRPC, use the TLS-capable client.
+            let tls_client = build_grpc_tls_client();
+            let uri: Uri = upstream_url.parse().map_err(|e| {
+                GatewayError::BadRequest(format!("invalid upstream uri: {e}"))
+            })?;
+            let (mut parts, body) = req.into_parts();
+            parts.uri = uri;
+            parts.headers.remove("host");
+            parts.headers.remove("connection");
+            let upstream_req = Request::from_parts(parts, body);
+            let resp = tls_client
+                .request(upstream_req)
+                .await
+                .map_err(|e| GatewayError::UpstreamError(format!("grpc tls: {e}")))?;
+            let (resp_parts, incoming) = resp.into_parts();
+            return Ok(Response::from_parts(resp_parts, Body::new(incoming)));
         }
         other => {
             return Err(GatewayError::BadRequest(format!(

@@ -322,6 +322,13 @@ async fn diff_routes(
                         buffer_request: false,
                         path_rewrite_pattern: None,
                         path_rewrite_replacement: None,
+                        headers: std::collections::HashMap::new(),
+                        query_params: std::collections::HashMap::new(),
+                        path_regexes: Vec::new(),
+                        read_timeout_ms: None,
+                        write_timeout_ms: None,
+                        idle_timeout_ms: None,
+                        retry_on_status: Vec::new(),
                         created_at: cur.created_at,
                         updated_at: Utc::now(),
                     };

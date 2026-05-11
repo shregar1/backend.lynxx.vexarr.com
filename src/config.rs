@@ -97,6 +97,20 @@ pub struct GatewaySettings {
     #[serde(default = "default_plan_tier")]
     pub plan_tier: String,
 
+    /// Maximum number of idle connections per upstream host.
+    /// Default: 128.
+    #[serde(default = "default_pool_max_idle")]
+    pub pool_max_idle_per_host: usize,
+    /// Idle connection timeout in seconds. Default: 120.
+    #[serde(default = "default_pool_idle_timeout")]
+    pub pool_idle_timeout_secs: u64,
+    /// HTTP/2 keepalive ping interval in seconds. Default: 10.
+    #[serde(default = "default_h2_keepalive")]
+    pub h2_keepalive_interval_secs: u64,
+    /// Maximum request header size in bytes. Default: 16384 (16 KB).
+    #[serde(default = "default_max_header_size")]
+    pub max_header_size: usize,
+
     /// Local zone/region identifier for locality-aware load balancing.
     /// When set, the load balancer prioritizes targets in the same zone.
     #[serde(default)]
@@ -627,6 +641,10 @@ fn default_gateway() -> GatewaySettings {
         tls: TlsSettings::default(),
         acme: AcmeConfig::default(),
         providers: ProvidersConfig::default(),
+        pool_max_idle_per_host: default_pool_max_idle(),
+        pool_idle_timeout_secs: default_pool_idle_timeout(),
+        h2_keepalive_interval_secs: default_h2_keepalive(),
+        max_header_size: default_max_header_size(),
         prewarm_interval_secs: default_prewarm_interval(),
         prewarm_concurrency: default_prewarm_concurrency(),
         auth_required: false,
@@ -668,6 +686,22 @@ fn default_hc_open_duration() -> u64 {
 
 fn default_plan_tier() -> String {
     "free".to_string()
+}
+
+fn default_pool_max_idle() -> usize {
+    128
+}
+
+fn default_pool_idle_timeout() -> u64 {
+    120
+}
+
+fn default_h2_keepalive() -> u64 {
+    10
+}
+
+fn default_max_header_size() -> usize {
+    16384
 }
 
 fn default_database_url() -> String {
@@ -911,9 +945,25 @@ fn merge_json(base: &mut serde_json::Value, overlay: &serde_json::Value) {
     }
 }
 
+/// Expand `{env.VAR_NAME}` placeholders in config strings with the
+/// corresponding environment variable values. Unknown vars are left as-is.
+fn expand_env_vars(input: &str) -> String {
+    static ENV_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = ENV_RE.get_or_init(|| {
+        regex::Regex::new(r"\{env\.([A-Za-z_][A-Za-z0-9_]*)\}").unwrap()
+    });
+    re.replace_all(input, |caps: &regex::Captures| {
+        let var_name = &caps[1];
+        std::env::var(var_name).unwrap_or_else(|_| caps[0].to_string())
+    })
+    .into_owned()
+}
+
 pub fn load_config(path: &str) -> anyhow::Result<GatewayConfig> {
     match std::fs::read_to_string(path) {
-        Ok(contents) => {
+        Ok(raw_contents) => {
+            // Expand {env.VAR} placeholders before parsing.
+            let contents = expand_env_vars(&raw_contents);
             let base_dir = std::path::Path::new(path)
                 .parent()
                 .unwrap_or(std::path::Path::new("."));
@@ -926,7 +976,6 @@ pub fn load_config(path: &str) -> anyhow::Result<GatewayConfig> {
                 tracing::info!(
                     "no recognised extension for {path}, probing TOML → YAML → JSON"
                 );
-                // Try each format; imports only work if format detection succeeds.
                 parse_config(&contents, ConfigFormat::Toml)
                     .or_else(|_| parse_config(&contents, ConfigFormat::Yaml))
                     .or_else(|_| parse_config(&contents, ConfigFormat::Json))
@@ -942,6 +991,37 @@ pub fn load_config(path: &str) -> anyhow::Result<GatewayConfig> {
             Ok(GatewayConfig::default())
         }
     }
+}
+
+/// Watch the config file for changes and trigger a reload callback.
+/// Polls every `interval` and calls `on_change` when the file mtime changes.
+pub fn spawn_config_watcher<F>(
+    path: String,
+    interval: std::time::Duration,
+    on_change: F,
+) where
+    F: Fn() + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut last_mtime: Option<std::time::SystemTime> = None;
+        loop {
+            tokio::time::sleep(interval).await;
+            if let Ok(meta) = tokio::fs::metadata(&path).await {
+                if let Ok(mtime) = meta.modified() {
+                    if last_mtime.map_or(true, |prev| mtime != prev) {
+                        if last_mtime.is_some() {
+                            tracing::info!(
+                                path = %path,
+                                "config file changed, triggering reload"
+                            );
+                            on_change();
+                        }
+                        last_mtime = Some(mtime);
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Apply environment-variable overrides on top of the loaded TOML config.

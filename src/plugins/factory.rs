@@ -1,9 +1,16 @@
 use crate::db::Repository;
 use crate::error::GatewayError;
+use crate::plugins::abort::AbortPlugin;
 use crate::plugins::acl::AclPlugin;
 use crate::plugins::anomaly_detector::AnomalyDetectorPlugin;
+use crate::plugins::client_cert_header::ClientCertHeaderPlugin;
 use crate::plugins::error_handler::ErrorHandlerPlugin;
+use crate::plugins::log_filter::LogFilterPlugin;
+use crate::plugins::map_vars::MapVarsPlugin;
+use crate::plugins::method_override::MethodOverridePlugin;
 use crate::plugins::redirect::RedirectPlugin;
+use crate::plugins::response_filter::ResponseFilterPlugin;
+use crate::plugins::security_headers::SecurityHeadersPlugin;
 use crate::plugins::template::TemplatePlugin;
 use crate::plugins::auth::AuthPlugin;
 use crate::plugins::aws_lambda::AwsLambdaPlugin;
@@ -119,6 +126,13 @@ pub fn build(
         "error-handler" => Arc::new(ErrorHandlerPlugin::from_config(config)?),
         "redirect" => Arc::new(RedirectPlugin::from_config(config)?),
         "template" => Arc::new(TemplatePlugin::from_config(config)?),
+        "log-filter" => Arc::new(LogFilterPlugin::from_config(config)?),
+        "abort" => Arc::new(AbortPlugin::from_config(config)?),
+        "method-override" => Arc::new(MethodOverridePlugin::from_config(config)?),
+        "security-headers" => Arc::new(SecurityHeadersPlugin::from_config(config)?),
+        "client-cert-header" => Arc::new(ClientCertHeaderPlugin::from_config(config)?),
+        "response-filter" => Arc::new(ResponseFilterPlugin::from_config(config)?),
+        "map-vars" => Arc::new(MapVarsPlugin::from_config(config)?),
         other => {
             return Err(GatewayError::BadRequest(format!("unknown plugin: {other}")));
         }

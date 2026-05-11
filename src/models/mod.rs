@@ -94,6 +94,33 @@ pub struct Route {
     /// forwarding to the upstream. Normally bodies stream through.
     #[serde(default)]
     pub buffer_request: bool,
+    /// Header-based matching: route only matches when ALL listed headers
+    /// are present with matching values. Format: `{"X-Api-Version": "v2"}`.
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    /// Query-parameter matching: route matches when ALL listed params
+    /// are present with matching values. Format: `{"version": "2"}`.
+    #[serde(default)]
+    pub query_params: std::collections::HashMap<String, String>,
+    /// Regex path patterns. When non-empty, paths are matched using
+    /// these regex patterns instead of the literal `paths` field.
+    /// E.g. `["^/api/v[0-9]+/users/[0-9]+$"]`.
+    #[serde(default)]
+    pub path_regexes: Vec<String>,
+    /// Per-route read timeout in milliseconds. Overrides the global
+    /// default when set. `0` = no timeout.
+    #[serde(default)]
+    pub read_timeout_ms: Option<u64>,
+    /// Per-route write timeout in milliseconds.
+    #[serde(default)]
+    pub write_timeout_ms: Option<u64>,
+    /// Per-route idle timeout in milliseconds.
+    #[serde(default)]
+    pub idle_timeout_ms: Option<u64>,
+    /// HTTP status codes that trigger a retry (e.g. `[502, 503, 504]`).
+    /// Empty = retry only on connection errors (default behavior).
+    #[serde(default)]
+    pub retry_on_status: Vec<u16>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -230,6 +257,13 @@ impl Route {
             path_rewrite_pattern: None,
             path_rewrite_replacement: None,
             buffer_request: false,
+            headers: std::collections::HashMap::new(),
+            query_params: std::collections::HashMap::new(),
+            path_regexes: Vec::new(),
+            read_timeout_ms: None,
+            write_timeout_ms: None,
+            idle_timeout_ms: None,
+            retry_on_status: Vec::new(),
             created_at: now,
             updated_at: now,
         }

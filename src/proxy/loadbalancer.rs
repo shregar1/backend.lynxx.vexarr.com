@@ -19,6 +19,7 @@ pub enum LbStrategy {
     IpHash,
     CookieSticky,
     ConsistentHash,
+    Random,
 }
 
 impl LbStrategy {
@@ -28,6 +29,7 @@ impl LbStrategy {
             "ip-hash" | "ip_hash" | "iphash" => LbStrategy::IpHash,
             "cookie" | "cookie-sticky" | "sticky" => LbStrategy::CookieSticky,
             "consistent-hash" | "consistent_hash" | "consistenthash" => LbStrategy::ConsistentHash,
+            "random" => LbStrategy::Random,
             _ => LbStrategy::RoundRobin,
         }
     }
@@ -174,6 +176,7 @@ impl ServiceLoadBalancer {
             LbStrategy::IpHash => self.pick_hrw(ctx.client_ip.unwrap_or("0.0.0.0")),
             LbStrategy::ConsistentHash => self.pick_hrw(ctx.uri_path.unwrap_or("/")),
             LbStrategy::CookieSticky => self.pick_cookie_sticky(ctx.sticky_cookie),
+            LbStrategy::Random => self.pick_random(),
         }
     }
 
@@ -266,6 +269,23 @@ impl ServiceLoadBalancer {
             }
         }
         self.pick_rr()
+    }
+
+    /// Random selection among healthy, enabled targets.
+    fn pick_random(&self) -> Option<Arc<TargetState>> {
+        let healthy: Vec<_> = self
+            .targets
+            .iter()
+            .filter(|s| s.target.enabled && s.healthy.load(Ordering::Relaxed))
+            .collect();
+        if healthy.is_empty() {
+            return None;
+        }
+        let idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize;
+        // Use the counter XOR'd with a fast mix to approximate random
+        // without pulling in a RNG crate — good enough for load balancing.
+        let mixed = idx.wrapping_mul(6364136223846793005).wrapping_add(1);
+        Some(healthy[mixed % healthy.len()].clone())
     }
 }
 
