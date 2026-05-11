@@ -106,6 +106,13 @@ pub struct GatewaySettings {
     /// gateway can issue certificates for internal services.
     #[serde(default)]
     pub pki: PkiConfig,
+
+    /// Certificate storage backend for clustered deployments. Controls
+    /// where ACME certs, OCSP responses, and STEK keys are persisted.
+    /// Defaults to `"file"` (local disk). Use `"redis"` or `"postgres"`
+    /// to share state across multiple gateway nodes.
+    #[serde(default)]
+    pub cert_store: CertStoreConfig,
 }
 
 /// Built-in PKI configuration. When `enabled = true` the gateway
@@ -137,6 +144,39 @@ impl Default for PkiConfig {
             default_validity_days: default_pki_validity(),
         }
     }
+}
+
+/// Certificate storage backend configuration. In single-node deployments
+/// the default `"file"` backend reads/writes cert material to local disk.
+/// Multi-node clusters should use `"redis"` or `"postgres"` so all nodes
+/// share ACME certificates, OCSP staples, and STEK rotation keys.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct CertStoreConfig {
+    /// Backend type: `"file"` (default), `"redis"`, `"postgres"`.
+    #[serde(default = "default_cert_store_backend")]
+    pub backend: String,
+    /// Redis URL (only used when `backend = "redis"`).
+    /// Example: `redis://127.0.0.1:6379/1`
+    #[serde(default)]
+    pub redis_url: String,
+    /// Directory for the file backend. When empty, falls back to the ACME
+    /// `storage_dir` or `~/.lynxx/certs/`.
+    #[serde(default)]
+    pub file_dir: String,
+}
+
+impl Default for CertStoreConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_cert_store_backend(),
+            redis_url: String::new(),
+            file_dir: String::new(),
+        }
+    }
+}
+
+fn default_cert_store_backend() -> String {
+    "file".to_string()
 }
 
 fn default_pki_cn() -> String {
@@ -331,6 +371,19 @@ pub struct TlsSettings {
     /// Only meaningful when `client_ca_path` is set.
     #[serde(default)]
     pub client_cert_required: bool,
+    /// Minimum TLS version. Defaults to `"1.2"`. Accepted: `"1.2"`, `"1.3"`.
+    #[serde(default = "default_tls_min_version")]
+    pub min_version: String,
+    /// Maximum TLS version. Defaults to `"1.3"`.
+    #[serde(default = "default_tls_max_version")]
+    pub max_version: String,
+    /// Named groups / curves for key exchange. Defaults to all supported
+    /// by the ring provider: `["x25519", "secp256r1", "secp384r1"]`.
+    ///
+    /// Post-quantum key exchange (`x25519mlkem768`) requires switching to
+    /// the `aws-lc-rs` crypto provider in a future release.
+    #[serde(default)]
+    pub curves: Vec<String>,
 }
 
 impl Default for TlsSettings {
@@ -341,8 +394,19 @@ impl Default for TlsSettings {
             key_path: String::new(),
             client_ca_path: String::new(),
             client_cert_required: false,
+            min_version: default_tls_min_version(),
+            max_version: default_tls_max_version(),
+            curves: Vec::new(),
         }
     }
+}
+
+fn default_tls_min_version() -> String {
+    "1.2".to_string()
+}
+
+fn default_tls_max_version() -> String {
+    "1.3".to_string()
 }
 
 impl TlsSettings {
@@ -424,6 +488,7 @@ fn default_gateway() -> GatewaySettings {
         plan_tier: default_plan_tier(),
         local_zone: None,
         pki: PkiConfig::default(),
+        cert_store: CertStoreConfig::default(),
     }
 }
 

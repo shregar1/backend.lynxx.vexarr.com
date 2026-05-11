@@ -31,6 +31,8 @@
 
 use crate::config::TlsSettings;
 use crate::error::GatewayError;
+use rustls::crypto::ring as ring_provider;
+use rustls::crypto::CryptoProvider;
 use rustls::pki_types::CertificateDer;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::server::WebPkiClientVerifier;
@@ -42,6 +44,14 @@ use std::sync::Arc;
 /// Errors at startup if any path is missing or any PEM is malformed —
 /// it's better to refuse to boot than to silently fall back to plain
 /// HTTP when the operator asked for HTTPS.
+///
+/// Applies TLS version constraints (`min_version` / `max_version`) and
+/// curve selection (`curves`) from the config. When `curves` is empty
+/// the ring provider's full set is used (x25519, secp256r1, secp384r1).
+///
+/// **Post-quantum note:** `x25519mlkem768` is not available in the ring
+/// provider. A future release will add an `aws-lc-rs` provider option
+/// to unlock post-quantum key exchange.
 pub fn build_server_config(settings: &TlsSettings) -> Result<ServerConfig, GatewayError> {
     if settings.cert_path.is_empty() || settings.key_path.is_empty() {
         return Err(GatewayError::Internal(
@@ -52,7 +62,15 @@ pub fn build_server_config(settings: &TlsSettings) -> Result<ServerConfig, Gatew
     let cert_chain = load_cert_chain(&settings.cert_path)?;
     let key = load_private_key(&settings.key_path)?;
 
-    let builder = ServerConfig::builder();
+    // --- Protocol version constraints ---
+    let versions = resolve_tls_versions(&settings.min_version, &settings.max_version)?;
+
+    // --- Key exchange group / curve selection ---
+    let provider = resolve_crypto_provider(&settings.curves)?;
+
+    let builder = ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&versions)
+        .map_err(|e| GatewayError::Internal(format!("tls protocol versions: {e}")))?;
 
     let mut config = if settings.mtls_enabled() {
         let verifier = build_client_verifier(settings)?;
@@ -76,13 +94,94 @@ pub fn build_server_config(settings: &TlsSettings) -> Result<ServerConfig, Gatew
             cert = %settings.cert_path,
             ca = %settings.client_ca_path,
             required = settings.client_cert_required,
+            min_tls = %settings.min_version,
+            max_tls = %settings.max_version,
             "inbound mTLS configured"
         );
     } else {
-        tracing::info!(cert = %settings.cert_path, "inbound TLS configured (no mTLS)");
+        tracing::info!(
+            cert = %settings.cert_path,
+            min_tls = %settings.min_version,
+            max_tls = %settings.max_version,
+            "inbound TLS configured (no mTLS)"
+        );
     }
 
     Ok(config)
+}
+
+/// Map config strings `"1.2"` / `"1.3"` to rustls protocol version statics.
+fn resolve_tls_versions(
+    min: &str,
+    max: &str,
+) -> Result<Vec<&'static rustls::SupportedProtocolVersion>, GatewayError> {
+    let min_ver = parse_tls_version(min, "min_version")?;
+    let max_ver = parse_tls_version(max, "max_version")?;
+
+    if min_ver > max_ver {
+        return Err(GatewayError::Internal(format!(
+            "tls.min_version ({min}) must not exceed tls.max_version ({max})"
+        )));
+    }
+
+    let mut versions = Vec::with_capacity(2);
+    if min_ver <= 12 && max_ver >= 12 {
+        versions.push(&rustls::version::TLS12);
+    }
+    if min_ver <= 13 && max_ver >= 13 {
+        versions.push(&rustls::version::TLS13);
+    }
+    if versions.is_empty() {
+        return Err(GatewayError::Internal(
+            "tls version range resolved to zero supported versions".into(),
+        ));
+    }
+    Ok(versions)
+}
+
+/// Parse `"1.2"` → `12`, `"1.3"` → `13`.
+fn parse_tls_version(s: &str, field: &str) -> Result<u8, GatewayError> {
+    match s {
+        "1.2" => Ok(12),
+        "1.3" => Ok(13),
+        other => Err(GatewayError::Internal(format!(
+            "tls.{field}: unsupported version \"{other}\" (accepted: \"1.2\", \"1.3\")"
+        ))),
+    }
+}
+
+/// Build a [`CryptoProvider`] with the ring backend, optionally filtered to
+/// only the named key-exchange groups listed in `curves`. An empty list
+/// means "use all supported groups".
+fn resolve_crypto_provider(curves: &[String]) -> Result<CryptoProvider, GatewayError> {
+    let mut provider = ring_provider::default_provider();
+
+    if !curves.is_empty() {
+        let mut selected = Vec::with_capacity(curves.len());
+        for name in curves {
+            let group = match name.to_lowercase().as_str() {
+                "x25519" => ring_provider::kx_group::X25519,
+                "secp256r1" | "p256" | "prime256v1" => ring_provider::kx_group::SECP256R1,
+                "secp384r1" | "p384" => ring_provider::kx_group::SECP384R1,
+                other => {
+                    return Err(GatewayError::Internal(format!(
+                        "tls.curves: unknown curve \"{other}\" \
+                         (supported with ring: x25519, secp256r1, secp384r1; \
+                         post-quantum x25519mlkem768 requires the aws-lc-rs provider)"
+                    )));
+                }
+            };
+            // Avoid duplicates while preserving operator ordering.
+            if !selected.iter().any(|g: &&dyn rustls::crypto::SupportedKxGroup| {
+                g.name() == group.name()
+            }) {
+                selected.push(group);
+            }
+        }
+        provider.kx_groups = selected;
+    }
+
+    Ok(provider)
 }
 
 fn load_cert_chain(path: &str) -> Result<Vec<CertificateDer<'static>>, GatewayError> {
@@ -202,5 +301,111 @@ impl ClientCertVerifier for OptionalClientVerifier {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.inner.supported_verify_schemes()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_versions_both() {
+        let v = resolve_tls_versions("1.2", "1.3").unwrap();
+        assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn resolve_versions_tls13_only() {
+        let v = resolve_tls_versions("1.3", "1.3").unwrap();
+        assert_eq!(v.len(), 1);
+    }
+
+    #[test]
+    fn resolve_versions_tls12_only() {
+        let v = resolve_tls_versions("1.2", "1.2").unwrap();
+        assert_eq!(v.len(), 1);
+    }
+
+    #[test]
+    fn resolve_versions_inverted_range() {
+        let err = resolve_tls_versions("1.3", "1.2").unwrap_err();
+        assert!(err.to_string().contains("must not exceed"));
+    }
+
+    #[test]
+    fn resolve_versions_bad_string() {
+        let err = resolve_tls_versions("1.1", "1.3").unwrap_err();
+        assert!(err.to_string().contains("unsupported version"));
+    }
+
+    #[test]
+    fn resolve_provider_defaults() {
+        // Empty curves = all three groups.
+        let p = resolve_crypto_provider(&[]).unwrap();
+        assert_eq!(p.kx_groups.len(), 3);
+    }
+
+    #[test]
+    fn resolve_provider_single_curve() {
+        let p = resolve_crypto_provider(&["x25519".to_string()]).unwrap();
+        assert_eq!(p.kx_groups.len(), 1);
+        assert_eq!(
+            p.kx_groups[0].name(),
+            rustls::NamedGroup::X25519
+        );
+    }
+
+    #[test]
+    fn resolve_provider_multiple_curves() {
+        let p = resolve_crypto_provider(&[
+            "secp384r1".to_string(),
+            "x25519".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(p.kx_groups.len(), 2);
+        // Order preserved from config.
+        assert_eq!(
+            p.kx_groups[0].name(),
+            rustls::NamedGroup::secp384r1
+        );
+        assert_eq!(
+            p.kx_groups[1].name(),
+            rustls::NamedGroup::X25519
+        );
+    }
+
+    #[test]
+    fn resolve_provider_deduplicates() {
+        let p = resolve_crypto_provider(&[
+            "x25519".to_string(),
+            "x25519".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(p.kx_groups.len(), 1);
+    }
+
+    #[test]
+    fn resolve_provider_aliases() {
+        let p = resolve_crypto_provider(&[
+            "p256".to_string(),
+            "p384".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(p.kx_groups.len(), 2);
+        assert_eq!(
+            p.kx_groups[0].name(),
+            rustls::NamedGroup::secp256r1
+        );
+    }
+
+    #[test]
+    fn resolve_provider_unknown_curve() {
+        let err = resolve_crypto_provider(&["x448".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("unknown curve"));
+        assert!(err.to_string().contains("aws-lc-rs"));
     }
 }

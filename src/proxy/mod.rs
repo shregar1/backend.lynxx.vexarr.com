@@ -1,4 +1,5 @@
 pub mod acme;
+pub mod cert_store;
 pub mod grpc;
 pub mod h3;
 pub mod handler;
