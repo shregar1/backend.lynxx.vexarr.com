@@ -14,7 +14,6 @@
 pub mod admin;
 pub mod audit;
 pub mod auth;
-pub mod billing;
 pub mod cluster;
 pub mod config;
 pub mod db;
