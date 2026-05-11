@@ -17,6 +17,7 @@ mod discovery;
 mod error;
 mod health;
 mod license;
+mod lynxfile;
 mod metrics;
 mod models;
 mod plugins;

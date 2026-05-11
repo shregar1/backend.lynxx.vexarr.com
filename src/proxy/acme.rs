@@ -107,6 +107,18 @@ impl AcmeManager {
         }
     }
 
+    /// Map the configured `key_type` string to the corresponding rcgen
+    /// signing algorithm. Defaults to ECDSA-P256 for unknown values.
+    fn key_algorithm(&self) -> &'static rcgen::SignatureAlgorithm {
+        match self.config.key_type.as_str() {
+            "ec-p256" => &rcgen::PKCS_ECDSA_P256_SHA256,
+            "ec-p384" => &rcgen::PKCS_ECDSA_P384_SHA384,
+            "ed25519" => &rcgen::PKCS_ED25519,
+            "rsa-2048" | "rsa-4096" => &rcgen::PKCS_RSA_SHA256,
+            _ => &rcgen::PKCS_ECDSA_P256_SHA256,
+        }
+    }
+
     /// Return the resolved storage directory. Falls back to
     /// `~/.lynxx/acme/` when not explicitly configured.
     pub fn storage_dir(&self) -> PathBuf {
@@ -1044,8 +1056,14 @@ impl AcmeManager {
                     })?;
                 csr_params.distinguished_name = rcgen::DistinguishedName::new();
 
+                let algo = self.key_algorithm();
+                tracing::info!(
+                    label = %label,
+                    key_type = %self.config.key_type,
+                    "generating ACME CSR key"
+                );
                 private_key =
-                    rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+                    rcgen::KeyPair::generate_for(algo)
                         .map_err(|e| {
                             GatewayError::Internal(format!(
                                 "generate key ({label}): {e}"
@@ -1073,7 +1091,7 @@ impl AcmeManager {
                     "order already valid; downloading existing cert"
                 );
                 private_key =
-                    rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+                    rcgen::KeyPair::generate_for(self.key_algorithm())
                         .map_err(|e| {
                             GatewayError::Internal(format!(
                                 "generate key ({label}): {e}"

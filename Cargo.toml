@@ -90,9 +90,10 @@ aws-sdk-lambda = "=1.40.0"
 tiktoken-rs = "0.6"
 regex = "1"
 
-# Response compression plugin: gzip (pure-Rust via miniz_oxide) and Zstandard.
+# Response compression plugin: gzip, brotli, and Zstandard (all pure-Rust).
 flate2 = "1"
 zstd = "0.13"
+brotli = "7"
 
 # graphql-guard plugin: parse GraphQL queries for depth, complexity, alias
 # count, persisted-query lookup, per-field rate limits. Pure-sync parser, no

@@ -68,6 +68,13 @@ pub fn build_server_config(settings: &TlsSettings) -> Result<ServerConfig, Gatew
     // --- Key exchange group / curve selection ---
     let provider = resolve_crypto_provider(&settings.curves)?;
 
+    // --- Cipher suite selection ---
+    let provider = if !settings.cipher_suites.is_empty() {
+        resolve_cipher_suites(provider, &settings.cipher_suites)?
+    } else {
+        provider
+    };
+
     let builder = ServerConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&versions)
         .map_err(|e| GatewayError::Internal(format!("tls protocol versions: {e}")))?;
@@ -84,6 +91,17 @@ pub fn build_server_config(settings: &TlsSettings) -> Result<ServerConfig, Gatew
             .with_single_cert(cert_chain, key)
             .map_err(|e| GatewayError::Internal(format!("tls server cert: {e}")))?
     };
+
+    // --- TLS secret logging (SSLKEYLOGFILE) ---
+    let keylog_path = if !settings.sslkeylogfile.is_empty() {
+        Some(settings.sslkeylogfile.clone())
+    } else {
+        std::env::var("SSLKEYLOGFILE").ok().filter(|s| !s.is_empty())
+    };
+    if let Some(ref path) = keylog_path {
+        config.key_log = Arc::new(rustls::KeyLogFile::new());
+        tracing::warn!(path = %path, "TLS key logging enabled — DO NOT USE IN PRODUCTION");
+    }
 
     // Match what axum/hyper would advertise. Order matters — h2 first so
     // ALPN-aware clients pick HTTP/2 when both are acceptable.
@@ -229,6 +247,45 @@ fn resolve_crypto_provider(curves: &[String]) -> Result<CryptoProvider, GatewayE
         provider.kx_groups = selected;
     }
 
+    Ok(provider)
+}
+
+/// Filter the provider's cipher suites to only those named in `suites`.
+/// Names use the IANA registry format (e.g. `TLS13_AES_256_GCM_SHA384`).
+fn resolve_cipher_suites(
+    mut provider: CryptoProvider,
+    suites: &[String],
+) -> Result<CryptoProvider, GatewayError> {
+    let mut selected = Vec::with_capacity(suites.len());
+    for name in suites {
+        let upper = name.to_uppercase().replace('-', "_");
+        let found = provider
+            .cipher_suites
+            .iter()
+            .find(|cs| {
+                let cs_name = format!("{:?}", cs.suite()).to_uppercase().replace('-', "_");
+                cs_name == upper || cs_name.ends_with(&upper)
+            })
+            .cloned();
+        match found {
+            Some(cs) => {
+                if !selected.iter().any(|s: &rustls::SupportedCipherSuite| {
+                    s.suite() == cs.suite()
+                }) {
+                    selected.push(cs);
+                }
+            }
+            None => {
+                tracing::warn!(suite = %name, "unknown cipher suite, skipping");
+            }
+        }
+    }
+    if selected.is_empty() {
+        return Err(GatewayError::Internal(
+            "tls.cipher_suites: no valid suites selected".into(),
+        ));
+    }
+    provider.cipher_suites = selected;
     Ok(provider)
 }
 

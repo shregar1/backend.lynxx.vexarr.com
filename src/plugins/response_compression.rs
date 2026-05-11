@@ -11,6 +11,7 @@ use std::io::Write;
 enum CompressionAlgo {
     Gzip,
     Zstd,
+    Brotli,
 }
 
 #[derive(Clone, Debug)]
@@ -34,6 +35,7 @@ pub struct ResponseCompressionPlugin {
     content_types: Vec<String>,
     gzip_level: u32,
     zstd_level: i32,
+    brotli_level: u32,
 }
 
 impl ResponseCompressionPlugin {
@@ -44,11 +46,12 @@ impl ResponseCompressionPlugin {
                 .filter_map(|s| match s {
                     "gzip" | "gz" => Some(CompressionAlgo::Gzip),
                     "zstd" | "zstandard" => Some(CompressionAlgo::Zstd),
+                    "br" | "brotli" => Some(CompressionAlgo::Brotli),
                     _ => None,
                 })
                 .collect()
         } else {
-            vec![CompressionAlgo::Zstd, CompressionAlgo::Gzip]
+            vec![CompressionAlgo::Zstd, CompressionAlgo::Brotli, CompressionAlgo::Gzip]
         };
 
         let min_body_size = cfg
@@ -77,12 +80,18 @@ impl ResponseCompressionPlugin {
             .and_then(|v| v.as_i64())
             .unwrap_or(3) as i32;
 
+        let brotli_level = cfg
+            .get("brotli_level")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(4) as u32;
+
         Ok(Self {
             algorithms,
             min_body_size,
             content_types,
             gzip_level,
             zstd_level,
+            brotli_level,
         })
     }
 
@@ -127,6 +136,7 @@ impl ResponseCompressionPlugin {
             for algo in &self.algorithms {
                 match algo {
                     CompressionAlgo::Zstd if *name == "zstd" => return Some(CompressionAlgo::Zstd),
+                    CompressionAlgo::Brotli if *name == "br" => return Some(CompressionAlgo::Brotli),
                     CompressionAlgo::Gzip if *name == "gzip" => return Some(CompressionAlgo::Gzip),
                     _ => {}
                 }
@@ -202,6 +212,20 @@ impl Plugin for ResponseCompressionPlugin {
                     .finish()
                     .map_err(|e| PluginError::Internal(format!("gzip finish: {e}")))?;
                 (out, "gzip")
+            }
+            CompressionAlgo::Brotli => {
+                let mut out = Vec::with_capacity(bytes.len() / 2);
+                {
+                    let mut writer = brotli::CompressorWriter::new(
+                        &mut out,
+                        4096,
+                        self.brotli_level,
+                        22,
+                    );
+                    writer.write_all(&bytes)
+                        .map_err(|e| PluginError::Internal(format!("brotli compress: {e}")))?;
+                }
+                (out, "br")
             }
             CompressionAlgo::Zstd => {
                 let out = zstd::encode_all(bytes.as_ref(), self.zstd_level)

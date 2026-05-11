@@ -3,6 +3,8 @@ use crate::error::GatewayError;
 use crate::plugins::acl::AclPlugin;
 use crate::plugins::anomaly_detector::AnomalyDetectorPlugin;
 use crate::plugins::error_handler::ErrorHandlerPlugin;
+use crate::plugins::redirect::RedirectPlugin;
+use crate::plugins::template::TemplatePlugin;
 use crate::plugins::auth::AuthPlugin;
 use crate::plugins::aws_lambda::AwsLambdaPlugin;
 use crate::plugins::basic_auth::BasicAuthPlugin;
@@ -115,6 +117,8 @@ pub fn build(
         "anomaly-detector" => Arc::new(AnomalyDetectorPlugin::from_config(config)?),
         "script-runner" => Arc::new(ScriptRunnerPlugin::from_config(config)?),
         "error-handler" => Arc::new(ErrorHandlerPlugin::from_config(config)?),
+        "redirect" => Arc::new(RedirectPlugin::from_config(config)?),
+        "template" => Arc::new(TemplatePlugin::from_config(config)?),
         other => {
             return Err(GatewayError::BadRequest(format!("unknown plugin: {other}")));
         }

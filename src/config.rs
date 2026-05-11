@@ -283,6 +283,12 @@ pub struct AcmeConfig {
     /// HMAC key for EAB, base64url-encoded.
     #[serde(default)]
     pub eab_hmac_key: String,
+    /// Key type for ACME certificate issuance. Accepted values:
+    /// `"ec-p256"` (default), `"ec-p384"`, `"ed25519"`, `"rsa-2048"`,
+    /// `"rsa-4096"`. Controls the key algorithm used in CSR generation
+    /// and the resulting certificate.
+    #[serde(default = "default_acme_key_type")]
+    pub key_type: String,
 }
 
 /// On-Demand TLS settings. When enabled, the gateway provisions ACME
@@ -426,6 +432,7 @@ impl Default for AcmeConfig {
             dns01: Dns01Config::default(),
             eab_kid: String::new(),
             eab_hmac_key: String::new(),
+            key_type: default_acme_key_type(),
         }
     }
 }
@@ -444,6 +451,10 @@ fn default_acme_directory_url() -> String {
 
 fn default_acme_challenge_type() -> String {
     "auto".to_string()
+}
+
+fn default_acme_key_type() -> String {
+    "ec-p256".to_string()
 }
 
 fn default_acme_fallback_urls() -> Vec<String> {
@@ -499,6 +510,23 @@ pub struct TlsSettings {
     /// the `aws-lc-rs` crypto provider in a future release.
     #[serde(default)]
     pub curves: Vec<String>,
+    /// Explicit cipher suite selection. When non-empty, only the listed
+    /// suites are offered. Names follow the IANA registry (e.g.
+    /// `"TLS13_AES_256_GCM_SHA384"`, `"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"`).
+    /// Empty = use rustls defaults (recommended).
+    #[serde(default)]
+    pub cipher_suites: Vec<String>,
+    /// Path to write TLS pre-master secrets for Wireshark decryption.
+    /// Same semantics as `SSLKEYLOGFILE` env var. When set, every TLS
+    /// session's keys are appended to this file (NSS key log format).
+    /// **Security warning:** never use in production.
+    #[serde(default)]
+    pub sslkeylogfile: String,
+    /// Enable PROXY protocol v1/v2 on the proxy listener. When true,
+    /// the gateway expects every inbound TCP connection to start with a
+    /// PROXY protocol header. Required for AWS NLB, HAProxy, etc.
+    #[serde(default)]
+    pub proxy_protocol: bool,
 }
 
 impl Default for TlsSettings {
@@ -512,6 +540,9 @@ impl Default for TlsSettings {
             min_version: default_tls_min_version(),
             max_version: default_tls_max_version(),
             curves: Vec::new(),
+            cipher_suites: Vec::new(),
+            sslkeylogfile: String::new(),
+            proxy_protocol: false,
         }
     }
 }

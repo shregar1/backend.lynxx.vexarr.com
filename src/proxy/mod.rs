@@ -1,6 +1,7 @@
 pub mod acme;
 pub mod cert_store;
 pub mod dns_challenge;
+pub mod fastcgi;
 pub mod grpc;
 pub mod h3;
 pub mod handler;
@@ -10,6 +11,7 @@ pub mod ocsp;
 pub mod on_demand_tls;
 pub mod pki;
 pub mod prewarm;
+pub mod proxy_protocol;
 pub mod router;
 pub mod static_files;
 pub mod stek;
