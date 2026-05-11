@@ -14,7 +14,7 @@ use crate::quota::QuotaTracker;
 use crate::reload::ReloadHandle;
 use axum::http::{header, Method, StatusCode, Uri};
 use axum::middleware;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post, put};
 use axum::Router;
 use chrono::Utc;

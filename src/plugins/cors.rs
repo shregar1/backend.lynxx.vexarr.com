@@ -10,6 +10,7 @@ pub struct CorsPlugin {
     allow_credentials: bool,
 }
 
+#[derive(Clone)]
 struct RequestOrigin(HeaderValue);
 
 impl CorsPlugin {
