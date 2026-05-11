@@ -64,6 +64,10 @@ pub struct AdminState {
     /// registration here so HTTP-01 *and* TLS-ALPN-01 validators can
     /// run against the live gateway without a restart.
     pub acme: Option<Arc<crate::proxy::acme::AcmeManager>>,
+    /// The Lynxx license API key from config/env. Accepted as a valid
+    /// master admin credential so customers can use the key they already
+    /// have from their account dashboard without creating a separate token.
+    pub license_api_key: String,
 }
 
 /// Convenience: extract the optional actor from request extensions.

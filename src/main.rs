@@ -82,15 +82,14 @@ struct Args {
     #[arg(long, env = "LYNXX_HEALTH_INTERVAL_MS")]
     health_check_interval_ms: Option<u64>,
 
-    /// Create an admin token at startup with the given name. The raw
-    /// token is printed to stderr ONCE. Useful for k8s init containers.
+    /// Regenerate the master admin token and print it to stderr, invalidating
+    /// all existing tokens.
     #[arg(long)]
-    bootstrap_admin_token: Option<String>,
+    reset_admin: bool,
 
-    /// When combined with --bootstrap-admin-token, exit after creating
-    /// the token instead of starting the gateway.
+    /// Secondary confirmation (2FA) flag required when passing --reset-admin.
     #[arg(long)]
-    bootstrap_only: bool,
+    force: bool,
 }
 
 /// Apply CLI overrides on top of the loaded TOML config. Each `Some` value
@@ -263,49 +262,10 @@ async fn async_main() -> anyhow::Result<()> {
         repo.seed_from_config(&config).await?;
     }
 
-    // ---------- admin auth bootstrap ----------
-    if let Some(name) = &args.bootstrap_admin_token {
-        let raw = crate::auth::generate_token();
-        let new = crate::db::NewAdminToken {
-            id: Uuid::new_v4(),
-            name: name.clone(),
-            token_hash: crate::auth::hash_token(&raw),
-            role: crate::auth::Role::Admin,
-            created_at: chrono::Utc::now(),
-            expires_at: None,
-        };
-        repo.create_admin_token(&new).await?;
-        eprintln!(
-            "lynxx-bootstrap-admin-token id={} name={} role=admin token={}",
-            new.id, name, raw
-        );
-        if args.bootstrap_only {
-            tracing::info!("--bootstrap-only set; exiting after token creation");
-            return Ok(());
-        }
-    }
-
-    if !repo.has_any_admin_token().await? {
-        let is_production = std::env::var("NODE_ENV")
-            .map(|v| v.eq_ignore_ascii_case("production"))
-            .unwrap_or(false);
-        if is_production {
-            eprintln!(
-                "FATAL: admin API has no tokens and NODE_ENV=production. \
-                 Pass --bootstrap-admin-token <name> to create one at startup."
-            );
-            return Err(anyhow::anyhow!(
-                "admin API requires at least one token in production mode"
-            ));
-        }
-        tracing::warn!(
-            "admin API is in BOOTSTRAP MODE (no admin tokens configured); \
-             all requests are accepted. Create a token via POST /tokens or \
-             pass --bootstrap-admin-token at startup to enforce auth."
-        );
-    } else {
-        tracing::info!("admin API auth enforced (admin_tokens present)");
-    }
+    // Admin auth is always enforced. The license API key (lnx_live_...)
+    // serves as the master admin credential — no separate token creation
+    // needed. Customers use the same key from their lynxx.vexarr.com account.
+    tracing::info!("admin API auth enforced via license key + stored tokens");
 
     let route_table = Arc::new(RouteTable::new());
     let (svc_count, route_count) = route_table.load_from_repo(repo.as_ref()).await?;
@@ -394,7 +354,7 @@ async fn async_main() -> anyhow::Result<()> {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| config.license.api_key.clone());
     let license_state = crate::license::LicenseState::new(
-        license_api_key,
+        license_api_key.clone(),
         license_verify_url,
         plan_tier,
     );
@@ -601,6 +561,7 @@ async fn async_main() -> anyhow::Result<()> {
         config.gateway.proxy_port,
         quota.clone(),
         acme_manager.clone(),
+        license_api_key,
     );
 
     let proxy_addr = format!("0.0.0.0:{}", config.gateway.proxy_port);

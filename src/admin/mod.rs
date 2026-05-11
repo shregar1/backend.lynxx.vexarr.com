@@ -47,6 +47,7 @@ pub fn admin_router(
     proxy_port: u16,
     quota: Arc<QuotaTracker>,
     acme: Option<Arc<crate::proxy::acme::AcmeManager>>,
+    license_api_key: String,
 ) -> Router {
     let audit = AuditLog::new(repo.clone());
     let state = AdminState {
@@ -68,6 +69,7 @@ pub fn admin_router(
         proxy_port,
         quota,
         acme,
+        license_api_key,
     };
 
     // Routes that mutate live state require Operator or higher; token

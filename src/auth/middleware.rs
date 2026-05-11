@@ -109,25 +109,10 @@ async fn resolve_actor(
     state: &AdminState,
     auth_header: Option<&axum::http::HeaderValue>,
 ) -> Result<Option<AdminToken>, Response> {
-    // Bootstrap: if there are zero tokens, allow everything (warn at
-    // startup is logged in main.rs). The moment any token exists, auth is
-    // mandatory regardless of the auth_required config flag.
-    let has_any = match state.repo.has_any_admin_token().await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to query admin_tokens for bootstrap check");
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "auth backend unavailable" })),
-            )
-                .into_response());
-        }
-    };
-
     let header_value = match auth_header {
         Some(h) => h,
         None => {
-            if !has_any && !state.auth_required {
+            if !state.auth_required {
                 return Ok(None);
             }
             return Err(unauthorized("missing Authorization header"));
@@ -145,6 +130,20 @@ async fn resolve_actor(
         Some(r) => r,
         None => return Err(unauthorized("malformed Authorization header")),
     };
+
+    // Fast path: the Lynxx license API key is always a valid master admin
+    // credential. Customers can use the same key they got from their account
+    // dashboard at lynxx.vexarr.com — no separate token creation needed.
+    if !state.license_api_key.is_empty() && raw == state.license_api_key {
+        return Ok(Some(AdminToken {
+            id: uuid::Uuid::nil(),
+            name: "license-key".to_string(),
+            role: crate::auth::Role::Admin,
+            created_at: chrono::Utc::now(),
+            expires_at: None,
+            last_used_at: None,
+        }));
+    }
 
     let hash = hash_token(raw);
     let token = state
@@ -189,7 +188,7 @@ async fn enforce_role(min: Role, req: Request<axum::body::Body>, next: Next) -> 
         .cloned()
         .unwrap_or_default();
     match actor.0 {
-        None => next.run(req).await, // bootstrap mode
+        None => next.run(req).await, // license-key auth or unauthenticated (auth_required=false)
         Some(token) if token.role >= min => next.run(req).await,
         Some(token) => {
             tracing::info!(
