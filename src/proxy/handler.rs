@@ -378,6 +378,11 @@ pub async fn proxy_handler(
     // Move parts out so we don't clone the HeaderMap. `req` is consumed.
     let (mut parts, body) = req.into_parts();
     parts.uri = upstream_uri;
+    
+    // Capture extensions before they are lost so we can re-attach them to 
+    // the response for the plugin chain.
+    let extensions = std::mem::replace(&mut parts.extensions, axum::http::Extensions::default());
+
     // Strip hop-by-hop and our internal proxy-cache marker.
     parts
         .headers
@@ -556,6 +561,8 @@ pub async fn proxy_handler(
     let mut plugin_resp = Response::new(Body::from(resp_body.clone()));
     *plugin_resp.status_mut() = status;
     *plugin_resp.headers_mut() = resp_parts.headers;
+    *plugin_resp.extensions_mut() = extensions;
+
     if let Some(v) = cache_key {
         plugin_resp
             .headers_mut()
