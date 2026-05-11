@@ -568,9 +568,11 @@ async fn async_main() -> anyhow::Result<()> {
     let proxy_addr = format!("0.0.0.0:{}", config.gateway.proxy_port);
     let admin_addr = format!("0.0.0.0:{}", config.gateway.admin_port);
 
+    let admin_tls_enabled = config.gateway.admin_tls.enabled;
     let admin_listener = TcpListener::bind(&admin_addr).await?;
-    tracing::info!(addr = %admin_addr, "admin API listening");
-    tracing::info!("Dashboard available at http://localhost:{}", config.gateway.admin_port);
+    let admin_scheme = if admin_tls_enabled { "https" } else { "http" };
+    tracing::info!(addr = %admin_addr, tls = admin_tls_enabled, "admin API listening");
+    tracing::info!("Dashboard available at {admin_scheme}://localhost:{}", config.gateway.admin_port);
     tracing::info!("admin listening on {admin_addr}");
 
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
@@ -685,10 +687,77 @@ async fn async_main() -> anyhow::Result<()> {
         false
     };
 
-    let admin_serve = axum::serve(admin_listener, admin_app);
+    let admin_addr_socket: std::net::SocketAddr = admin_addr.parse()?;
+
+    // Admin server: plain HTTP or HTTPS+mTLS depending on config.
+    // Admin server: plain HTTP or HTTPS+mTLS depending on config.
+    enum AdminServe {
+        Plain(axum::serve::Serve<axum::Router, axum::Router>),
+        Tls(axum_server::Handle),
+    }
+
+    let admin_serve_mode = if admin_tls_enabled {
+        let admin_tls_cfg = &config.gateway.admin_tls;
+        let server_config = crate::proxy::tls::build_admin_tls_config(admin_tls_cfg)?;
+        let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
+        let handle = axum_server::Handle::new();
+        let h = handle.clone();
+        let app = admin_app.clone();
+        drop(admin_listener);
+        tokio::spawn(async move {
+            if let Err(e) = axum_server::bind_rustls(admin_addr_socket, rustls_cfg)
+                .handle(h)
+                .serve(app.into_make_service())
+                .await
+            {
+                tracing::error!("admin TLS server error: {e}");
+            }
+        });
+        tracing::info!(
+            mtls = !admin_tls_cfg.client_ca_path.is_empty(),
+            "admin API serving over TLS"
+        );
+        AdminServe::Tls(handle)
+    } else {
+        AdminServe::Plain(axum::serve(admin_listener, admin_app))
+    };
+
+    // Helper: run the proxy + admin select loop. When admin runs over
+    // TLS it's already spawned as a background task — we just need to
+    // shut it down gracefully. When admin is plain HTTP we await it
+    // alongside the proxy.
+    macro_rules! run_select {
+        ($proxy_fut:expr, $shutdown_handle:expr) => {
+            match admin_serve_mode {
+                AdminServe::Plain(admin_serve) => {
+                    tokio::select! {
+                        _ = shutdown_notify.notified() => {
+                            tracing::info!("graceful shutdown: draining in-flight (30s max)");
+                            if let Some(ref h) = $shutdown_handle {
+                                h.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+                            }
+                        }
+                        result = $proxy_fut => { if let Err(e) = result { tracing::error!("proxy server error: {e}"); } }
+                        result = admin_serve => { if let Err(e) = result { tracing::error!("admin server error: {e}"); } }
+                    }
+                }
+                AdminServe::Tls(admin_handle) => {
+                    tokio::select! {
+                        _ = shutdown_notify.notified() => {
+                            tracing::info!("graceful shutdown: draining in-flight (30s max)");
+                            if let Some(ref h) = $shutdown_handle {
+                                h.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+                            }
+                            admin_handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+                        }
+                        result = $proxy_fut => { if let Err(e) = result { tracing::error!("proxy server error: {e}"); } }
+                    }
+                }
+            }
+        };
+    }
 
     if acme_has_cert {
-        // ACME-managed TLS — cert comes from the AcmeManager.
         let mgr = acme_manager.as_ref().unwrap();
         let server_config = mgr.server_config().await?;
         tracing::info!(
@@ -701,99 +770,30 @@ async fn async_main() -> anyhow::Result<()> {
         let serve = axum_server::bind_rustls(proxy_addr_socket, rustls_cfg)
             .handle(handle)
             .serve(proxy_app.into_make_service());
-
-        tokio::select! {
-            _ = shutdown_notify.notified() => {
-                tracing::info!("graceful shutdown: stopping new connections, draining in-flight (30s max)");
-                shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
-            }
-            result = serve => {
-                if let Err(e) = result {
-                    tracing::error!("proxy server error: {e}");
-                }
-            }
-            result = admin_serve => {
-                if let Err(e) = result {
-                    tracing::error!("admin server error: {e}");
-                }
-            }
-        }
+        run_select!(serve, Some(shutdown_handle));
     } else if config.gateway.tls.enabled {
-        // Static TLS — cert/key paths from [gateway.tls].
         let server_config = crate::proxy::tls::build_server_config(&config.gateway.tls)?;
         tracing::info!(
             "proxy listening on {proxy_addr} (TLS{})",
-            if config.gateway.tls.mtls_enabled() {
-                ", mTLS"
-            } else {
-                ""
-            }
+            if config.gateway.tls.mtls_enabled() { ", mTLS" } else { "" }
         );
-        let rustls_cfg =
-            axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
+        let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
         let handle = axum_server::Handle::new();
         let shutdown_handle = handle.clone();
         let serve = axum_server::bind_rustls(proxy_addr_socket, rustls_cfg)
             .handle(handle)
             .serve(proxy_app.into_make_service());
-        tokio::select! {
-            _ = shutdown_notify.notified() => {
-                tracing::info!("graceful shutdown: draining in-flight (30s max)");
-                shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
-            }
-            result = serve => {
-                if let Err(e) = result {
-                    tracing::error!("proxy server error: {e}");
-                }
-            }
-            result = admin_serve => {
-                if let Err(e) = result {
-                    tracing::error!("admin server error: {e}");
-                }
-            }
-        }
+        run_select!(serve, Some(shutdown_handle));
     } else if config.gateway.acme.enabled {
-        // ACME enabled but no cert yet. We CANNOT fall back to plain HTTP on 443
-        // because that breaks browsers. We must either wait or serve a dummy cert.
-        // For now, we log a warning and wait, or the user can enable self_signed.
         tracing::warn!("ACME enabled but no certificate available; waiting for background provisioning...");
-        // Fallback to plain HTTP on port 443 is what caused the ERR_SSL_PROTOCOL_ERROR.
-        // We'll start the listener anyway, but it's better to wait for the cert.
         let proxy_listener = TcpListener::bind(&proxy_addr).await?;
-        let sn = shutdown_notify.clone();
-        let admin_serve = admin_serve.with_graceful_shutdown(async move { sn.notified().await });
         let proxy_serve = axum::serve(proxy_listener, proxy_app);
-        tokio::select! {
-            result = proxy_serve => {
-                if let Err(e) = result {
-                    tracing::error!("proxy server error: {e}");
-                }
-            }
-            result = admin_serve => {
-                if let Err(e) = result {
-                    tracing::error!("admin server error: {e}");
-                }
-            }
-        }
+        run_select!(proxy_serve, None::<axum_server::Handle>);
     } else {
-        // Plain HTTP.
         let proxy_listener = TcpListener::bind(&proxy_addr).await?;
         tracing::info!("proxy listening on {proxy_addr}");
-        let sn = shutdown_notify.clone();
-        let admin_serve = admin_serve.with_graceful_shutdown(async move { sn.notified().await });
         let proxy_serve = axum::serve(proxy_listener, proxy_app);
-        tokio::select! {
-            result = proxy_serve => {
-                if let Err(e) = result {
-                    tracing::error!("proxy server error: {e}");
-                }
-            }
-            result = admin_serve => {
-                if let Err(e) = result {
-                    tracing::error!("admin server error: {e}");
-                }
-            }
-        }
+        run_select!(proxy_serve, None::<axum_server::Handle>);
     }
 
     if let Some(h) = acme_http_handle {

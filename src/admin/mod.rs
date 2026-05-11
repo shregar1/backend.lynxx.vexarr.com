@@ -162,6 +162,7 @@ pub fn admin_router(
         )
         .route("/acme/status", get(routes::acme_status))
         .route("/acme/renew", post(routes::acme_renew))
+        .route("/acme/revoke", post(routes::acme_revoke))
         .route(
             "/circuit-breakers/:service_id/reset",
             post(routes::reset_circuit_breaker),

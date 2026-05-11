@@ -112,6 +112,7 @@ pub async fn reload_handler(
 #[derive(Deserialize)]
 pub struct CreateService {
     pub name: String,
+    #[serde(default)]
     pub url: String,
     #[serde(default = "default_retries")]
     pub retries: u32,
@@ -119,6 +120,14 @@ pub struct CreateService {
     pub connect_timeout_ms: u64,
     #[serde(default)]
     pub lb_strategy: Option<String>,
+    #[serde(default)]
+    pub service_type: Option<String>,
+    #[serde(default)]
+    pub document_root: Option<String>,
+    #[serde(default)]
+    pub index_file: Option<String>,
+    #[serde(default)]
+    pub spa_fallback: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -179,6 +188,10 @@ pub struct PatchService {
     pub retries: Option<u32>,
     pub connect_timeout_ms: Option<u64>,
     pub lb_strategy: Option<String>,
+    pub service_type: Option<String>,
+    pub document_root: Option<String>,
+    pub index_file: Option<String>,
+    pub spa_fallback: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -233,6 +246,18 @@ pub async fn create_service(
     );
     if let Some(s) = input.lb_strategy {
         service.lb_strategy = s;
+    }
+    if let Some(t) = input.service_type {
+        service.service_type = t;
+    }
+    if let Some(root) = input.document_root {
+        service.document_root = Some(root);
+    }
+    if let Some(idx) = input.index_file {
+        service.index_file = idx;
+    }
+    if let Some(spa) = input.spa_fallback {
+        service.spa_fallback = spa;
     }
     state.repo.create_service(&service).await?;
     state.route_table.add_service(service.clone());
@@ -300,8 +325,14 @@ pub async fn update_service(
         retries: input.retries,
         connect_timeout_ms: input.connect_timeout_ms,
         lb_strategy: new_strategy,
-        // TLS settings are preserved on generic service updates; dedicated
-        // endpoints (or direct SQL) manage them in v1.
+        service_type: input
+            .service_type
+            .unwrap_or_else(|| existing.service_type.clone()),
+        document_root: input.document_root.or_else(|| existing.document_root.clone()),
+        index_file: input
+            .index_file
+            .unwrap_or_else(|| existing.index_file.clone()),
+        spa_fallback: input.spa_fallback.unwrap_or(existing.spa_fallback),
         tls_verify: existing.tls_verify,
         tls_client_cert_path: existing.tls_client_cert_path.clone(),
         tls_client_key_path: existing.tls_client_key_path.clone(),
@@ -312,8 +343,6 @@ pub async fn update_service(
 
     state.repo.update_service(&id, &updated).await?;
     state.route_table.update_service(&id, updated.clone());
-    // Drop the cached per-service hyper-util client; the pool will lazily
-    // rebuild on the next request, picking up any TLS-config changes.
     state.client_pool.invalidate(&id);
 
     if strategy_changed {
@@ -577,6 +606,14 @@ pub async fn patch_service(
         retries: input.retries.unwrap_or(existing.retries),
         connect_timeout_ms: input.connect_timeout_ms.unwrap_or(existing.connect_timeout_ms),
         lb_strategy: new_strategy,
+        service_type: input
+            .service_type
+            .unwrap_or_else(|| existing.service_type.clone()),
+        document_root: input.document_root.or_else(|| existing.document_root.clone()),
+        index_file: input
+            .index_file
+            .unwrap_or_else(|| existing.index_file.clone()),
+        spa_fallback: input.spa_fallback.unwrap_or(existing.spa_fallback),
         tls_verify: existing.tls_verify,
         tls_client_cert_path: existing.tls_client_cert_path.clone(),
         tls_client_key_path: existing.tls_client_key_path.clone(),
@@ -1164,6 +1201,8 @@ pub struct AuditQuery {
     pub resource_type: Option<String>,
     pub since: Option<DateTime<Utc>>,
     pub limit: Option<u32>,
+    #[serde(default)]
+    pub include_diff: bool,
 }
 
 pub async fn list_audit(
@@ -1176,6 +1215,7 @@ pub async fn list_audit(
         resource_type: q.resource_type,
         since: q.since,
         limit: q.limit,
+        include_diff: q.include_diff,
     };
     Ok(Json(state.audit.query(&filter).await?))
 }
@@ -1338,6 +1378,31 @@ pub async fn acme_renew(
         mgr.request_certificate().await?;
         Ok(Json(serde_json::json!({"renewed": true})))
     }
+}
+
+// ---------------------------------------------------------------------------
+// POST /acme/revoke
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct AcmeRevokeQuery {
+    pub reason: Option<String>,
+}
+
+pub async fn acme_revoke(
+    State(state): State<AdminState>,
+    Query(q): Query<AcmeRevokeQuery>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    let mgr = require_acme(&state)?;
+    let reason = q.reason.as_deref().and_then(|r| match r {
+        "key_compromise" => Some(instant_acme::RevocationReason::KeyCompromise),
+        "affiliation_changed" => Some(instant_acme::RevocationReason::AffiliationChanged),
+        "superseded" => Some(instant_acme::RevocationReason::Superseded),
+        "cessation_of_operation" => Some(instant_acme::RevocationReason::CessationOfOperation),
+        _ => None,
+    });
+    mgr.revoke_certificate(reason).await?;
+    Ok(Json(serde_json::json!({"revoked": true})))
 }
 
 // ---------------------------------------------------------------------------

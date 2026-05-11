@@ -144,6 +144,26 @@ impl AcmeChallengeResolver {
     }
 }
 
+impl AcmeChallengeResolver {
+    /// Try matching the SNI against wildcard certs in the cert map.
+    ///
+    /// For `sub.example.com`, checks `*.example.com`.
+    /// For `deep.sub.example.com`, checks `*.sub.example.com` then `*.example.com`.
+    fn resolve_wildcard(&self, sni: &str) -> Option<Arc<CertifiedKey>> {
+        let mut domain = sni;
+        while let Some(dot) = domain.find('.') {
+            let parent = &domain[dot + 1..];
+            let wildcard = format!("*.{parent}");
+            if let Some(cert) = self.cert_map.get(&wildcard) {
+                tracing::debug!(sni = %sni, matched = %wildcard, "wildcard cert match");
+                return Some(Arc::clone(cert));
+            }
+            domain = parent;
+        }
+        None
+    }
+}
+
 impl ResolvesServerCert for AcmeChallengeResolver {
     fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         let alpn_match = hello
@@ -166,6 +186,9 @@ impl ResolvesServerCert for AcmeChallengeResolver {
         if let Some(sni) = hello.server_name() {
             if let Some(cert) = self.cert_map.get(sni) {
                 return Some(Arc::clone(cert));
+            }
+            if let Some(cert) = self.resolve_wildcard(sni) {
+                return Some(cert);
             }
             tracing::debug!(sni = %sni, "no SAN match; serving default cert");
         }
@@ -254,5 +277,55 @@ mod tests {
         let a = build_challenge_cert("example.com", "auth-1").unwrap();
         let b = build_challenge_cert("example.com", "auth-2").unwrap();
         assert_ne!(a.cert[0].as_ref(), b.cert[0].as_ref());
+    }
+
+    fn make_resolver_with_wildcards() -> AcmeChallengeResolver {
+        install_provider();
+        let ck_root = Arc::new(build_challenge_cert("example.com", "root").unwrap());
+        let ck_wildcard = Arc::new(build_challenge_cert("*.vexarr.com", "wc").unwrap());
+        let ck_deep = Arc::new(build_challenge_cert("*.hostx.vexarr.com", "deep").unwrap());
+        let ck_exact = Arc::new(build_challenge_cert("api.vexarr.com", "exact").unwrap());
+
+        let mut cert_map = std::collections::HashMap::new();
+        cert_map.insert("*.vexarr.com".to_string(), ck_wildcard);
+        cert_map.insert("*.hostx.vexarr.com".to_string(), ck_deep);
+        cert_map.insert("api.vexarr.com".to_string(), ck_exact);
+
+        AcmeChallengeResolver::with_cert_map(cert_map, ck_root, |_| None)
+    }
+
+    #[test]
+    fn wildcard_matches_subdomain() {
+        let r = make_resolver_with_wildcards();
+        assert!(r.resolve_wildcard("new-service.vexarr.com").is_some());
+    }
+
+    #[test]
+    fn wildcard_prefers_deeper_match() {
+        let r = make_resolver_with_wildcards();
+        let cert = r.resolve_wildcard("app.hostx.vexarr.com").unwrap();
+        // Should match *.hostx.vexarr.com, not *.vexarr.com
+        let sans = extract_san_dns_names(cert.cert[0].as_ref());
+        assert!(sans.contains(&"*.hostx.vexarr.com".to_string()));
+    }
+
+    #[test]
+    fn exact_match_preferred_over_wildcard() {
+        let r = make_resolver_with_wildcards();
+        // api.vexarr.com has an exact entry — resolve_wildcard should NOT be needed
+        assert!(r.cert_map.get("api.vexarr.com").is_some());
+    }
+
+    #[test]
+    fn wildcard_no_match_for_bare_domain() {
+        let r = make_resolver_with_wildcards();
+        // "vexarr.com" itself should NOT match "*.vexarr.com"
+        assert!(r.resolve_wildcard("vexarr.com").is_none());
+    }
+
+    #[test]
+    fn wildcard_no_match_for_unrelated() {
+        let r = make_resolver_with_wildcards();
+        assert!(r.resolve_wildcard("other.example.com").is_none());
     }
 }

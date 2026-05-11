@@ -1,5 +1,6 @@
 pub mod acme;
 pub mod cert_store;
+pub mod dns_challenge;
 pub mod grpc;
 pub mod h3;
 pub mod handler;

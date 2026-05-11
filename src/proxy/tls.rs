@@ -29,7 +29,7 @@
 //! the security-relevant half. See `LinkedClientCertVerifier` below for
 //! the verifier wiring; the request-side glue is annotated TODO.
 
-use crate::config::TlsSettings;
+use crate::config::{AdminTlsConfig, TlsSettings};
 use crate::error::GatewayError;
 use rustls::crypto::ring as ring_provider;
 use rustls::crypto::CryptoProvider;
@@ -106,6 +106,54 @@ pub fn build_server_config(settings: &TlsSettings) -> Result<ServerConfig, Gatew
             "inbound TLS configured (no mTLS)"
         );
     }
+
+    Ok(config)
+}
+
+/// Build a rustls `ServerConfig` for the admin API listener.
+///
+/// Supports optional mTLS when `client_ca_path` is set. Uses default
+/// TLS 1.2+1.3 and the ring provider's default curves.
+pub fn build_admin_tls_config(settings: &AdminTlsConfig) -> Result<ServerConfig, GatewayError> {
+    if settings.cert_path.is_empty() || settings.key_path.is_empty() {
+        return Err(GatewayError::Internal(
+            "gateway.admin_tls.enabled requires cert_path and key_path".into(),
+        ));
+    }
+
+    let cert_chain = load_cert_chain(&settings.cert_path)?;
+    let key = load_private_key(&settings.key_path)?;
+
+    let builder = ServerConfig::builder();
+
+    let mut config = if !settings.client_ca_path.is_empty() {
+        let proxy_tls = TlsSettings {
+            enabled: true,
+            cert_path: settings.cert_path.clone(),
+            key_path: settings.key_path.clone(),
+            client_ca_path: settings.client_ca_path.clone(),
+            client_cert_required: settings.client_cert_required,
+            ..TlsSettings::default()
+        };
+        let verifier = build_client_verifier(&proxy_tls)?;
+        builder
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(cert_chain, key)
+            .map_err(|e| GatewayError::Internal(format!("admin tls cert: {e}")))?
+    } else {
+        builder
+            .with_no_client_auth()
+            .with_single_cert(cert_chain, key)
+            .map_err(|e| GatewayError::Internal(format!("admin tls cert: {e}")))?
+    };
+
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+    tracing::info!(
+        cert = %settings.cert_path,
+        mtls = !settings.client_ca_path.is_empty(),
+        "admin TLS configured"
+    );
 
     Ok(config)
 }
@@ -407,5 +455,15 @@ mod tests {
         let err = resolve_crypto_provider(&["x448".to_string()]).unwrap_err();
         assert!(err.to_string().contains("unknown curve"));
         assert!(err.to_string().contains("aws-lc-rs"));
+    }
+
+    #[test]
+    fn build_admin_tls_rejects_empty_paths() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let cfg = AdminTlsConfig {
+            enabled: true,
+            ..AdminTlsConfig::default()
+        };
+        assert!(build_admin_tls_config(&cfg).is_err());
     }
 }

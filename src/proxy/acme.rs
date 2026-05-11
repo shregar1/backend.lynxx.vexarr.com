@@ -1,5 +1,6 @@
-//! Certificate manager with ACME HTTP-01 + TLS-ALPN-01 challenge
-//! support, cert file watching, and self-signed certificate generation.
+//! Certificate manager with ACME HTTP-01, TLS-ALPN-01, and DNS-01
+//! challenge support, cert file watching, and self-signed certificate
+//! generation.
 //!
 //! This module provides four practical capabilities for TLS provisioning:
 //!
@@ -45,6 +46,7 @@
 
 use crate::config::AcmeConfig;
 use crate::error::GatewayError;
+use crate::proxy::dns_challenge::{self, DnsProvider};
 use crate::proxy::tls_alpn::{
     build_challenge_cert, certified_key_from_pem, extract_san_dns_names, AcmeChallengeResolver,
     ACME_TLS_ALPN_NAME,
@@ -71,18 +73,37 @@ pub struct AcmeManager {
     tls_alpn_challenges: Arc<DashMap<String, Arc<CertifiedKey>>>,
     /// Last observed mtime of the cert file, for change detection.
     last_cert_mtime: Arc<RwLock<Option<SystemTime>>>,
+    /// DNS-01 challenge provider (Cloudflare / Route53). `None` when
+    /// dns01 is not configured.
+    dns_provider: Option<Arc<dyn DnsProvider>>,
 }
 
 impl AcmeManager {
     /// Create a new `AcmeManager` from the provided config. Does not
     /// perform any I/O — call [`init`] after construction.
     pub fn new(config: AcmeConfig) -> Self {
+        let dns_provider = if !config.dns01.provider.is_empty() {
+            match dns_challenge::from_config(&config.dns01) {
+                Ok(p) => {
+                    tracing::info!(provider = p.provider_name(), "DNS-01 challenge provider loaded");
+                    Some(p)
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to initialise DNS-01 provider");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Self {
             config,
             current_config: Arc::new(RwLock::new(None)),
             challenges: Arc::new(DashMap::new()),
             tls_alpn_challenges: Arc::new(DashMap::new()),
             last_cert_mtime: Arc::new(RwLock::new(None)),
+            dns_provider,
         }
     }
 
@@ -582,6 +603,16 @@ impl AcmeManager {
             "creating new ACME account"
         );
 
+        let eab = if !self.config.eab_kid.is_empty() && !self.config.eab_hmac_key.is_empty() {
+            tracing::info!(kid = %self.config.eab_kid, "using External Account Binding (EAB)");
+            Some(instant_acme::ExternalAccountKey::new(
+                self.config.eab_kid.clone(),
+                self.config.eab_hmac_key.as_bytes(),
+            ))
+        } else {
+            None
+        };
+
         let (account, credentials) = instant_acme::Account::create(
             &instant_acme::NewAccount {
                 contact: &contact_refs,
@@ -589,7 +620,7 @@ impl AcmeManager {
                 only_return_existing: false,
             },
             dir_url,
-            None,
+            eab.as_ref(),
         )
         .await
         .map_err(|e| GatewayError::Internal(format!("create ACME account: {e}")))?;
@@ -937,6 +968,19 @@ impl AcmeManager {
                         key_auth.as_str().to_string(),
                     )?;
                 }
+                instant_acme::ChallengeType::Dns01 => {
+                    let provider = self.dns_provider.as_ref().ok_or_else(|| {
+                        GatewayError::Internal(
+                            "DNS-01 challenge selected but no dns01 provider configured".into(),
+                        )
+                    })?;
+                    let fqdn = dns_challenge::build_acme_dns_name(auth_domain);
+                    let _record_id = provider
+                        .set_txt_record(&fqdn, key_auth.as_str())
+                        .await?;
+                    dns_challenge::wait_for_propagation(&fqdn, key_auth.as_str())
+                        .await?;
+                }
                 _ => {
                     return Err(GatewayError::Internal(format!(
                         "unsupported challenge type {:?}",
@@ -1121,16 +1165,36 @@ impl AcmeManager {
             "tls-alpn-01" => challenges
                 .iter()
                 .find(|c| c.r#type == instant_acme::ChallengeType::TlsAlpn01),
+            "dns-01" => challenges
+                .iter()
+                .find(|c| c.r#type == instant_acme::ChallengeType::Dns01),
             _ => {
-                // "auto": prefer TLS-ALPN-01, fall back to HTTP-01.
-                challenges
-                    .iter()
-                    .find(|c| c.r#type == instant_acme::ChallengeType::TlsAlpn01)
-                    .or_else(|| {
-                        challenges
-                            .iter()
-                            .find(|c| c.r#type == instant_acme::ChallengeType::Http01)
-                    })
+                // "auto": prefer DNS-01 (if provider configured) > TLS-ALPN-01 > HTTP-01.
+                let dns_first = self.dns_provider.is_some();
+                if dns_first {
+                    challenges
+                        .iter()
+                        .find(|c| c.r#type == instant_acme::ChallengeType::Dns01)
+                        .or_else(|| {
+                            challenges
+                                .iter()
+                                .find(|c| c.r#type == instant_acme::ChallengeType::TlsAlpn01)
+                        })
+                        .or_else(|| {
+                            challenges
+                                .iter()
+                                .find(|c| c.r#type == instant_acme::ChallengeType::Http01)
+                        })
+                } else {
+                    challenges
+                        .iter()
+                        .find(|c| c.r#type == instant_acme::ChallengeType::TlsAlpn01)
+                        .or_else(|| {
+                            challenges
+                                .iter()
+                                .find(|c| c.r#type == instant_acme::ChallengeType::Http01)
+                        })
+                }
             }
         }
     }
@@ -1271,6 +1335,62 @@ impl AcmeManager {
             tracing::info!(days_remaining, "cert is still valid, no renewal needed");
             Ok(())
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Certificate revocation
+    // ------------------------------------------------------------------
+
+    /// Revoke the currently loaded certificate via the ACME protocol
+    /// (RFC 8555 §7.6). The certificate is revoked at the primary
+    /// directory URL using the existing account credentials.
+    pub async fn revoke_certificate(
+        &self,
+        reason: Option<instant_acme::RevocationReason>,
+    ) -> Result<(), GatewayError> {
+        let cert_path = self.cert_path().ok_or_else(|| {
+            GatewayError::Internal("no cert path configured for revocation".into())
+        })?;
+
+        if !cert_path.exists() {
+            return Err(GatewayError::Internal(format!(
+                "cert file not found: {}",
+                cert_path.display()
+            )));
+        }
+
+        let pem_bytes = std::fs::read(&cert_path).map_err(|e| {
+            GatewayError::Internal(format!("read cert for revocation: {e}"))
+        })?;
+
+        let mut cursor = std::io::Cursor::new(&pem_bytes);
+        let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut cursor)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| GatewayError::Internal(format!("parse cert for revocation: {e}")))?;
+
+        let leaf = certs
+            .first()
+            .ok_or_else(|| GatewayError::Internal("no certificate in PEM file".into()))?;
+
+        let account = self
+            .get_or_create_account(&self.config.directory_url)
+            .await?;
+
+        let revocation = instant_acme::RevocationRequest {
+            certificate: leaf,
+            reason,
+        };
+        account
+            .revoke(&revocation)
+            .await
+            .map_err(|e| GatewayError::Internal(format!("ACME revoke: {e}")))?;
+
+        tracing::info!(
+            cert = %cert_path.display(),
+            "certificate revoked via ACME"
+        );
+        Ok(())
     }
 }
 

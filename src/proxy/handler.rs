@@ -4,13 +4,16 @@ use crate::metrics as gw_metrics;
 use crate::plugins::PluginExecutor;
 use crate::proxy::grpc::{handle_grpc, GrpcClient};
 use crate::proxy::http_client::{HttpProxyClient, ProxyClientPool};
-use crate::proxy::loadbalancer::{InFlightGuard, LoadBalancerRegistry};
+use crate::proxy::loadbalancer::{
+    InFlightGuard, LbStrategy, LoadBalancerRegistry, RequestContext, STICKY_COOKIE_NAME,
+};
 use crate::proxy::router::SharedRouteTable;
 use crate::proxy::websocket::handle_websocket;
 use crate::quota::QuotaTracker;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderName, Request, Response, Uri};
+use hyper_util::rt::TokioIo;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -72,6 +75,23 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
     HOP_BY_HOP.iter().any(|h| h.eq_ignore_ascii_case(s))
 }
 
+fn extract_cookie(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|s| s.split(';'))
+        .find_map(|pair| {
+            let pair = pair.trim();
+            let (key, val) = pair.split_once('=')?;
+            if key.trim() == name {
+                Some(val.trim().to_string())
+            } else {
+                None
+            }
+        })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProtocolKind {
     WebSocket,
@@ -105,6 +125,57 @@ fn detect_protocol(req: &Request<Body>) -> ProtocolKind {
     }
 
     ProtocolKind::Http
+}
+
+/// Parse a `unix:///path/to/socket` URL into `(socket_path, http_path)`.
+/// Format: `unix:///var/run/app.sock` or `unix:///var/run/app.sock:/custom/path`
+/// The part after the colon-separated path is the HTTP request path.
+fn parse_unix_url(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("unix://")?;
+    if let Some((sock, path)) = rest.split_once(':') {
+        Some((sock.to_string(), path.to_string()))
+    } else {
+        Some((rest.to_string(), "/".to_string()))
+    }
+}
+
+/// Proxy a request over a Unix domain socket using raw hyper HTTP/1.1.
+async fn proxy_via_unix(
+    socket_path: &str,
+    mut req: Request<Body>,
+) -> Result<Response<Body>, GatewayError> {
+    let stream = tokio::net::UnixStream::connect(socket_path)
+        .await
+        .map_err(|e| {
+            GatewayError::UpstreamError(format!("unix connect {socket_path}: {e}"))
+        })?;
+    let io = TokioIo::new(stream);
+
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+        .await
+        .map_err(|e| {
+            GatewayError::UpstreamError(format!("unix handshake {socket_path}: {e}"))
+        })?;
+
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            tracing::debug!(error = %e, "unix upstream connection closed");
+        }
+    });
+
+    // Ensure the request has a Host header (required by HTTP/1.1).
+    if !req.headers().contains_key(axum::http::header::HOST) {
+        if let Ok(v) = axum::http::HeaderValue::from_str("localhost") {
+            req.headers_mut().insert(axum::http::header::HOST, v);
+        }
+    }
+
+    let resp = sender.send_request(req).await.map_err(|e| {
+        GatewayError::UpstreamError(format!("unix upstream send: {e}"))
+    })?;
+
+    let (parts, incoming) = resp.into_parts();
+    Ok(Response::from_parts(parts, Body::new(incoming)))
 }
 
 pub async fn proxy_handler(
@@ -198,9 +269,25 @@ pub async fn proxy_handler(
         return Err(GatewayError::QuotaExceeded);
     }
 
+    // Extract request context for hash-based LB strategies.
+    let client_ip_owned = req
+        .headers()
+        .get("x-real-ip")
+        .or_else(|| req.headers().get("x-forwarded-for"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+        .unwrap_or_default();
+    let sticky_cookie_owned = extract_cookie(req.headers(), STICKY_COOKIE_NAME);
+    let lb_ctx = RequestContext {
+        client_ip: Some(client_ip_owned.as_str()),
+        uri_path: Some(path.as_str()),
+        sticky_cookie: sticky_cookie_owned.as_deref(),
+    };
+
     // Pick a target via load balancer if one is configured for this service.
     // Falls back to `service.url` if no targets exist.
-    let picked = state.lb.pick(&service.id, state.local_zone.as_deref());
+    let picked = state.lb.pick(&service.id, state.local_zone.as_deref(), &lb_ctx);
+    let picked_target_id = picked.as_ref().map(|ts| ts.target.id);
     let (upstream_base, target_label, _in_flight) = match &picked {
         Some(ts) => {
             let guard = InFlightGuard::new(ts.clone());
@@ -243,6 +330,52 @@ pub async fn proxy_handler(
         .run_request(&mut req, Some(service.id), Some(route.id))
         .await
         .map_err(GatewayError::PluginError)?;
+
+    // ── Static file serving: short-circuit the proxy path ──
+    if service.service_type == "static" {
+        if let Some(ref root) = service.document_root {
+            let accept_enc = req
+                .headers()
+                .get(axum::http::header::ACCEPT_ENCODING)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            let mut file_resp = crate::proxy::static_files::serve(
+                root,
+                &service.index_file,
+                service.spa_fallback,
+                &path,
+                accept_enc,
+            )
+            .await;
+
+            state
+                .plugins
+                .run_response(&mut file_resp, Some(service.id), Some(route.id))
+                .await
+                .map_err(GatewayError::PluginError)?;
+
+            let bucket = gw_metrics::status_bucket(file_resp.status().as_u16());
+            metrics::counter!(
+                "lynxx_requests_total",
+                "service" => svc_name.clone(),
+                "route" => route_id.clone(),
+                "method" => method.clone(),
+                "status" => bucket,
+                "target" => "static",
+            )
+            .increment(1);
+            metrics::histogram!(
+                "lynxx_request_duration_seconds",
+                "service" => svc_name,
+                "route" => route_id,
+                "method" => method,
+                "target" => "static",
+            )
+            .record(start.elapsed().as_secs_f64());
+
+            return Ok(file_resp);
+        }
+    }
 
     // Dispatch on protocol. WebSocket and gRPC need streaming flows that the
     // reqwest-based path below cannot provide.
@@ -340,6 +473,126 @@ pub async fn proxy_handler(
             return result;
         }
         ProtocolKind::Http => {}
+    }
+
+    // ---- Unix socket upstream: bypass hyper-util, use raw HTTP/1.1. -------
+    if upstream_url.starts_with("unix://") {
+        if let Some((sock_path, http_path)) = parse_unix_url(&upstream_url) {
+            let cache_key = req
+                .headers()
+                .get(crate::plugins::proxy_cache::CACHE_KEY_HEADER)
+                .cloned();
+            let recorder_id = req.headers().get("x-lynxx-recorder-id").cloned();
+
+            let (mut parts, body) = req.into_parts();
+
+            let unix_uri: Uri = http_path
+                .parse()
+                .unwrap_or_else(|_| Uri::from_static("/"));
+            parts.uri = unix_uri;
+
+            let extensions =
+                std::mem::replace(&mut parts.extensions, axum::http::Extensions::default());
+
+            parts
+                .headers
+                .remove(crate::plugins::proxy_cache::CACHE_KEY_HEADER);
+            parts.headers.remove("x-lynxx-recorder-id");
+            for h in HOP_BY_HOP.iter() {
+                if let Ok(name) = HeaderName::from_bytes(h.as_bytes()) {
+                    parts.headers.remove(&name);
+                }
+            }
+            parts.version = axum::http::Version::HTTP_11;
+
+            let unix_req = Request::from_parts(parts, body);
+            let unix_resp = match proxy_via_unix(&sock_path, unix_req).await {
+                Ok(r) => r,
+                Err(e) => {
+                    state.health.record_failure(
+                        &service.id,
+                        &svc_name,
+                        format!("unix socket upstream: {e}"),
+                    );
+                    metrics::counter!(
+                        "lynxx_requests_total",
+                        "service" => svc_name.clone(),
+                        "route" => route_id.clone(),
+                        "method" => method.clone(),
+                        "status" => "5xx",
+                        "target" => target_label.clone(),
+                    )
+                    .increment(1);
+                    return Err(e);
+                }
+            };
+
+            let (resp_parts, incoming) = unix_resp.into_parts();
+            let status = resp_parts.status;
+            let resp_body = match axum::body::to_bytes(Body::new(incoming), usize::MAX).await {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(GatewayError::UpstreamError(format!(
+                        "unix body read: {e}"
+                    )));
+                }
+            };
+
+            if status.is_server_error() {
+                state
+                    .health
+                    .record_failure(&service.id, &svc_name, format!("upstream {status}"));
+            } else {
+                state.health.record_success(&service.id, &svc_name);
+            }
+
+            let mut plugin_resp = Response::new(Body::from(resp_body.clone()));
+            *plugin_resp.status_mut() = status;
+            *plugin_resp.headers_mut() = resp_parts.headers;
+            *plugin_resp.extensions_mut() = extensions;
+            if let Some(v) = cache_key {
+                plugin_resp
+                    .headers_mut()
+                    .insert(crate::plugins::proxy_cache::CACHE_KEY_HEADER, v);
+            }
+            if let Some(v) = recorder_id {
+                plugin_resp
+                    .headers_mut()
+                    .insert("x-lynxx-recorder-id", v);
+            }
+
+            state
+                .plugins
+                .run_response(&mut plugin_resp, Some(service.id), Some(route.id))
+                .await
+                .map_err(GatewayError::PluginError)?;
+
+            let (final_parts, _) = plugin_resp.into_parts();
+            let mut final_resp = Response::new(Body::from(resp_body));
+            *final_resp.status_mut() = final_parts.status;
+            *final_resp.headers_mut() = final_parts.headers;
+
+            let bucket = gw_metrics::status_bucket(status.as_u16());
+            metrics::counter!(
+                "lynxx_requests_total",
+                "service" => svc_name.clone(),
+                "route" => route_id.clone(),
+                "method" => method.clone(),
+                "status" => bucket,
+                "target" => target_label.clone(),
+            )
+            .increment(1);
+            metrics::histogram!(
+                "lynxx_request_duration_seconds",
+                "service" => svc_name,
+                "route" => route_id,
+                "method" => method,
+                "target" => target_label,
+            )
+            .record(start.elapsed().as_secs_f64());
+
+            return Ok(final_resp);
+        }
     }
 
     // ---- Hot path: stream the body straight through hyper-util. -----------
@@ -582,6 +835,26 @@ pub async fn proxy_handler(
     let mut final_resp = Response::new(Body::from(resp_body));
     *final_resp.status_mut() = final_parts.status;
     *final_resp.headers_mut() = final_parts.headers;
+
+    // Set sticky-session cookie so subsequent requests from this client
+    // land on the same target.
+    if matches!(
+        LbStrategy::from_str(&service.lb_strategy),
+        LbStrategy::CookieSticky
+    ) {
+        if let Some(tid) = picked_target_id {
+            if let Ok(val) = format!(
+                "{}={}; Path=/; HttpOnly; SameSite=Lax",
+                STICKY_COOKIE_NAME, tid
+            )
+            .parse()
+            {
+                final_resp
+                    .headers_mut()
+                    .append(axum::http::header::SET_COOKIE, val);
+            }
+        }
+    }
 
     let bucket = gw_metrics::status_bucket(status.as_u16());
     metrics::counter!(
