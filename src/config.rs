@@ -1,6 +1,6 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GatewayConfig {
     #[serde(default = "default_gateway")]
     pub gateway: GatewaySettings,
@@ -17,7 +17,7 @@ pub struct GatewayConfig {
     pub license: LicenseSettings,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct LicenseSettings {
     /// API key issued by the licence server (e.g. `lnx_live_…`). May
     /// also be set via `LYNXX_API_KEY` env var, which wins on conflict.
@@ -25,7 +25,7 @@ pub struct LicenseSettings {
     pub api_key: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GatewaySettings {
     #[serde(default = "default_proxy_port")]
     pub proxy_port: u16,
@@ -101,6 +101,50 @@ pub struct GatewaySettings {
     /// When set, the load balancer prioritizes targets in the same zone.
     #[serde(default)]
     pub local_zone: Option<String>,
+
+    /// Built-in PKI / internal Certificate Authority. When enabled, the
+    /// gateway can issue certificates for internal services.
+    #[serde(default)]
+    pub pki: PkiConfig,
+}
+
+/// Built-in PKI configuration. When `enabled = true` the gateway
+/// generates an internal root + intermediate CA on first start and
+/// can issue leaf certificates for internal services — similar to
+/// Caddy's built-in ACME server or Vault's PKI secrets engine.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PkiConfig {
+    /// Master switch. Defaults to `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Where to store the CA keypairs. Defaults to `~/.lynxx/pki/`.
+    #[serde(default)]
+    pub storage_dir: String,
+    /// Root CA common name.
+    #[serde(default = "default_pki_cn")]
+    pub root_cn: String,
+    /// Default cert validity in days for issued leaf certs.
+    #[serde(default = "default_pki_validity")]
+    pub default_validity_days: u32,
+}
+
+impl Default for PkiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            storage_dir: String::new(),
+            root_cn: default_pki_cn(),
+            default_validity_days: default_pki_validity(),
+        }
+    }
+}
+
+fn default_pki_cn() -> String {
+    "Lynxx Internal CA".to_string()
+}
+
+fn default_pki_validity() -> u32 {
+    90
 }
 
 /// ACME / automatic certificate provisioning settings. When
@@ -118,7 +162,7 @@ pub struct GatewaySettings {
 /// `acme` and `tls` are complementary: `tls` provides static cert paths
 /// and mTLS knobs, while `acme` adds automatic provisioning. When both
 /// are enabled, `acme` takes precedence for the server certificate.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AcmeConfig {
     /// Master switch. Defaults to `false`.
     #[serde(default)]
@@ -160,6 +204,57 @@ pub struct AcmeConfig {
     /// Defaults to `"auto"`.
     #[serde(default = "default_acme_challenge_type")]
     pub challenge_type: String,
+
+    /// Fallback ACME directory URLs. If the primary `directory_url` fails,
+    /// each fallback is tried in order. Defaults to ZeroSSL.
+    #[serde(default = "default_acme_fallback_urls")]
+    pub fallback_directory_urls: Vec<String>,
+
+    /// On-Demand TLS: provision certificates during the TLS handshake
+    /// for previously-unknown domains. When enabled, a TLS connection
+    /// for an uncached domain triggers a background ACME order while a
+    /// temporary self-signed cert is served for the initial handshake.
+    #[serde(default)]
+    pub on_demand: OnDemandTlsConfig,
+}
+
+/// On-Demand TLS settings. When enabled, the gateway provisions ACME
+/// certificates dynamically during the TLS handshake for domains it
+/// doesn't already have a cert for. A temporary self-signed cert is
+/// returned for the first connection while the real cert is obtained.
+///
+/// To prevent abuse (attackers flooding with random domains to exhaust
+/// ACME rate limits), configure `allowed_domains` or `ask_url`.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct OnDemandTlsConfig {
+    /// Master switch. Defaults to `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Optional list of allowed domains. Empty = allow all.
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    /// Optional HTTP endpoint to validate domain before issuing.
+    /// `GET {ask_url}?domain={domain}` -- 200 = allow, anything else = deny.
+    #[serde(default)]
+    pub ask_url: String,
+    /// Max certificates to issue per minute (rate limit).
+    #[serde(default = "default_on_demand_rate")]
+    pub max_certs_per_minute: u32,
+}
+
+impl Default for OnDemandTlsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allowed_domains: Vec::new(),
+            ask_url: String::new(),
+            max_certs_per_minute: default_on_demand_rate(),
+        }
+    }
+}
+
+fn default_on_demand_rate() -> u32 {
+    10
 }
 
 impl Default for AcmeConfig {
@@ -174,6 +269,8 @@ impl Default for AcmeConfig {
             http_port: default_acme_http_port(),
             external_https_port: default_acme_external_port(),
             challenge_type: default_acme_challenge_type(),
+            fallback_directory_urls: default_acme_fallback_urls(),
+            on_demand: OnDemandTlsConfig::default(),
         }
     }
 }
@@ -194,10 +291,14 @@ fn default_acme_challenge_type() -> String {
     "auto".to_string()
 }
 
+fn default_acme_fallback_urls() -> Vec<String> {
+    vec!["https://acme.zerossl.com/v2/DV90".to_string()]
+}
+
 /// External service-discovery providers. Today only `docker` is
 /// implemented; future providers (Kubernetes, Consul, Nomad) plug in
 /// here with their own config blocks.
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct ProvidersConfig {
     #[serde(default)]
     pub docker: crate::discovery::docker::DockerProviderConfig,
@@ -214,7 +315,7 @@ pub struct ProvidersConfig {
 /// auth: with `optional`, the connection is accepted either way and any
 /// presented cert is verified; with `required`, the handshake fails if
 /// no client cert is sent.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TlsSettings {
     #[serde(default)]
     pub enabled: bool,
@@ -251,17 +352,26 @@ impl TlsSettings {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ServiceConfig {
     pub name: String,
+    #[serde(default)]
     pub url: String,
     #[serde(default = "default_retries")]
     pub retries: u32,
     #[serde(default = "default_timeout")]
     pub connect_timeout_ms: u64,
+    #[serde(default)]
+    pub service_type: Option<String>,
+    #[serde(default)]
+    pub document_root: Option<String>,
+    #[serde(default)]
+    pub index_file: Option<String>,
+    #[serde(default)]
+    pub spa_fallback: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RouteConfig {
     pub paths: Vec<String>,
     #[serde(default)]
@@ -273,13 +383,13 @@ pub struct RouteConfig {
     pub strip_path: bool,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PluginConfig {
     pub name: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
-    pub config: toml::Table,
+    pub config: serde_json::Value,
 }
 
 impl Default for GatewayConfig {
@@ -313,6 +423,7 @@ fn default_gateway() -> GatewaySettings {
         recordings_directory: None,
         plan_tier: default_plan_tier(),
         local_zone: None,
+        pki: PkiConfig::default(),
     }
 }
 
@@ -370,11 +481,106 @@ fn default_true() -> bool {
     true
 }
 
+/// Detected config file format based on extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigFormat {
+    Toml,
+    Yaml,
+    Json,
+}
+
+/// Strip single-line (`//`) and block (`/* */`) comments from JSONC content,
+/// producing valid JSON. Handles comments inside string literals correctly.
+fn strip_jsonc_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    let mut in_string = false;
+
+    while i < len {
+        if in_string {
+            out.push(chars[i]);
+            if chars[i] == '\\' && i + 1 < len {
+                out.push(chars[i + 1]);
+                i += 2;
+            } else {
+                if chars[i] == '"' {
+                    in_string = false;
+                }
+                i += 1;
+            }
+        } else if chars[i] == '"' {
+            in_string = true;
+            out.push(chars[i]);
+            i += 1;
+        } else if i + 1 < len && chars[i] == '/' && chars[i + 1] == '/' {
+            // Single-line comment — skip to end of line.
+            i += 2;
+            while i < len && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if i + 1 < len && chars[i] == '/' && chars[i + 1] == '*' {
+            // Block comment — skip to closing `*/`.
+            i += 2;
+            while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2; // skip `*/`
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Detect config format from file extension.
+fn detect_format(path: &str) -> Option<ConfigFormat> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase());
+    match ext.as_deref() {
+        Some("toml") => Some(ConfigFormat::Toml),
+        Some("yaml" | "yml") => Some(ConfigFormat::Yaml),
+        Some("json" | "jsonc") => Some(ConfigFormat::Json),
+        _ => None,
+    }
+}
+
+/// Parse a config string in the given format.
+fn parse_config(contents: &str, format: ConfigFormat) -> anyhow::Result<GatewayConfig> {
+    match format {
+        ConfigFormat::Toml => Ok(toml::from_str(contents)?),
+        ConfigFormat::Yaml => Ok(serde_yaml::from_str(contents)?),
+        ConfigFormat::Json => {
+            let clean = strip_jsonc_comments(contents);
+            Ok(serde_json::from_str(&clean)?)
+        }
+    }
+}
+
 pub fn load_config(path: &str) -> anyhow::Result<GatewayConfig> {
     match std::fs::read_to_string(path) {
         Ok(contents) => {
-            let config: GatewayConfig = toml::from_str(&contents)?;
-            Ok(config)
+            if let Some(fmt) = detect_format(path) {
+                tracing::info!("loading config as {:?} from {path}", fmt);
+                parse_config(&contents, fmt)
+            } else {
+                // Unknown or missing extension — try each format in order.
+                tracing::info!(
+                    "no recognised extension for {path}, probing TOML → YAML → JSON"
+                );
+                parse_config(&contents, ConfigFormat::Toml)
+                    .or_else(|_| parse_config(&contents, ConfigFormat::Yaml))
+                    .or_else(|_| parse_config(&contents, ConfigFormat::Json))
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "failed to parse {path} as TOML, YAML, or JSON: {e}"
+                        )
+                    })
+            }
         }
         Err(_) => {
             tracing::warn!("config file not found at {path}, using defaults");

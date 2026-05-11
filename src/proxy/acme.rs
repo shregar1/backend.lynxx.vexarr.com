@@ -530,16 +530,29 @@ impl AcmeManager {
     // ACME account management
     // ------------------------------------------------------------------
 
-    /// Path to the persisted ACME account credentials.
-    fn account_path(&self) -> PathBuf {
-        self.storage_dir().join("account.json")
+    /// Path to the persisted ACME account credentials for the given
+    /// directory URL. The primary directory uses `account.json`; fallback
+    /// directories use `account_{hostname}.json` to avoid collisions.
+    fn account_path_for(&self, directory_url: &str) -> PathBuf {
+        if directory_url == self.config.directory_url {
+            self.storage_dir().join("account.json")
+        } else {
+            let hostname = url::Url::parse(directory_url)
+                .ok()
+                .and_then(|u| u.host_str().map(|h| h.to_string()))
+                .unwrap_or_else(|| "unknown".to_string());
+            self.storage_dir().join(format!("account_{hostname}.json"))
+        }
     }
 
     /// Load an existing ACME account from disk, or create a new one at
-    /// the configured directory URL and persist the credentials.
-    async fn get_or_create_account(&self) -> Result<instant_acme::Account, GatewayError> {
-        let account_path = self.account_path();
-        let dir_url = &self.config.directory_url;
+    /// the given directory URL and persist the credentials.
+    async fn get_or_create_account(
+        &self,
+        directory_url: &str,
+    ) -> Result<instant_acme::Account, GatewayError> {
+        let account_path = self.account_path_for(directory_url);
+        let dir_url = directory_url;
 
         if account_path.exists() {
             tracing::info!(path = %account_path.display(), "loading existing ACME account");
@@ -709,96 +722,154 @@ impl AcmeManager {
 
         tracing::info!(domains = ?reachable, "starting ACME certificate request");
 
-        let account = self.get_or_create_account().await?;
-        let primary = self.primary_domain().unwrap();
-        let primary_dir = self.storage_dir().join(primary);
-
-        // ── 1. Try one multi-domain order (the lego model) ───────
-        // Single ACME order, single CSR with all SANs, single cert.
-        // Consumes one "exact set" entry of LE's 5/week rate limit.
-        match self
-            .issue_order(&account, &reachable, &primary_dir)
-            .await
-        {
-            Ok(()) => {
-                tracing::info!(
-                    domains = ?reachable,
-                    "ACME: multi-domain cert issued in one order"
-                );
-                self.try_load_cert().await?;
-                return Ok(());
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "ACME: multi-domain order failed; attempting per-domain fallback"
-                );
-            }
+        // Build the list of CA directory URLs to attempt: primary first,
+        // then each configured fallback in order.
+        let mut ca_urls: Vec<&str> = vec![self.config.directory_url.as_str()];
+        for fb in &self.config.fallback_directory_urls {
+            ca_urls.push(fb.as_str());
         }
 
-        // ── 2. Fallback: per-domain orders ───────────────────────
-        // Only runs when (1) fails — typically one SAN's authz won't
-        // validate. We isolate the bad domain and still issue for the
-        // rest. Fallback certs live under `_fallback/{domain}/` so
-        // they never overwrite a good multi-domain primary.
-        let mut succeeded: Vec<String> = Vec::new();
-        let mut failed: Vec<(String, String)> = Vec::new();
+        let primary = self.primary_domain().unwrap();
+        let primary_dir = self.storage_dir().join(primary);
+        let mut last_ca_error: Option<GatewayError> = None;
 
-        for domain in &reachable {
-            let fallback_dir = self.storage_dir().join("_fallback").join(domain);
+        for (ca_idx, dir_url) in ca_urls.iter().enumerate() {
+            let ca_label = if ca_idx == 0 {
+                "primary".to_string()
+            } else {
+                format!("fallback#{ca_idx}")
+            };
+
+            tracing::info!(
+                ca = %ca_label,
+                directory = %dir_url,
+                "ACME: attempting certificate order"
+            );
+
+            let account = match self.get_or_create_account(dir_url).await {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!(
+                        ca = %ca_label,
+                        directory = %dir_url,
+                        error = %e,
+                        "ACME: failed to create account at CA; trying next"
+                    );
+                    last_ca_error = Some(e);
+                    continue;
+                }
+            };
+
+            // ── 1. Try one multi-domain order ─────────────────────
             match self
-                .issue_order(&account, std::slice::from_ref(domain), &fallback_dir)
+                .issue_order(&account, &reachable, &primary_dir)
                 .await
             {
                 Ok(()) => {
-                    tracing::info!(domain = %domain, "ACME: fallback cert issued");
-                    succeeded.push(domain.clone());
+                    tracing::info!(
+                        ca = %ca_label,
+                        directory = %dir_url,
+                        domains = ?reachable,
+                        "ACME: multi-domain cert issued in one order"
+                    );
+                    self.try_load_cert().await?;
+                    return Ok(());
                 }
                 Err(e) => {
-                    tracing::warn!(domain = %domain, error = %e, "ACME: fallback order failed");
-                    failed.push((domain.clone(), e.to_string()));
+                    tracing::warn!(
+                        ca = %ca_label,
+                        error = %e,
+                        "ACME: multi-domain order failed; attempting per-domain fallback"
+                    );
                 }
             }
-        }
 
-        if succeeded.is_empty() {
-            return Err(GatewayError::Internal(format!(
-                "ACME: every order failed: {:?}",
+            // ── 2. Per-domain fallback orders ───────────────────
+            let mut succeeded: Vec<String> = Vec::new();
+            let mut failed: Vec<(String, String)> = Vec::new();
+
+            for domain in &reachable {
+                let fallback_dir = self.storage_dir().join("_fallback").join(domain);
+                match self
+                    .issue_order(&account, std::slice::from_ref(domain), &fallback_dir)
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(
+                            ca = %ca_label,
+                            domain = %domain,
+                            "ACME: fallback cert issued"
+                        );
+                        succeeded.push(domain.clone());
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            ca = %ca_label,
+                            domain = %domain,
+                            error = %e,
+                            "ACME: fallback order failed"
+                        );
+                        failed.push((domain.clone(), e.to_string()));
+                    }
+                }
+            }
+
+            if !succeeded.is_empty() {
+                // At least one domain succeeded with this CA.
+                let promote = if succeeded.contains(&primary.to_string()) {
+                    primary.to_string()
+                } else {
+                    succeeded[0].clone()
+                };
+                let fb = self.storage_dir().join("_fallback").join(&promote);
+                std::fs::create_dir_all(&primary_dir).map_err(|e| {
+                    GatewayError::Internal(format!("create primary dir: {e}"))
+                })?;
+                std::fs::copy(fb.join("cert.pem"), primary_dir.join("cert.pem")).map_err(|e| {
+                    GatewayError::Internal(format!("promote fallback cert: {e}"))
+                })?;
+                std::fs::copy(fb.join("key.pem"), primary_dir.join("key.pem")).map_err(|e| {
+                    GatewayError::Internal(format!("promote fallback key: {e}"))
+                })?;
+                tracing::info!(
+                    ca = %ca_label,
+                    domain = %promote,
+                    "promoted fallback cert to primary"
+                );
+
+                if !failed.is_empty() {
+                    tracing::warn!(
+                        ok = ?succeeded,
+                        bad = ?failed,
+                        "ACME: partial success -- failed domains keep serving the previous cert"
+                    );
+                }
+
+                self.try_load_cert().await?;
+                tracing::info!(
+                    ca = %ca_label,
+                    directory = %dir_url,
+                    "ACME certificate loaded into server"
+                );
+                return Ok(());
+            }
+
+            // Every order failed with this CA -- try the next one.
+            tracing::warn!(
+                ca = %ca_label,
+                directory = %dir_url,
+                "ACME: all orders failed with this CA; trying next"
+            );
+            last_ca_error = Some(GatewayError::Internal(format!(
+                "ACME: every order failed at {dir_url}: {:?}",
                 failed
             )));
         }
 
-        // Promote the first successful fallback cert so the resolver
-        // has something to serve. Prefer the primary domain if it
-        // succeeded; otherwise take the first winner.
-        let promote = if succeeded.contains(&primary.to_string()) {
-            primary.to_string()
-        } else {
-            succeeded[0].clone()
-        };
-        let fb = self.storage_dir().join("_fallback").join(&promote);
-        std::fs::create_dir_all(&primary_dir).map_err(|e| {
-            GatewayError::Internal(format!("create primary dir: {e}"))
-        })?;
-        std::fs::copy(fb.join("cert.pem"), primary_dir.join("cert.pem")).map_err(|e| {
-            GatewayError::Internal(format!("promote fallback cert: {e}"))
-        })?;
-        std::fs::copy(fb.join("key.pem"), primary_dir.join("key.pem")).map_err(|e| {
-            GatewayError::Internal(format!("promote fallback key: {e}"))
-        })?;
-        tracing::info!(domain = %promote, "promoted fallback cert to primary");
-
-        if !failed.is_empty() {
-            tracing::warn!(
-                ok = ?succeeded,
-                bad = ?failed,
-                "ACME: partial success — failed domains keep serving the previous cert"
-            );
-        }
-
-        self.try_load_cert().await?;
-        tracing::info!("ACME certificate loaded into server");
-        Ok(())
+        // Exhausted all CAs.
+        Err(last_ca_error.unwrap_or_else(|| {
+            GatewayError::Internal("ACME: no CA directories configured".into())
+        }))
     }
 
     /// Issue an ACME certificate covering `domains` and write the PEM

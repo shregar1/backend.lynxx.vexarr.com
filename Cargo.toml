@@ -41,7 +41,7 @@ thiserror = "1"
 anyhow = "1"
 async-trait = "0.1"
 http-body-util = "0.1"
-sqlx = { version = "0.8", features = ["runtime-tokio", "any", "sqlite", "postgres", "macros", "chrono", "uuid", "json"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "any", "sqlite", "postgres", "macros", "chrono", "uuid", "json", "tls-rustls"] }
 metrics = "0.23"
 metrics-exporter-prometheus = "0.15"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
@@ -90,6 +90,10 @@ aws-sdk-lambda = "=1.40.0"
 tiktoken-rs = "0.6"
 regex = "1"
 
+# Response compression plugin: gzip (pure-Rust via miniz_oxide) and Zstandard.
+flate2 = "1"
+zstd = "0.13"
+
 # graphql-guard plugin: parse GraphQL queries for depth, complexity, alias
 # count, persisted-query lookup, per-field rate limits. Pure-sync parser, no
 # async runtime. Document AST only — we never execute queries here.
@@ -125,7 +129,11 @@ hex = "0.4"
 # Used when `[gateway.acme].self_signed = true` to create a dev/test cert
 # on startup when no real cert exists on disk. Also generates the CSR for
 # future full-ACME flows and TLS-ALPN-01 challenge certs.
-rcgen = { version = "0.13", features = ["pem"] }
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+
+# Time library — used by the PKI module to set certificate validity
+# periods. Must match the version used by rcgen (0.3.x).
+time = "0.3"
 
 # Async pure-Rust ACME client. Used by the built-in ACME module to
 # register accounts, create orders, and finalize certificates with

@@ -562,6 +562,7 @@ async fn async_main() -> anyhow::Result<()> {
         quota.clone(),
         acme_manager.clone(),
         license_api_key,
+        config.clone(),
     );
 
     let proxy_addr = format!("0.0.0.0:{}", config.gateway.proxy_port);

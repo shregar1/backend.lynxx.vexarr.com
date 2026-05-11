@@ -64,7 +64,7 @@ use uuid::Uuid;
 /// Configuration for [`DockerProvider`]. Mirrors the fields exposed in
 /// `[gateway.providers.docker]` so the provider can be constructed
 /// directly from a parsed config block.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 pub struct DockerProviderConfig {
     /// Master switch. The provider is a no-op unless this is `true`.
     #[serde(default)]
@@ -377,6 +377,10 @@ impl DockerProvider {
             retries: parsed.retries,
             connect_timeout_ms: parsed.connect_timeout_ms,
             lb_strategy: "round-robin".to_string(),
+            service_type: "api".to_string(),
+            document_root: None,
+            index_file: "index.html".to_string(),
+            spa_fallback: false,
             tls_verify: true,
             tls_client_cert_path: None,
             tls_client_key_path: None,

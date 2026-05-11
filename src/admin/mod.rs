@@ -1,9 +1,11 @@
+pub mod config_api;
 pub mod routes;
 
 use crate::audit::AuditLog;
 use crate::auth::middleware::{extract_token, require_role};
 use crate::auth::Role;
 use crate::cluster::ClusterBus;
+use crate::config::GatewayConfig;
 use crate::db::Repository;
 use crate::health::HealthRegistry;
 use crate::plugins::PluginExecutor;
@@ -12,9 +14,10 @@ use crate::proxy::loadbalancer::LoadBalancerRegistry;
 use crate::proxy::router::SharedRouteTable;
 use crate::quota::QuotaTracker;
 use crate::reload::ReloadHandle;
+use axum::extract::Request;
 use axum::http::{header, Method, StatusCode, Uri};
-use axum::middleware;
-use axum::response::{Html, IntoResponse};
+use axum::middleware::{self, Next};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::Router;
 use chrono::Utc;
@@ -48,6 +51,7 @@ pub fn admin_router(
     quota: Arc<QuotaTracker>,
     acme: Option<Arc<crate::proxy::acme::AcmeManager>>,
     license_api_key: String,
+    gateway_config: GatewayConfig,
 ) -> Router {
     let audit = AuditLog::new(repo.clone());
     let state = AdminState {
@@ -177,6 +181,10 @@ pub fn admin_router(
         .route_layer(middleware::from_fn(admin_only));
 
 
+    // ---- live config API ----
+    let config_store = config_api::ConfigStore::new(gateway_config);
+    let config_sub = config_api::config_router(config_store);
+
     // ---- dashboard serving ----
     let dashboard = Router::new().fallback(dashboard_handler);
 
@@ -189,7 +197,31 @@ pub fn admin_router(
     dashboard
         .merge(api)
         .with_state(state)
+        .nest("/admin/v1/config", config_sub)
+        .layer(middleware::from_fn(spa_navigation_guard))
         .layer(admin_cors())
+}
+
+/// Browser navigation requests (`Accept: text/html`) get the SPA shell
+/// instead of hitting API routes like `/services` that would return JSON.
+async fn spa_navigation_guard(req: Request, next: Next) -> Response {
+    if req.method() == Method::GET {
+        let prefers_html = req
+            .headers()
+            .get(header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .map(|a| a.contains("text/html"))
+            .unwrap_or(false);
+
+        let path = req.uri().path();
+        let is_static_asset = path.contains('.') && !path.ends_with(".html");
+
+        if prefers_html && !is_static_asset {
+            return index_handler().await.into_response();
+        }
+    }
+
+    next.run(req).await
 }
 
 async fn dashboard_handler(uri: Uri) -> impl IntoResponse {
