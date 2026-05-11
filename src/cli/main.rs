@@ -87,6 +87,9 @@ enum Cmd {
     /// Install / list / remove WASM plugins from a `.wasm` file
     #[command(subcommand)]
     Wasm(WasmCmd),
+    /// Install / list / remove script-runner plugin instances
+    #[command(subcommand)]
+    Scripts(ScriptsCmd),
     /// Manage consumers
     #[command(subcommand)]
     Consumers(ConsumersCmd),
@@ -322,6 +325,55 @@ enum WasmCmd {
         /// Plugin instance id
         id: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScriptsCmd {
+    /// Install a script-runner plugin instance
+    Install {
+        /// Command to run pre-request (e.g. `python3`)
+        #[arg(long)]
+        on_request_cmd: Option<String>,
+        /// Arguments for the pre-request command (repeatable)
+        #[arg(long = "on-request-args")]
+        on_request_args: Vec<String>,
+        /// Command to run post-response (e.g. `node`)
+        #[arg(long)]
+        on_response_cmd: Option<String>,
+        /// Arguments for the post-response command (repeatable)
+        #[arg(long = "on-response-args")]
+        on_response_args: Vec<String>,
+        /// Script execution timeout in milliseconds
+        #[arg(long, default_value_t = 5000)]
+        timeout: u64,
+        /// Environment variables (repeatable, KEY=VALUE)
+        #[arg(long = "env", value_parser = parse_key_val)]
+        env: Vec<(String, String)>,
+        /// Max body bytes passed to scripts
+        #[arg(long, default_value_t = 2_097_152)]
+        max_body_bytes: u64,
+        /// Scope to a service by name
+        #[arg(long)]
+        service: Option<String>,
+        /// Scope to a route by id
+        #[arg(long)]
+        route: Option<String>,
+    },
+    /// List installed script-runner plugin instances
+    List,
+    /// Remove a script-runner plugin instance by id
+    Delete {
+        /// Plugin instance id
+        id: String,
+    },
+}
+
+/// Parse a `KEY=VALUE` pair for `--env`.
+fn parse_key_val(s: &str) -> std::result::Result<(String, String), String> {
+    let pos = s
+        .find('=')
+        .ok_or_else(|| format!("invalid KEY=VALUE: no `=` found in `{s}`"))?;
+    Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
 }
 
 #[derive(Subcommand, Debug)]
@@ -1558,6 +1610,148 @@ async fn cmd_wasm_list(client: &Client, fmt: OutputFormat) -> Result<()> {
 }
 
 async fn cmd_wasm_remove(client: &Client, id: &str) -> Result<()> {
+    cmd_plugins_delete(client, id).await
+}
+
+// ── lynxx scripts ─────────────────────────────────────────────────────────
+//
+// Typed CLI for the `script-runner` plugin. Builds the expected JSON config
+// from structured flags so the user doesn't have to hand-craft JSON blobs.
+
+#[allow(clippy::too_many_arguments)]
+async fn cmd_scripts_install(
+    client: &Client,
+    on_request_cmd: Option<String>,
+    on_request_args: Vec<String>,
+    on_response_cmd: Option<String>,
+    on_response_args: Vec<String>,
+    timeout: u64,
+    env: Vec<(String, String)>,
+    max_body_bytes: u64,
+    service: Option<String>,
+    route: Option<String>,
+    fmt: OutputFormat,
+) -> Result<()> {
+    if on_request_cmd.is_none() && on_response_cmd.is_none() {
+        bail!("at least one of --on-request-cmd or --on-response-cmd is required");
+    }
+
+    let mut config = serde_json::json!({
+        "max_body_bytes": max_body_bytes,
+    });
+
+    if let Some(cmd) = &on_request_cmd {
+        config["on_request"] = serde_json::json!({
+            "command": cmd,
+            "args": on_request_args,
+            "timeout_ms": timeout,
+        });
+    }
+
+    if let Some(cmd) = &on_response_cmd {
+        config["on_response"] = serde_json::json!({
+            "command": cmd,
+            "args": on_response_args,
+            "timeout_ms": timeout,
+        });
+    }
+
+    if !env.is_empty() {
+        let env_map: serde_json::Map<String, Json> = env
+            .into_iter()
+            .map(|(k, v)| (k, Json::String(v)))
+            .collect();
+        config["env"] = Json::Object(env_map);
+    }
+
+    let service_id = if let Some(s) = service {
+        Some(resolve_service(client, &s).await?.id)
+    } else {
+        None
+    };
+    let route_id = match route {
+        Some(r) => Some(Uuid::parse_str(&r).context("--route must be a UUID")?),
+        None => None,
+    };
+
+    let body = serde_json::json!({
+        "name": "script-runner",
+        "service_id": service_id,
+        "route_id": route_id,
+        "enabled": true,
+        "config": config,
+    });
+
+    let plugin: PluginInstance = client.post("/plugins", &body).await?;
+    if fmt == OutputFormat::Table {
+        let hooks: Vec<&str> = [
+            on_request_cmd.as_deref().map(|_| "on_request"),
+            on_response_cmd.as_deref().map(|_| "on_response"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        println!(
+            "{} installed script-runner plugin ({}, hooks: {})",
+            green("✓"),
+            fmt_id(&plugin.id),
+            hooks.join("+"),
+        );
+    } else {
+        emit(&plugin, fmt)?;
+    }
+    Ok(())
+}
+
+async fn cmd_scripts_list(client: &Client, fmt: OutputFormat) -> Result<()> {
+    let plugins: Vec<PluginInstance> = client.get("/plugins").await?;
+    let scripts_only: Vec<PluginInstance> = plugins
+        .into_iter()
+        .filter(|p| p.name == "script-runner")
+        .collect();
+    if fmt != OutputFormat::Table {
+        return emit(&scripts_only, fmt);
+    }
+    let services: Vec<Service> = client.get("/services").await.unwrap_or_default();
+    let by_id: HashMap<Uuid, String> = services.iter().map(|s| (s.id, s.name.clone())).collect();
+    let rows: Vec<Vec<String>> = scripts_only
+        .iter()
+        .map(|p| {
+            let scope = match (p.service_id, p.route_id) {
+                (Some(s), _) => format!(
+                    "service:{}",
+                    by_id.get(&s).cloned().unwrap_or_else(|| fmt_id(&s))
+                ),
+                (_, Some(r)) => format!("route:{}", fmt_id(&r)),
+                _ => "global".into(),
+            };
+            let hooks = {
+                let mut h = Vec::new();
+                if p.config.get("on_request").is_some() {
+                    h.push("req");
+                }
+                if p.config.get("on_response").is_some() {
+                    h.push("res");
+                }
+                if h.is_empty() {
+                    "none".to_string()
+                } else {
+                    h.join("+")
+                }
+            };
+            vec![
+                fmt_id(&p.id),
+                scope,
+                hooks,
+                if p.enabled { "yes".into() } else { "no".into() },
+            ]
+        })
+        .collect();
+    print_table(&["ID", "SCOPE", "HOOKS", "ENABLED"], &rows);
+    Ok(())
+}
+
+async fn cmd_scripts_delete(client: &Client, id: &str) -> Result<()> {
     cmd_plugins_delete(client, id).await
 }
 
@@ -3910,6 +4104,36 @@ async fn main() -> ExitCode {
             }
             WasmCmd::List => cmd_wasm_list(&client, output).await,
             WasmCmd::Remove { id } => cmd_wasm_remove(&client, &id).await,
+        },
+        Cmd::Scripts(s) => match s {
+            ScriptsCmd::Install {
+                on_request_cmd,
+                on_request_args,
+                on_response_cmd,
+                on_response_args,
+                timeout,
+                env,
+                max_body_bytes,
+                service,
+                route,
+            } => {
+                cmd_scripts_install(
+                    &client,
+                    on_request_cmd,
+                    on_request_args,
+                    on_response_cmd,
+                    on_response_args,
+                    timeout,
+                    env,
+                    max_body_bytes,
+                    service,
+                    route,
+                    output,
+                )
+                .await
+            }
+            ScriptsCmd::List => cmd_scripts_list(&client, output).await,
+            ScriptsCmd::Delete { id } => cmd_scripts_delete(&client, &id).await,
         },
         Cmd::Consumers(c) => match c {
             ConsumersCmd::List => cmd_consumers_list(&client, output).await,
