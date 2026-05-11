@@ -102,6 +102,14 @@ pub struct GatewaySettings {
     #[serde(default)]
     pub local_zone: Option<String>,
 
+    /// CIDR ranges of trusted reverse proxies. When set, the gateway
+    /// only honours `X-Forwarded-For` / `X-Real-IP` headers from source
+    /// IPs matching one of these ranges. Connections from untrusted
+    /// sources use the socket peer address instead.
+    /// Example: `["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]`
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+
     /// Admin API TLS. When enabled, the admin port serves HTTPS and
     /// optionally requires client certs for mTLS authentication.
     #[serde(default)]
@@ -597,6 +605,7 @@ fn default_gateway() -> GatewaySettings {
         admin_tls: AdminTlsConfig::default(),
         pki: PkiConfig::default(),
         cert_store: CertStoreConfig::default(),
+        trusted_proxies: Vec::new(),
     }
 }
 

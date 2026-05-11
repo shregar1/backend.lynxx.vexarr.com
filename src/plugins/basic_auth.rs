@@ -10,10 +10,15 @@ use std::sync::Arc;
 
 /// HTTP Basic auth backed by the consumer table.
 ///
-/// **Pragmatic v1 caveat:** there is no separate password column; we treat
-/// the consumer's stored `api_key` (a random UUID generated at consumer
-/// creation time) as the basic-auth password. This keeps us off a schema
-/// migration. Replace with a real password-hash column if/when needed.
+/// **Password verification priority:**
+///
+/// 1. If the matched consumer has a `password_hash` (Argon2id), the supplied
+///    password is verified against that hash. This is the recommended production
+///    path — set `password_hash` via the admin API's consumer endpoint.
+///
+/// 2. Otherwise, the consumer's stored `api_key` (a random UUID generated at
+///    consumer creation time) is compared as the basic-auth password. This
+///    preserves backward compatibility with the v1 schema.
 pub struct BasicAuthPlugin {
     repo: Option<Arc<dyn Repository>>,
     hide_credentials: bool,
@@ -35,10 +40,19 @@ impl BasicAuthPlugin {
     }
 
     fn unauthorized() -> PluginError {
-        // The error is mapped to a 401 by GatewayError::IntoResponse. The
-        // WWW-Authenticate header isn't carried through that mapping today;
-        // clients can still infer Basic from the 401 + scheme docs.
         PluginError::Unauthorized(r#"Basic realm="lynxx""#.into())
+    }
+
+    /// Verify `password` against an Argon2id PHC-format hash string.
+    fn verify_argon2(hash: &str, password: &str) -> bool {
+        use argon2::Argon2;
+        use argon2::password_hash::{PasswordHash, PasswordVerifier};
+        let Ok(parsed) = PasswordHash::new(hash) else {
+            return false;
+        };
+        Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok()
     }
 }
 
@@ -71,9 +85,17 @@ impl Plugin for BasicAuthPlugin {
             .await
             .map_err(|e| PluginError::Internal(format!("consumer lookup: {e}")))?;
 
-        let matched = consumers
-            .into_iter()
-            .find(|c| c.username == username && c.api_key.as_deref() == Some(password));
+        let matched = consumers.into_iter().find(|c| {
+            if c.username != username {
+                return false;
+            }
+            // Priority 1: Argon2id password hash
+            if let Some(ref hash) = c.password_hash {
+                return Self::verify_argon2(hash, password);
+            }
+            // Priority 2: legacy api_key comparison
+            c.api_key.as_deref() == Some(password)
+        });
         let consumer = matched.ok_or_else(Self::unauthorized)?;
 
         if let Ok(v) = HeaderValue::from_str(&consumer.username) {
@@ -90,5 +112,28 @@ impl Plugin for BasicAuthPlugin {
 
     async fn on_response(&self, _resp: &mut Response<BoxBody>) -> Result<(), PluginError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_argon2_round_trip() {
+        use argon2::Argon2;
+        use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
+        let salt = SaltString::generate(&mut OsRng);
+        let hash = Argon2::default()
+            .hash_password(b"hunter2", &salt)
+            .unwrap()
+            .to_string();
+        assert!(BasicAuthPlugin::verify_argon2(&hash, "hunter2"));
+        assert!(!BasicAuthPlugin::verify_argon2(&hash, "wrong"));
+    }
+
+    #[test]
+    fn verify_argon2_rejects_garbage() {
+        assert!(!BasicAuthPlugin::verify_argon2("not-a-hash", "password"));
     }
 }

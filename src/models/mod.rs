@@ -11,6 +11,21 @@ pub struct Service {
     pub connect_timeout_ms: u64,
     #[serde(default = "default_lb_strategy")]
     pub lb_strategy: String,
+    #[serde(default = "default_service_type")]
+    pub service_type: String,
+    /// Filesystem root for `service_type = "static"`. Lynxx serves files
+    /// directly from this directory instead of proxying to an upstream.
+    #[serde(default)]
+    pub document_root: Option<String>,
+    #[serde(default = "default_index_file")]
+    pub index_file: String,
+    #[serde(default)]
+    pub spa_fallback: bool,
+    /// Enable directory listing for static services. When true and a
+    /// directory is requested without an index file, an HTML listing is
+    /// generated (Caddy's `file_server browse` equivalent).
+    #[serde(default)]
+    pub directory_listing: bool,
     /// Outbound TLS verification toggle for `https://` upstreams. When
     /// `false`, the per-service hyper-util client skips certificate
     /// validation entirely. Defaults to `true` and should stay there
@@ -31,6 +46,14 @@ pub struct Service {
     pub tls_ca_path: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_service_type() -> String {
+    "api".to_string()
+}
+
+fn default_index_file() -> String {
+    "index.html".to_string()
 }
 
 fn default_tls_verify() -> bool {
@@ -65,6 +88,17 @@ pub struct Route {
     pub hosts: Vec<String>,
     pub service_id: Uuid,
     pub strip_path: bool,
+    /// Regex-based URI rewrite: `path_rewrite_pattern` is the regex to
+    /// match and `path_rewrite_replacement` is the substitution string.
+    /// E.g. pattern=`^/api/v1/(.*)` replacement=`/v1/$1`.
+    #[serde(default)]
+    pub path_rewrite_pattern: Option<String>,
+    #[serde(default)]
+    pub path_rewrite_replacement: Option<String>,
+    /// When true, the proxy buffers the entire request body before
+    /// forwarding to the upstream. Normally bodies stream through.
+    #[serde(default)]
+    pub buffer_request: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -89,6 +123,10 @@ pub struct Consumer {
     pub username: String,
     pub custom_id: Option<String>,
     pub api_key: Option<String>,
+    /// Argon2id password hash. When set, basic-auth verifies the supplied
+    /// password against this hash instead of comparing against `api_key`.
+    #[serde(default)]
+    pub password_hash: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -164,6 +202,11 @@ impl Service {
             retries,
             connect_timeout_ms,
             lb_strategy: default_lb_strategy(),
+            service_type: default_service_type(),
+            document_root: None,
+            index_file: default_index_file(),
+            spa_fallback: false,
+            directory_listing: false,
             tls_verify: true,
             tls_client_cert_path: None,
             tls_client_key_path: None,
@@ -190,6 +233,9 @@ impl Route {
             hosts,
             service_id,
             strip_path,
+            path_rewrite_pattern: None,
+            path_rewrite_replacement: None,
+            buffer_request: false,
             created_at: now,
             updated_at: now,
         }
@@ -204,6 +250,7 @@ impl Consumer {
             username,
             custom_id,
             api_key: Some(Uuid::new_v4().to_string()),
+            password_hash: None,
             created_at: now,
             updated_at: now,
         }

@@ -33,6 +33,9 @@ pub struct MatchContext {
 pub struct ProxyState {
     pub route_table: SharedRouteTable,
     pub plugins: Arc<PluginExecutor>,
+    /// Parsed CIDR ranges for trusted proxy validation. When non-empty,
+    /// X-Forwarded-For is only honoured from source IPs matching a range.
+    pub trusted_proxies: Vec<ipnet::IpNet>,
     /// Streaming hyper-util client used for the default HTTP/1.1 + HTTP/2
     /// proxy hot path. Bodies forward without buffering. See
     /// `crate::proxy::http_client` for the rationale.
@@ -269,14 +272,30 @@ pub async fn proxy_handler(
         return Err(GatewayError::QuotaExceeded);
     }
 
-    // Extract request context for hash-based LB strategies.
-    let client_ip_owned = req
-        .headers()
-        .get("x-real-ip")
-        .or_else(|| req.headers().get("x-forwarded-for"))
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
-        .unwrap_or_default();
+    // Extract client IP, respecting trusted_proxies CIDR allowlist.
+    // When trusted_proxies is configured, only honour X-Forwarded-For
+    // from source addresses that match the allowlist.
+    let peer_ip = req
+        .extensions()
+        .get::<std::net::SocketAddr>()
+        .map(|a| a.ip());
+    let trust_headers = if state.trusted_proxies.is_empty() {
+        true // no allowlist → trust unconditionally (backward compat)
+    } else {
+        peer_ip
+            .map(|ip| state.trusted_proxies.iter().any(|net| net.contains(&ip)))
+            .unwrap_or(false)
+    };
+    let client_ip_owned = if trust_headers {
+        req.headers()
+            .get("x-real-ip")
+            .or_else(|| req.headers().get("x-forwarded-for"))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+            .unwrap_or_else(|| peer_ip.map(|ip| ip.to_string()).unwrap_or_default())
+    } else {
+        peer_ip.map(|ip| ip.to_string()).unwrap_or_default()
+    };
     let sticky_cookie_owned = extract_cookie(req.headers(), STICKY_COOKIE_NAME);
     let lb_ctx = RequestContext {
         client_ip: Some(client_ip_owned.as_str()),
@@ -339,10 +358,11 @@ pub async fn proxy_handler(
                 .get(axum::http::header::ACCEPT_ENCODING)
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
-            let mut file_resp = crate::proxy::static_files::serve(
+            let mut file_resp = crate::proxy::static_files::serve_with_options(
                 root,
                 &service.index_file,
                 service.spa_fallback,
+                service.directory_listing,
                 &path,
                 accept_enc,
             )
@@ -668,10 +688,12 @@ pub async fn proxy_handler(
     };
 
     let max_attempts = (service.retries + 1).max(1) as usize;
+    // Force buffering when route.buffer_request is set, or when retries > 0.
+    let force_buffer = route.buffer_request;
     let mut last_err = String::new();
     let mut upstream_resp = None;
 
-    if max_attempts <= 1 {
+    if max_attempts <= 1 && !force_buffer {
         let upstream_req = Request::from_parts(parts, body);
         match client.request(upstream_req).await {
             Ok(r) => upstream_resp = Some(r),

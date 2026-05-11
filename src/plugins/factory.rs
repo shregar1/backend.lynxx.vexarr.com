@@ -2,6 +2,9 @@ use crate::db::Repository;
 use crate::error::GatewayError;
 use crate::plugins::acl::AclPlugin;
 use crate::plugins::anomaly_detector::AnomalyDetectorPlugin;
+use crate::plugins::error_handler::ErrorHandlerPlugin;
+use crate::plugins::map_vars::MapVarsPlugin;
+use crate::plugins::server_push::ServerPushPlugin;
 use crate::plugins::auth::AuthPlugin;
 use crate::plugins::aws_lambda::AwsLambdaPlugin;
 use crate::plugins::basic_auth::BasicAuthPlugin;
@@ -11,6 +14,7 @@ use crate::plugins::correlation_id::CorrelationIdPlugin;
 use crate::plugins::cors::CorsPlugin;
 use crate::plugins::datadog::DatadogPlugin;
 use crate::plugins::file_log::FileLogPlugin;
+use crate::plugins::forward_auth::ForwardAuthPlugin;
 use crate::plugins::graphql_guard::GraphqlGuardPlugin;
 use crate::plugins::grpc_web::GrpcWebPlugin;
 use crate::plugins::hmac_auth::HmacAuthPlugin;
@@ -37,8 +41,11 @@ use crate::plugins::request_termination::RequestTerminationPlugin;
 use crate::plugins::request_transformer::RequestTransformerPlugin;
 use crate::plugins::request_validator::RequestValidatorPlugin;
 use crate::plugins::response_cleaner::ResponseCleanerPlugin;
+use crate::plugins::response_compression::ResponseCompressionPlugin;
+use crate::plugins::response_rewriter::ResponseRewriterPlugin;
 use crate::plugins::response_ratelimiting::ResponseRateLimitingPlugin;
 use crate::plugins::response_transformer::ResponseTransformerPlugin;
+use crate::plugins::script_runner::ScriptRunnerPlugin;
 use crate::plugins::session::SessionPlugin;
 use crate::plugins::shadow::ShadowPlugin;
 use crate::plugins::splunk::SplunkPlugin;
@@ -96,6 +103,9 @@ pub fn build(
         "response-ratelimiting" => Arc::new(ResponseRateLimitingPlugin::from_config(config)?),
         "request-cleaner" => Arc::new(RequestCleanerPlugin::from_config(config)?),
         "response-cleaner" => Arc::new(ResponseCleanerPlugin::from_config(config)?),
+        "response-compression" => Arc::new(ResponseCompressionPlugin::from_config(config)?),
+        "forward-auth" => Arc::new(ForwardAuthPlugin::from_config(config)?),
+        "response-rewriter" => Arc::new(ResponseRewriterPlugin::from_config(config)?),
         "canary" => Arc::new(CanaryPlugin::from_config(config)?),
         "shadow" => Arc::new(ShadowPlugin::from_config(config)?),
         "websocket-size-limit" => Arc::new(WebsocketSizeLimitPlugin::from_config(config)?),
@@ -105,6 +115,10 @@ pub fn build(
         "openapi-drift" => Arc::new(OpenApiDriftPlugin::from_config(config)?),
         "openapi-mock" => Arc::new(OpenApiMockPlugin::from_config(config)?),
         "anomaly-detector" => Arc::new(AnomalyDetectorPlugin::from_config(config)?),
+        "script-runner" => Arc::new(ScriptRunnerPlugin::from_config(config)?),
+        "error-handler" => Arc::new(ErrorHandlerPlugin::from_config(config)?),
+        "map" => Arc::new(MapVarsPlugin::from_config(config)?),
+        "server-push" => Arc::new(ServerPushPlugin::from_config(config)?),
         other => {
             return Err(GatewayError::BadRequest(format!("unknown plugin: {other}")));
         }

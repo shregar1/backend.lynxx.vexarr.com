@@ -93,6 +93,72 @@ fn parse_string_list(val: Option<&serde_json::Value>) -> Vec<String> {
         .collect()
 }
 
+/// Expand Caddy-style placeholders in a string:
+///
+///   `{http.request.method}`, `{http.request.uri}`, `{http.request.host}`,
+///   `{http.request.header.X-Foo}`, `{env.HOME}`, `{time.now}`,
+///   `{time.now.unix}`.
+///
+/// Unknown placeholders are left as-is.
+pub(crate) fn expand_placeholders(template: &str, req: &axum::http::Request<axum::body::Body>) -> String {
+    if !template.contains('{') {
+        return template.to_string();
+    }
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        if let Some(end) = after.find('}') {
+            let key = &after[..end];
+            let replacement = match key {
+                "http.request.method" => Some(req.method().as_str().to_string()),
+                "http.request.uri" => Some(req.uri().to_string()),
+                "http.request.path" => Some(req.uri().path().to_string()),
+                "http.request.host" => req
+                    .headers()
+                    .get("host")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string())
+                    .or_else(|| req.uri().host().map(|h| h.to_string())),
+                "http.request.query" => req.uri().query().map(|q| q.to_string()),
+                "http.request.remote" => req
+                    .extensions()
+                    .get::<std::net::SocketAddr>()
+                    .map(|a| a.to_string()),
+                "time.now" => Some(chrono::Utc::now().to_rfc3339()),
+                "time.now.unix" => Some(chrono::Utc::now().timestamp().to_string()),
+                _ if key.starts_with("http.request.header.") => {
+                    let hdr_name = &key["http.request.header.".len()..];
+                    req.headers()
+                        .get(hdr_name)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string())
+                }
+                _ if key.starts_with("env.") => {
+                    let var_name = &key["env.".len()..];
+                    std::env::var(var_name).ok()
+                }
+                _ => None,
+            };
+            match replacement {
+                Some(val) => out.push_str(&val),
+                None => {
+                    out.push('{');
+                    out.push_str(key);
+                    out.push('}');
+                }
+            }
+            rest = &after[end + 1..];
+        } else {
+            out.push('{');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 pub(crate) fn apply_transforms(
     headers: &mut HeaderMap,
     add: &[(HeaderName, HeaderValue)],
@@ -155,8 +221,26 @@ impl Plugin for RequestTransformerPlugin {
     }
 
     async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
-        // --- header transforms (existing) ---
-        apply_transforms(req.headers_mut(), &self.add, &self.remove, &self.replace);
+        // Expand placeholders in add/replace header values before applying.
+        let expanded_add: Vec<(HeaderName, HeaderValue)> = self
+            .add
+            .iter()
+            .filter_map(|(n, v)| {
+                let raw = v.to_str().ok()?;
+                let expanded = expand_placeholders(raw, req);
+                Some((n.clone(), HeaderValue::from_str(&expanded).ok()?))
+            })
+            .collect();
+        let expanded_replace: Vec<(HeaderName, HeaderValue)> = self
+            .replace
+            .iter()
+            .filter_map(|(n, v)| {
+                let raw = v.to_str().ok()?;
+                let expanded = expand_placeholders(raw, req);
+                Some((n.clone(), HeaderValue::from_str(&expanded).ok()?))
+            })
+            .collect();
+        apply_transforms(req.headers_mut(), &expanded_add, &self.remove, &expanded_replace);
 
         // --- body transforms ---
         if !self.has_body_transforms() || !is_json_content_type(req.headers()) {

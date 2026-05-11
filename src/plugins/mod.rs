@@ -8,8 +8,10 @@ pub mod canary;
 pub mod correlation_id;
 pub mod cors;
 pub mod datadog;
+pub mod error_handler;
 pub mod factory;
 pub mod file_log;
+pub mod forward_auth;
 pub mod graphql_guard;
 pub mod grpc_web;
 pub mod hmac_auth;
@@ -19,6 +21,7 @@ pub mod jwt;
 pub mod key_auth;
 pub mod llm_gateway;
 pub mod logging;
+pub mod map_vars;
 pub mod mocking;
 pub mod oauth2_introspect;
 pub mod openapi_drift;
@@ -36,8 +39,12 @@ pub mod request_termination;
 pub mod request_transformer;
 pub mod request_validator;
 pub mod response_cleaner;
+pub mod response_compression;
+pub mod response_rewriter;
 pub mod response_ratelimiting;
 pub mod response_transformer;
+pub mod script_runner;
+pub mod server_push;
 pub mod session;
 pub mod shadow;
 pub mod splunk;
@@ -92,6 +99,7 @@ const CORE_PLUGINS: &[&str] = &[
     "request_termination",
     "ip_restriction",
     "proxy_cache",
+    "response_compression",
 ];
 
 pub struct PluginExecutor {

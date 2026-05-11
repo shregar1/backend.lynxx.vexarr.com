@@ -360,9 +360,17 @@ async fn async_main() -> anyhow::Result<()> {
     );
     crate::license::spawn_license_refresher(license_state.clone());
 
+    let trusted_proxies: Vec<ipnet::IpNet> = config
+        .gateway
+        .trusted_proxies
+        .iter()
+        .filter_map(|cidr| cidr.parse().ok())
+        .collect();
+
     let proxy_state = ProxyState {
         route_table: route_table.clone(),
         plugins: plugin_exec.clone(),
+        trusted_proxies,
         http_client: http_client.clone(),
         client_pool: client_pool.clone(),
         grpc_client,

@@ -207,6 +207,16 @@ impl RouteTable {
     }
 
     pub fn resolve_upstream_path(&self, route: &Route, original_path: &str) -> String {
+        // Priority 1: regex rewrite
+        if let (Some(pattern), Some(replacement)) =
+            (&route.path_rewrite_pattern, &route.path_rewrite_replacement)
+        {
+            if let Ok(re) = regex::Regex::new(pattern) {
+                let rewritten = re.replace(original_path, replacement.as_str());
+                return rewritten.into_owned();
+            }
+        }
+        // Priority 2: strip_path prefix removal
         if route.strip_path {
             for prefix in &route.paths {
                 let prefix = prefix.trim_end_matches('*');

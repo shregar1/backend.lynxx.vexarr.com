@@ -13,6 +13,11 @@ const HDR_METHOD: &str = "x-lynxx-filelog-method";
 const HDR_PATH: &str = "x-lynxx-filelog-path";
 const HDR_START: &str = "x-lynxx-filelog-start";
 const HDR_CONSUMER: &str = "x-consumer-username";
+const HDR_HOST: &str = "x-lynxx-filelog-host";
+const HDR_USER_AGENT: &str = "x-lynxx-filelog-ua";
+const HDR_REFERER: &str = "x-lynxx-filelog-referer";
+const HDR_CLIENT_IP: &str = "x-lynxx-filelog-client-ip";
+const HDR_REQ_SIZE: &str = "x-lynxx-filelog-req-size";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Format {
@@ -28,6 +33,9 @@ pub struct FileLogPlugin {
     tx: mpsc::Sender<LogLine>,
     fields: Vec<String>,
     format: Format,
+    /// Custom format template, e.g. `"{method} {path} -> {status} ({duration_ms}ms)"`.
+    /// When set, overrides `format` and `fields`.
+    custom_template: Option<String>,
 }
 
 #[derive(Debug)]
@@ -39,6 +47,12 @@ struct LogLine {
     duration_ms: i64,
     service: String,
     consumer: String,
+    host: String,
+    user_agent: String,
+    referer: String,
+    client_ip: String,
+    request_size: i64,
+    response_size: i64,
 }
 
 impl FileLogPlugin {
@@ -72,18 +86,21 @@ impl FileLogPlugin {
                 ]
             });
 
+        let custom_template = cfg
+            .get("template")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
         let (tx, rx) = mpsc::channel::<LogLine>(4096);
         let target = PathBuf::from(path);
         let format_for_task = format;
         let fields_for_task = fields.clone();
-        // Lives until process exit. Plugin updates create a fresh instance
-        // (and thus a fresh task) so leaked tasks per rebuild are bounded by
-        // process lifetime, which is acceptable for v1.
+        let tmpl_for_task = custom_template.clone();
         tokio::spawn(async move {
-            writer_task(target, rx, format_for_task, fields_for_task).await;
+            writer_task(target, rx, format_for_task, fields_for_task, tmpl_for_task).await;
         });
 
-        Ok(Self { tx, fields, format })
+        Ok(Self { tx, fields, format, custom_template })
     }
 }
 
@@ -92,6 +109,7 @@ async fn writer_task(
     mut rx: mpsc::Receiver<LogLine>,
     format: Format,
     fields: Vec<String>,
+    custom_template: Option<String>,
 ) {
     let file = match OpenOptions::new()
         .create(true)
@@ -117,7 +135,7 @@ async fn writer_task(
             maybe = rx.recv() => {
                 match maybe {
                     Some(line) => {
-                        let s = render(&line, format, &fields);
+                        let s = render(&line, format, &fields, custom_template.as_deref());
                         buf.extend_from_slice(s.as_bytes());
                         buf.push(b'\n');
                         count += 1;
@@ -146,7 +164,28 @@ async fn writer_task(
     }
 }
 
-fn render(line: &LogLine, format: Format, fields: &[String]) -> String {
+/// Expand a template string like `"{method} {path} -> {status}"` with log line values.
+fn expand_template(template: &str, line: &LogLine) -> String {
+    template
+        .replace("{timestamp}", &line.timestamp)
+        .replace("{method}", &line.method)
+        .replace("{path}", &line.path)
+        .replace("{status}", &line.status.to_string())
+        .replace("{duration_ms}", &line.duration_ms.to_string())
+        .replace("{service}", &line.service)
+        .replace("{consumer}", &line.consumer)
+        .replace("{host}", &line.host)
+        .replace("{user_agent}", &line.user_agent)
+        .replace("{referer}", &line.referer)
+        .replace("{client_ip}", &line.client_ip)
+        .replace("{request_size}", &line.request_size.to_string())
+        .replace("{response_size}", &line.response_size.to_string())
+}
+
+fn render(line: &LogLine, format: Format, fields: &[String], template: Option<&str>) -> String {
+    if let Some(tmpl) = template {
+        return expand_template(tmpl, line);
+    }
     match format {
         Format::Json => {
             let mut obj = serde_json::Map::new();
@@ -159,6 +198,12 @@ fn render(line: &LogLine, format: Format, fields: &[String]) -> String {
                     "duration_ms" => json!(line.duration_ms),
                     "service" => json!(line.service),
                     "consumer" => json!(line.consumer),
+                    "host" => json!(line.host),
+                    "user_agent" => json!(line.user_agent),
+                    "referer" => json!(line.referer),
+                    "client_ip" => json!(line.client_ip),
+                    "request_size" => json!(line.request_size),
+                    "response_size" => json!(line.response_size),
                     _ => continue,
                 };
                 obj.insert(f.clone(), v);
@@ -166,20 +211,18 @@ fn render(line: &LogLine, format: Format, fields: &[String]) -> String {
             serde_json::Value::Object(obj).to_string()
         }
         Format::Combined => {
-            // Apache combined-log-ish: host - user [time] "METH path" status -
             format!(
-                "{} - {} [{}] \"{} {}\" {} {}ms",
-                line.service,
-                if line.consumer.is_empty() {
-                    "-"
-                } else {
-                    &line.consumer
-                },
+                "{} {} {} [{}] \"{} {}\" {} {}ms \"{}\" \"{}\"",
+                line.client_ip.as_str().is_empty().then_some("-").unwrap_or(&line.client_ip),
+                line.host,
+                if line.consumer.is_empty() { "-" } else { &line.consumer },
                 line.timestamp,
                 line.method,
                 line.path,
                 line.status,
                 line.duration_ms,
+                line.referer,
+                line.user_agent,
             )
         }
     }
@@ -195,48 +238,95 @@ impl Plugin for FileLogPlugin {
         let method = req.method().as_str().to_string();
         let path = req.uri().path().to_string();
         let now_ms = chrono::Utc::now().timestamp_millis();
-        if let Ok(v) = axum::http::HeaderValue::from_str(&method) {
-            req.headers_mut().insert(HDR_METHOD, v);
-        }
-        if let Ok(v) = axum::http::HeaderValue::from_str(&path) {
-            req.headers_mut().insert(HDR_PATH, v);
-        }
-        if let Ok(v) = axum::http::HeaderValue::from_str(&now_ms.to_string()) {
-            req.headers_mut().insert(HDR_START, v);
-        }
-        let _ = &self.fields; // reserved for future per-request field selection
+        let host = req
+            .headers()
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-")
+            .to_string();
+        let user_agent = req
+            .headers()
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-")
+            .to_string();
+        let referer = req
+            .headers()
+            .get("referer")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("-")
+            .to_string();
+        let client_ip = req
+            .headers()
+            .get("x-real-ip")
+            .or_else(|| req.headers().get("x-forwarded-for"))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+            .unwrap_or_default();
+        let req_size = req
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+
+        let set = |req: &mut Request<axum::body::Body>, key: &'static str, val: &str| {
+            if let Ok(v) = axum::http::HeaderValue::from_str(val) {
+                req.headers_mut().insert(key, v);
+            }
+        };
+        set(req, HDR_METHOD, &method);
+        set(req, HDR_PATH, &path);
+        set(req, HDR_START, &now_ms.to_string());
+        set(req, HDR_HOST, &host);
+        set(req, HDR_USER_AGENT, &user_agent);
+        set(req, HDR_REFERER, &referer);
+        set(req, HDR_CLIENT_IP, &client_ip);
+        set(req, HDR_REQ_SIZE, &req_size.to_string());
+
+        let _ = &self.fields;
         let _ = self.format;
+        let _ = &self.custom_template;
         Ok(())
     }
 
     async fn on_response(&self, resp: &mut Response<BoxBody>) -> Result<(), PluginError> {
-        let method = resp
-            .headers()
-            .get(HDR_METHOD)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("?")
-            .to_string();
-        let path = resp
-            .headers()
-            .get(HDR_PATH)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("?")
-            .to_string();
+        let get_hdr = |resp: &Response<BoxBody>, key: &str| -> String {
+            resp.headers()
+                .get(key)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string()
+        };
+        let method = get_hdr(resp, HDR_METHOD);
+        let path = get_hdr(resp, HDR_PATH);
         let start_ms = resp
             .headers()
             .get(HDR_START)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-        let consumer = resp
+        let consumer = get_hdr(resp, HDR_CONSUMER);
+        let host = get_hdr(resp, HDR_HOST);
+        let user_agent = get_hdr(resp, HDR_USER_AGENT);
+        let referer = get_hdr(resp, HDR_REFERER);
+        let client_ip = get_hdr(resp, HDR_CLIENT_IP);
+        let request_size = resp
             .headers()
-            .get(HDR_CONSUMER)
+            .get(HDR_REQ_SIZE)
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-        resp.headers_mut().remove(HDR_METHOD);
-        resp.headers_mut().remove(HDR_PATH);
-        resp.headers_mut().remove(HDR_START);
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let response_size = resp
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+
+        for key in [HDR_METHOD, HDR_PATH, HDR_START, HDR_HOST, HDR_USER_AGENT, HDR_REFERER, HDR_CLIENT_IP, HDR_REQ_SIZE] {
+            resp.headers_mut().remove(key);
+        }
 
         let now = chrono::Utc::now();
         let line = LogLine {
@@ -247,6 +337,12 @@ impl Plugin for FileLogPlugin {
             duration_ms: (now.timestamp_millis() - start_ms).max(0),
             service: "lynxx".into(),
             consumer,
+            host,
+            user_agent,
+            referer,
+            client_ip,
+            request_size,
+            response_size,
         };
         // Drop on full to avoid blocking the response path. A full channel
         // means the writer is severely behind — letting the request return is
