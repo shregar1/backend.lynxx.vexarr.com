@@ -146,6 +146,8 @@ h3-quinn = "0.0.10"
 rustls-pki-types = "1.14.1"
 bytes = "1.11.1"
 http = "1.4.0"
+rust-embed = { version = "8.11.0", features = ["axum"] }
+mime_guess = "2.0.5"
 
 [lib]
 name = "lynxx_gateway"

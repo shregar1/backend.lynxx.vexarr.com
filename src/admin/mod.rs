@@ -12,17 +12,22 @@ use crate::proxy::loadbalancer::LoadBalancerRegistry;
 use crate::proxy::router::SharedRouteTable;
 use crate::quota::QuotaTracker;
 use crate::reload::ReloadHandle;
-use axum::http::Method;
+use axum::http::{header, Method, StatusCode, Uri};
 use axum::middleware;
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::Router;
 use chrono::Utc;
 use metrics_exporter_prometheus::PrometheusHandle;
 use routes::AdminState;
+use rust_embed::RustEmbed;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
+
+#[derive(RustEmbed)]
+#[folder = "../node.dashboard.lynxx.dev/dist/"]
+struct DashboardAssets;
 
 #[allow(clippy::too_many_arguments)]
 pub fn admin_router(
@@ -171,14 +176,7 @@ pub fn admin_router(
 
 
     // ---- dashboard serving ----
-    let dashboard_path = std::path::Path::new("../node.dashboard.lynxx.dev/dist");
-    let dashboard = if dashboard_path.exists() {
-        Router::new().fallback_service(
-            ServeDir::new(dashboard_path).not_found_service(ServeFile::new(dashboard_path.join("index.html")))
-        )
-    } else {
-        Router::new()
-    };
+    let dashboard = Router::new().fallback(dashboard_handler);
 
     // ---- routes assembly ----
     let api = reads
@@ -190,6 +188,32 @@ pub fn admin_router(
         .merge(api)
         .with_state(state)
         .layer(admin_cors())
+}
+
+async fn dashboard_handler(uri: Uri) -> impl IntoResponse {
+    let path = uri.path().trim_start_matches('/');
+
+    if path.is_empty() || path == "index.html" {
+        return index_handler().await.into_response();
+    }
+
+    match DashboardAssets::get(path) {
+        Some(content) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response()
+        }
+        None => {
+            // Fallback to index.html for SPA routing
+            index_handler().await.into_response()
+        }
+    }
+}
+
+async fn index_handler() -> impl IntoResponse {
+    match DashboardAssets::get("index.html") {
+        Some(content) => Html(content.data).into_response(),
+        None => (StatusCode::NOT_FOUND, "index.html not found").into_response(),
+    }
 }
 
 /// Permissive CORS for the admin API: any origin, common methods + headers.
