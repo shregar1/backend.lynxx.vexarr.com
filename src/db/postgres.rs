@@ -46,7 +46,8 @@ impl Repository for PostgresRepository {
 
     async fn list_services(&self) -> Result<Vec<Service>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, \
+            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
+                    document_root, index_file, spa_fallback, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     created_at, updated_at \
              FROM services",
@@ -59,7 +60,8 @@ impl Repository for PostgresRepository {
 
     async fn get_service(&self, id: &Uuid) -> Result<Option<Service>, GatewayError> {
         let row = sqlx::query(
-            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, \
+            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
+                    document_root, index_file, spa_fallback, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     created_at, updated_at \
              FROM services WHERE id = $1",
@@ -73,7 +75,8 @@ impl Repository for PostgresRepository {
 
     async fn get_service_by_name(&self, name: &str) -> Result<Option<Service>, GatewayError> {
         let row = sqlx::query(
-            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, \
+            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
+                    document_root, index_file, spa_fallback, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     created_at, updated_at \
              FROM services WHERE name = $1",
@@ -87,10 +90,11 @@ impl Repository for PostgresRepository {
 
     async fn create_service(&self, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
-            "INSERT INTO services (id, name, url, retries, connect_timeout_ms, lb_strategy, \
+            "INSERT INTO services (id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
+                                   document_root, index_file, spa_fallback, \
                                    tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                                    enabled, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, $11, $12)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE, $15, $16)",
         )
         .bind(svc.id)
         .bind(&svc.name)
@@ -98,6 +102,10 @@ impl Repository for PostgresRepository {
         .bind(svc.retries as i64)
         .bind(svc.connect_timeout_ms as i64)
         .bind(&svc.lb_strategy)
+        .bind(&svc.service_type)
+        .bind(svc.document_root.as_deref())
+        .bind(&svc.index_file)
+        .bind(svc.spa_fallback)
         .bind(svc.tls_verify)
         .bind(svc.tls_client_cert_path.as_deref())
         .bind(svc.tls_client_key_path.as_deref())
@@ -111,16 +119,21 @@ impl Repository for PostgresRepository {
 
     async fn update_service(&self, id: &Uuid, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
-            "UPDATE services SET name = $1, url = $2, retries = $3, connect_timeout_ms = $4, lb_strategy = $5, \
-                                 tls_verify = $6, tls_client_cert_path = $7, tls_client_key_path = $8, tls_ca_path = $9, \
-                                 updated_at = $10 \
-             WHERE id = $11",
+            "UPDATE services SET name = $1, url = $2, retries = $3, connect_timeout_ms = $4, lb_strategy = $5, service_type = $6, \
+                                 document_root = $7, index_file = $8, spa_fallback = $9, \
+                                 tls_verify = $10, tls_client_cert_path = $11, tls_client_key_path = $12, tls_ca_path = $13, \
+                                 updated_at = $14 \
+             WHERE id = $15",
         )
         .bind(&svc.name)
         .bind(&svc.url)
         .bind(svc.retries as i64)
         .bind(svc.connect_timeout_ms as i64)
         .bind(&svc.lb_strategy)
+        .bind(&svc.service_type)
+        .bind(svc.document_root.as_deref())
+        .bind(&svc.index_file)
+        .bind(svc.spa_fallback)
         .bind(svc.tls_verify)
         .bind(svc.tls_client_cert_path.as_deref())
         .bind(svc.tls_client_key_path.as_deref())
@@ -627,8 +640,9 @@ impl Repository for PostgresRepository {
 
     async fn list_audit(&self, filter: &AuditFilter) -> Result<Vec<AuditEntry>, GatewayError> {
         let limit = filter.effective_limit() as i64;
-        let mut sql = String::from(
-            "SELECT id, ts, actor_id, actor_name, actor_role, action, resource_type, resource_id, diff, hash, prev_hash FROM audit_log WHERE TRUE",
+        let diff_col = if filter.include_diff { "diff" } else { "NULL::jsonb AS diff" };
+        let mut sql = format!(
+            "SELECT id, ts, actor_id, actor_name, actor_role, action, resource_type, resource_id, {diff_col}, hash, prev_hash FROM audit_log WHERE TRUE",
         );
         let mut idx = 1;
         let mut params: Vec<String> = Vec::new();
@@ -665,7 +679,7 @@ impl Repository for PostgresRepository {
             idx += 1;
             since_param = Some(since);
         }
-        sql.push_str(&format!(" ORDER BY id DESC LIMIT ${}", idx));
+        sql.push_str(&format!(" ORDER BY ts DESC, id DESC LIMIT ${}", idx));
 
         let mut q = sqlx::query(&sql);
         if let Some(actor) = &filter.actor {
@@ -985,6 +999,19 @@ fn row_to_service(row: sqlx::postgres::PgRow) -> Result<Service, GatewayError> {
         .try_get("lb_strategy")
         .unwrap_or_else(|_| "round-robin".to_string());
 
+    let service_type: String = row
+        .try_get("service_type")
+        .unwrap_or_else(|_| "api".to_string());
+
+    let document_root: Option<String> = row
+        .try_get::<Option<String>, _>("document_root")
+        .ok()
+        .flatten();
+    let index_file: String = row
+        .try_get("index_file")
+        .unwrap_or_else(|_| "index.html".to_string());
+    let spa_fallback: bool = row.try_get("spa_fallback").unwrap_or(false);
+
     let tls_verify: bool = row.try_get("tls_verify").unwrap_or(true);
     let tls_client_cert_path: Option<String> = row
         .try_get::<Option<String>, _>("tls_client_cert_path")
@@ -1006,6 +1033,10 @@ fn row_to_service(row: sqlx::postgres::PgRow) -> Result<Service, GatewayError> {
         retries: retries as u32,
         connect_timeout_ms: connect_timeout_ms as u64,
         lb_strategy,
+        service_type,
+        document_root,
+        index_file,
+        spa_fallback,
         tls_verify,
         tls_client_cert_path,
         tls_client_key_path,
@@ -1057,6 +1088,9 @@ fn row_to_route(row: sqlx::postgres::PgRow) -> Result<Route, GatewayError> {
             .map_err(|e| GatewayError::Internal(format!("invalid methods json: {e}")))?,
         hosts: serde_json::from_value(hosts).unwrap_or_default(),
         strip_path,
+        buffer_request: false,
+        path_rewrite_pattern: None,
+        path_rewrite_replacement: None,
         created_at,
         updated_at,
     })
@@ -1158,6 +1192,7 @@ fn row_to_consumer(row: sqlx::postgres::PgRow) -> Result<Consumer, GatewayError>
         username: row.try_get("username")?,
         custom_id,
         api_key,
+        password_hash: None,
         created_at,
         updated_at,
     })

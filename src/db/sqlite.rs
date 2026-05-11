@@ -44,7 +44,8 @@ impl Repository for SqliteRepository {
 
     async fn list_services(&self) -> Result<Vec<Service>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, \
+            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
+                    document_root, index_file, spa_fallback, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     created_at, updated_at \
              FROM services",
@@ -57,7 +58,8 @@ impl Repository for SqliteRepository {
 
     async fn get_service(&self, id: &Uuid) -> Result<Option<Service>, GatewayError> {
         let row = sqlx::query(
-            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, \
+            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
+                    document_root, index_file, spa_fallback, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     created_at, updated_at \
              FROM services WHERE id = ?",
@@ -71,7 +73,8 @@ impl Repository for SqliteRepository {
 
     async fn get_service_by_name(&self, name: &str) -> Result<Option<Service>, GatewayError> {
         let row = sqlx::query(
-            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, \
+            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
+                    document_root, index_file, spa_fallback, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     created_at, updated_at \
              FROM services WHERE name = ?",
@@ -85,10 +88,11 @@ impl Repository for SqliteRepository {
 
     async fn create_service(&self, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
-            "INSERT INTO services (id, name, url, retries, connect_timeout_ms, lb_strategy, \
+            "INSERT INTO services (id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
+                                   document_root, index_file, spa_fallback, \
                                    tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                                    enabled, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
         )
         .bind(svc.id.to_string())
         .bind(&svc.name)
@@ -96,6 +100,10 @@ impl Repository for SqliteRepository {
         .bind(svc.retries as i64)
         .bind(svc.connect_timeout_ms as i64)
         .bind(&svc.lb_strategy)
+        .bind(&svc.service_type)
+        .bind(svc.document_root.as_deref())
+        .bind(&svc.index_file)
+        .bind(svc.spa_fallback as i64)
         .bind(svc.tls_verify as i64)
         .bind(svc.tls_client_cert_path.as_deref())
         .bind(svc.tls_client_key_path.as_deref())
@@ -109,7 +117,8 @@ impl Repository for SqliteRepository {
 
     async fn update_service(&self, id: &Uuid, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
-            "UPDATE services SET name = ?, url = ?, retries = ?, connect_timeout_ms = ?, lb_strategy = ?, \
+            "UPDATE services SET name = ?, url = ?, retries = ?, connect_timeout_ms = ?, lb_strategy = ?, service_type = ?, \
+                                 document_root = ?, index_file = ?, spa_fallback = ?, \
                                  tls_verify = ?, tls_client_cert_path = ?, tls_client_key_path = ?, tls_ca_path = ?, \
                                  updated_at = ? \
              WHERE id = ?",
@@ -119,6 +128,10 @@ impl Repository for SqliteRepository {
         .bind(svc.retries as i64)
         .bind(svc.connect_timeout_ms as i64)
         .bind(&svc.lb_strategy)
+        .bind(&svc.service_type)
+        .bind(svc.document_root.as_deref())
+        .bind(&svc.index_file)
+        .bind(svc.spa_fallback as i64)
         .bind(svc.tls_verify as i64)
         .bind(svc.tls_client_cert_path.as_deref())
         .bind(svc.tls_client_key_path.as_deref())
@@ -643,8 +656,9 @@ impl Repository for SqliteRepository {
         let limit = filter.effective_limit() as i64;
         // QueryBuilder would be nice but we avoid it for parity with the
         // rest of this file; manual params it is.
-        let mut sql = String::from(
-            "SELECT id, ts, actor_id, actor_name, actor_role, action, resource_type, resource_id, diff, hash, prev_hash FROM audit_log WHERE 1=1",
+        let diff_col = if filter.include_diff { "diff" } else { "NULL AS diff" };
+        let mut sql = format!(
+            "SELECT id, ts, actor_id, actor_name, actor_role, action, resource_type, resource_id, {diff_col}, hash, prev_hash FROM audit_log WHERE 1=1",
         );
         if filter.actor.is_some() {
             sql.push_str(" AND (actor_id = ? OR actor_name = ?)");
@@ -658,7 +672,7 @@ impl Repository for SqliteRepository {
         if filter.since.is_some() {
             sql.push_str(" AND ts >= ?");
         }
-        sql.push_str(" ORDER BY id DESC LIMIT ?");
+        sql.push_str(" ORDER BY ts DESC, id DESC LIMIT ?");
 
         let mut q = sqlx::query(&sql);
         if let Some(actor) = &filter.actor {
@@ -930,6 +944,10 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
                 retries: svc_cfg.retries,
                 connect_timeout_ms: svc_cfg.connect_timeout_ms,
                 lb_strategy: existing.lb_strategy.clone(),
+                service_type: svc_cfg.service_type.clone().unwrap_or_else(|| existing.service_type.clone()),
+                document_root: svc_cfg.document_root.clone().or_else(|| existing.document_root.clone()),
+                index_file: svc_cfg.index_file.clone().unwrap_or_else(|| existing.index_file.clone()),
+                spa_fallback: svc_cfg.spa_fallback.unwrap_or(existing.spa_fallback),
                 tls_verify: existing.tls_verify,
                 tls_client_cert_path: existing.tls_client_cert_path.clone(),
                 tls_client_key_path: existing.tls_client_key_path.clone(),
@@ -943,12 +961,24 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
             tracing::debug!(name = %svc_cfg.name, id = %existing.id, "config seed: updated existing service");
         } else {
             // New service — create with a fresh UUID.
-            let service = Service::new(
+            let mut service = Service::new(
                 svc_cfg.name.clone(),
                 svc_cfg.url.clone(),
                 svc_cfg.retries,
                 svc_cfg.connect_timeout_ms,
             );
+            if let Some(t) = &svc_cfg.service_type {
+                service.service_type = t.clone();
+            }
+            if let Some(root) = &svc_cfg.document_root {
+                service.document_root = Some(root.clone());
+            }
+            if let Some(idx) = &svc_cfg.index_file {
+                service.index_file = idx.clone();
+            }
+            if let Some(spa) = svc_cfg.spa_fallback {
+                service.spa_fallback = spa;
+            }
             repo.create_service(&service).await?;
             service_ids.push(service.id);
             services_by_name.insert(service.name.clone(), service.id);
@@ -982,6 +1012,9 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
                 hosts: rt_cfg.hosts.clone(),
                 service_id,
                 strip_path: rt_cfg.strip_path,
+                buffer_request: false,
+                path_rewrite_pattern: None,
+                path_rewrite_replacement: None,
                 created_at: existing.created_at,
                 updated_at: Utc::now(),
             };
@@ -1074,6 +1107,22 @@ fn row_to_service(row: sqlx::sqlite::SqliteRow) -> Result<Service, GatewayError>
         .try_get("lb_strategy")
         .unwrap_or_else(|_| "round-robin".to_string());
 
+    let service_type: String = row
+        .try_get("service_type")
+        .unwrap_or_else(|_| "api".to_string());
+
+    let document_root: Option<String> = row
+        .try_get::<Option<String>, _>("document_root")
+        .ok()
+        .flatten();
+    let index_file: String = row
+        .try_get("index_file")
+        .unwrap_or_else(|_| "index.html".to_string());
+    let spa_fallback: bool = row
+        .try_get::<i64, _>("spa_fallback")
+        .map(|v| v != 0)
+        .unwrap_or(false);
+
     // TLS columns are introduced in migration 0006. `try_get` failure
     // (e.g. running against an out-of-date schema) falls back to safe
     // defaults: verify on, no client cert, no extra CA.
@@ -1101,6 +1150,10 @@ fn row_to_service(row: sqlx::sqlite::SqliteRow) -> Result<Service, GatewayError>
         retries: retries as u32,
         connect_timeout_ms: connect_timeout_ms as u64,
         lb_strategy,
+        service_type,
+        document_root,
+        index_file,
+        spa_fallback,
         tls_verify,
         tls_client_cert_path,
         tls_client_key_path,
@@ -1150,6 +1203,9 @@ fn row_to_route(row: sqlx::sqlite::SqliteRow) -> Result<Route, GatewayError> {
             .map_err(|e| GatewayError::Internal(format!("invalid methods json: {e}")))?,
         hosts: serde_json::from_str(&hosts).unwrap_or_default(),
         strip_path: strip_path != 0,
+        buffer_request: false,
+        path_rewrite_pattern: None,
+        path_rewrite_replacement: None,
         created_at: parse_dt(&created_at)?,
         updated_at: parse_dt(&updated_at)?,
     })
@@ -1281,6 +1337,7 @@ fn row_to_consumer(row: sqlx::sqlite::SqliteRow) -> Result<Consumer, GatewayErro
         username: row.try_get("username")?,
         custom_id,
         api_key,
+        password_hash: None,
         created_at: parse_dt(&created_at)?,
         updated_at: parse_dt(&updated_at)?,
     })

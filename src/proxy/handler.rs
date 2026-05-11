@@ -358,15 +358,20 @@ pub async fn proxy_handler(
                 .get(axum::http::header::ACCEPT_ENCODING)
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
-            let mut file_resp = crate::proxy::static_files::serve_with_options(
+            let mut file_resp = crate::proxy::static_files::serve(
                 root,
                 &service.index_file,
                 service.spa_fallback,
-                service.directory_listing,
                 &path,
                 accept_enc,
             )
             .await;
+
+            // Transfer request extensions so script-runner's on_response
+            // can access the ScriptRequestContext stashed during on_request.
+            if let Some(ctx) = req.extensions().get::<crate::plugins::script_runner::ScriptRequestContext>() {
+                file_resp.extensions_mut().insert(ctx.clone());
+            }
 
             state
                 .plugins

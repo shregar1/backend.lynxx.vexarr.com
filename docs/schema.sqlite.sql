@@ -158,7 +158,9 @@ INSERT OR IGNORE INTO lb_strategy_lk (code, label, description) VALUES
   ('round-robin',       'Round Robin',       'Cycle through targets in order.'),
   ('weighted',          'Weighted',          'Distribute proportionally to per-target weights.'),
   ('least-connections', 'Least Connections', 'Pick the target with the fewest in-flight requests.'),
-  ('hash',              'Consistent Hash',   'Hash a request attribute (header, IP, etc.) to a target.');
+  ('ip-hash',           'IP Hash',           'Rendezvous-hash client IP for consistent target affinity.'),
+  ('cookie',            'Cookie Sticky',     'Sticky sessions via _lynxx_upstream cookie; falls back to round-robin.'),
+  ('consistent-hash',   'Consistent Hash',   'Rendezvous-hash the request URI for minimal remapping on pool changes.');
 
 -- ---------------------------------------------------------------------------
 -- Business tables

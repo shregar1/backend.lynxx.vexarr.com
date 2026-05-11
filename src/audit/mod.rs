@@ -90,6 +90,11 @@ pub struct AuditFilter {
     pub resource_type: Option<String>,
     pub since: Option<DateTime<Utc>>,
     pub limit: Option<u32>,
+    /// When true, include the full `diff` JSON blob per row. The list
+    /// endpoint defaults to false (diff omitted) to keep payloads small;
+    /// chain verification sets this to true because diffs are hashed.
+    #[serde(default)]
+    pub include_diff: bool,
 }
 
 impl AuditFilter {
@@ -207,6 +212,7 @@ impl AuditLog {
             .repo
             .list_audit(&AuditFilter {
                 limit: Some(1000),
+                include_diff: true,
                 ..Default::default()
             })
             .await?;

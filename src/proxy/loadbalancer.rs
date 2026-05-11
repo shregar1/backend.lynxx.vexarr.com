@@ -1,25 +1,60 @@
-//! Per-service load balancer with weighted round-robin and least-connections
+//! Per-service load balancer with weighted round-robin, least-connections,
+//! IP hash, cookie sticky-session, and consistent-hash (rendezvous / HRW)
 //! strategies. Targets are runtime-tracked for in-flight count and health.
 
 use crate::models::Target;
 use dashmap::DashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
+
+pub const STICKY_COOKIE_NAME: &str = "_lynxx_upstream";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LbStrategy {
     RoundRobin,
     LeastConn,
+    IpHash,
+    CookieSticky,
+    ConsistentHash,
 }
 
 impl LbStrategy {
     pub fn from_str(s: &str) -> Self {
         match s {
             "least-conn" | "least_conn" | "leastconn" => LbStrategy::LeastConn,
+            "ip-hash" | "ip_hash" | "iphash" => LbStrategy::IpHash,
+            "cookie" | "cookie-sticky" | "sticky" => LbStrategy::CookieSticky,
+            "consistent-hash" | "consistent_hash" | "consistenthash" => LbStrategy::ConsistentHash,
             _ => LbStrategy::RoundRobin,
         }
     }
+}
+
+/// Request-scoped context for hash-based LB strategies.
+pub struct RequestContext<'a> {
+    pub client_ip: Option<&'a str>,
+    pub uri_path: Option<&'a str>,
+    pub sticky_cookie: Option<&'a str>,
+}
+
+impl<'a> Default for RequestContext<'a> {
+    fn default() -> Self {
+        Self {
+            client_ip: None,
+            uri_path: None,
+            sticky_cookie: None,
+        }
+    }
+}
+
+fn hrw_hash(key: &str, target_id: &Uuid) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    target_id.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Runtime state for a single target.
@@ -101,37 +136,44 @@ impl ServiceLoadBalancer {
     /// Pick a target according to the strategy. Skips disabled and unhealthy
     /// targets. Returns `None` if no target is configured or all are out.
     ///
-    /// If `local_zone` is provided, the balancer first tries to find a
-    /// healthy target in the same zone. If none are available, it falls
-    /// back to the full set.
-    pub fn pick(&self, local_zone: Option<&str>) -> Option<Arc<TargetState>> {
+    /// If `local_zone` is provided **and** the strategy is RoundRobin or
+    /// LeastConn, the balancer first tries to find a healthy target in the
+    /// same zone. Hash-based strategies skip zone preference to preserve
+    /// their consistency guarantees.
+    pub fn pick(&self, local_zone: Option<&str>, ctx: &RequestContext) -> Option<Arc<TargetState>> {
         if self.targets.is_empty() {
             return None;
         }
 
+        // Zone-aware first try (only for strategies where locality makes sense).
         if let Some(zone) = local_zone {
-            // First try: healthy targets in the same zone.
-            let zone_targets: Vec<_> = self
-                .targets
-                .iter()
-                .filter(|s| {
-                    s.target.enabled
-                        && s.healthy.load(Ordering::Relaxed)
-                        && s.target.zone.as_deref() == Some(zone)
-                })
-                .collect();
+            if matches!(self.strategy, LbStrategy::RoundRobin | LbStrategy::LeastConn) {
+                let zone_targets: Vec<_> = self
+                    .targets
+                    .iter()
+                    .filter(|s| {
+                        s.target.enabled
+                            && s.healthy.load(Ordering::Relaxed)
+                            && s.target.zone.as_deref() == Some(zone)
+                    })
+                    .collect();
 
-            if !zone_targets.is_empty() {
-                return match self.strategy {
-                    LbStrategy::RoundRobin => self.pick_rr_from_subset(&zone_targets),
-                    LbStrategy::LeastConn => self.pick_least_conn_from_subset(&zone_targets),
-                };
+                if !zone_targets.is_empty() {
+                    return match self.strategy {
+                        LbStrategy::RoundRobin => self.pick_rr_from_subset(&zone_targets),
+                        LbStrategy::LeastConn => self.pick_least_conn_from_subset(&zone_targets),
+                        _ => unreachable!(),
+                    };
+                }
             }
         }
 
         match self.strategy {
             LbStrategy::RoundRobin => self.pick_rr(),
             LbStrategy::LeastConn => self.pick_least_conn(),
+            LbStrategy::IpHash => self.pick_hrw(ctx.client_ip.unwrap_or("0.0.0.0")),
+            LbStrategy::ConsistentHash => self.pick_hrw(ctx.uri_path.unwrap_or("/")),
+            LbStrategy::CookieSticky => self.pick_cookie_sticky(ctx.sticky_cookie),
         }
     }
 
@@ -188,6 +230,43 @@ impl ServiceLoadBalancer {
         }
         best.cloned()
     }
+
+    /// Rendezvous / Highest-Random-Weight hashing. For each healthy target,
+    /// compute hash(key, target_id) and pick the highest. Adding or removing
+    /// a target only remaps requests that were pinned to that target.
+    fn pick_hrw(&self, key: &str) -> Option<Arc<TargetState>> {
+        let mut best: Option<&Arc<TargetState>> = None;
+        let mut best_hash: u64 = 0;
+        for s in &self.targets {
+            if !s.target.enabled || !s.healthy.load(Ordering::Relaxed) {
+                continue;
+            }
+            let h = hrw_hash(key, &s.target.id);
+            if best.is_none() || h > best_hash {
+                best_hash = h;
+                best = Some(s);
+            }
+        }
+        best.cloned()
+    }
+
+    /// Cookie sticky: honour an existing affinity cookie when the pinned
+    /// target is still healthy, otherwise fall back to round-robin.
+    fn pick_cookie_sticky(&self, cookie: Option<&str>) -> Option<Arc<TargetState>> {
+        if let Some(val) = cookie {
+            if let Ok(target_id) = Uuid::parse_str(val) {
+                for s in &self.targets {
+                    if s.target.id == target_id
+                        && s.target.enabled
+                        && s.healthy.load(Ordering::Relaxed)
+                    {
+                        return Some(s.clone());
+                    }
+                }
+            }
+        }
+        self.pick_rr()
+    }
 }
 
 /// Registry of per-service load balancers.
@@ -212,10 +291,21 @@ impl LoadBalancerRegistry {
         self.inner.insert(service_id, Arc::new(RwLock::new(lb)));
     }
 
-    pub fn pick(&self, service_id: &Uuid, local_zone: Option<&str>) -> Option<Arc<TargetState>> {
+    pub fn pick(
+        &self,
+        service_id: &Uuid,
+        local_zone: Option<&str>,
+        ctx: &RequestContext,
+    ) -> Option<Arc<TargetState>> {
         let entry = self.inner.get(service_id)?;
         let guard = entry.read().ok()?;
-        guard.pick(local_zone)
+        guard.pick(local_zone, ctx)
+    }
+
+    pub fn strategy_for(&self, service_id: &Uuid) -> Option<LbStrategy> {
+        let entry = self.inner.get(service_id)?;
+        let guard = entry.read().ok()?;
+        Some(guard.strategy())
     }
 
     pub fn remove_service(&self, service_id: &Uuid) {

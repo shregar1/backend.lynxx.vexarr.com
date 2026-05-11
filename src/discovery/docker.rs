@@ -395,6 +395,9 @@ impl DockerProvider {
             hosts: parsed.hosts,
             service_id,
             strip_path: parsed.strip_path,
+            buffer_request: false,
+            path_rewrite_pattern: None,
+            path_rewrite_replacement: None,
             created_at: now,
             updated_at: now,
         };

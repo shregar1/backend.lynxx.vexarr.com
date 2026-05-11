@@ -21,11 +21,6 @@ pub struct Service {
     pub index_file: String,
     #[serde(default)]
     pub spa_fallback: bool,
-    /// Enable directory listing for static services. When true and a
-    /// directory is requested without an index file, an HTML listing is
-    /// generated (Caddy's `file_server browse` equivalent).
-    #[serde(default)]
-    pub directory_listing: bool,
     /// Outbound TLS verification toggle for `https://` upstreams. When
     /// `false`, the per-service hyper-util client skips certificate
     /// validation entirely. Defaults to `true` and should stay there
@@ -206,7 +201,6 @@ impl Service {
             document_root: None,
             index_file: default_index_file(),
             spa_fallback: false,
-            directory_listing: false,
             tls_verify: true,
             tls_client_cert_path: None,
             tls_client_key_path: None,

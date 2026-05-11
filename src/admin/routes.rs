@@ -503,6 +503,9 @@ pub async fn update_route(
         hosts: input.hosts,
         service_id: input.service_id,
         strip_path: input.strip_path,
+        buffer_request: false,
+        path_rewrite_pattern: None,
+        path_rewrite_replacement: None,
         created_at: existing.created_at,
         updated_at: now,
     };
@@ -555,6 +558,9 @@ pub async fn patch_route(
         hosts: input.hosts.unwrap_or_else(|| existing.hosts.clone()),
         service_id: input.service_id.unwrap_or(existing.service_id),
         strip_path: input.strip_path.unwrap_or(existing.strip_path),
+        buffer_request: existing.buffer_request,
+        path_rewrite_pattern: existing.path_rewrite_pattern.clone(),
+        path_rewrite_replacement: existing.path_rewrite_replacement.clone(),
         created_at: existing.created_at,
         updated_at: now,
     };

@@ -19,3 +19,4 @@
 //! distinguishable from operator-created entries.
 
 pub mod docker;
+pub mod srv_dns;

@@ -3,7 +3,7 @@ set -euo pipefail
 
 GCS_BUCKET="gs://vexarr-com/lynxx/binaries/linux/amd64"
 TARGET="x86_64-unknown-linux-gnu"
-VM_NAME="vexarr-com"
+VM_NAME="vexarr-com-micro"
 VM_ZONE="us-central1-a"
 BINARY_NAME="lynxx-gateway"
 
