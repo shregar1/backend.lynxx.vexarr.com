@@ -180,14 +180,15 @@ pub fn admin_router(
         Router::new()
     };
 
-    dashboard
-        .merge(reads)
+    // ---- routes assembly ----
+    let api = reads
         .merge(mutations)
         .merge(tokens)
-        .with_state(state.clone())
-        // Auth extraction runs first (outermost). It needs &AdminState to
-        // hit the repo for the bootstrap check + token lookup.
-        .layer(middleware::from_fn_with_state(state, extract_token))
+        .layer(middleware::from_fn_with_state(state.clone(), extract_token));
+
+    dashboard
+        .merge(api)
+        .with_state(state)
         .layer(admin_cors())
 }
 
