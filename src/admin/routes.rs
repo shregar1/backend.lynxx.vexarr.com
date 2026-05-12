@@ -1093,10 +1093,9 @@ pub async fn metrics(State(state): State<AdminState>) -> Response {
 // ---------- targets ----------
 
 async fn rebuild_lb(state: &AdminState, service_id: Uuid) -> Result<(), GatewayError> {
-    let svc = state
-        .route_table
-        .get_service(&service_id)
-        .ok_or_else(|| GatewayError::NotFound(format!("service {service_id}")))?;
+    let Some(svc) = state.route_table.get_service(&service_id) else {
+        return Ok(());
+    };
     let targets = state.repo.list_targets_for_service(&service_id).await?;
     state
         .lb
