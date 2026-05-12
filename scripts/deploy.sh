@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-GCS_BUCKET="gs://vexarr-com/lynxx/binaries/linux/amd64"
+GCS_BUCKET="${LYNXX_GCS_BUCKET:-gs://your-bucket/lynxx/binaries/linux/amd64}"
 TARGET="x86_64-unknown-linux-gnu"
-VM_NAME="vexarr-com-micro"
-VM_ZONE="us-central1-a"
+VM_NAME="${LYNXX_VM_NAME:-your-vm-name}"
+VM_ZONE="${LYNXX_VM_ZONE:-us-central1-a}"
 BINARY_NAME="lynxx-gateway"
 
 VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')

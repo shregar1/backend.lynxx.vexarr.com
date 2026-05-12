@@ -1,13 +1,13 @@
 # Deploy Lynxx API Gateway
 
-Single VM deployment to `vexarr-com-micro` (e2-micro, us-central1-a, 34.122.214.75).
+Single VM deployment to your GCE instance.
 
 ## First-time provisioning
 
 Run once on a fresh VM to install deps, config, and the systemd service:
 
 ```bash
-gcloud compute ssh vexarr-com-micro --zone=us-central1-a --command='
+gcloud compute ssh $VM_NAME --zone=$ZONE --command='
 set -e
 
 # Install deps
@@ -27,7 +27,7 @@ sudo useradd -r -u 10001 -m lynxx 2>/dev/null || true
 sudo mkdir -p /etc/lynxx /var/lib/lynxx
 
 # Download latest binary
-sudo gsutil cp gs://vexarr-com/lynxx/binaries/linux/amd64/lynxx-gateway-latest /usr/local/bin/lynxx-gateway
+sudo gsutil cp gs://$GCS_BUCKET/lynxx/binaries/linux/amd64/lynxx-gateway-latest /usr/local/bin/lynxx-gateway
 sudo chmod +x /usr/local/bin/lynxx-gateway
 
 # Write config
@@ -103,7 +103,7 @@ Run from `backend.lynxx.dev/`:
 
 ```bash
 # SSH into the VM
-gcloud compute ssh vexarr-com-micro --zone=us-central1-a
+gcloud compute ssh $VM_NAME --zone=$ZONE
 
 # Check status
 sudo systemctl status lynxx.service
@@ -120,13 +120,13 @@ sudo systemctl restart lynxx.service
 
 | Key | Value |
 |-----|-------|
-| VM | `vexarr-com-micro` |
-| Type | `e2-micro` (0.25 vCPU / 1GB) |
-| Zone | `us-central1-a` |
-| IP | `34.122.214.75` (static, reserved as `vexarr-ip`) |
+| VM | `$VM_NAME` |
+| Type | e2-micro (0.25 vCPU / 1GB) |
+| Zone | `$ZONE` |
+| IP | Static IP reserved in your GCP project |
 | Disk | 10GB pd-standard |
 | OS | Debian 12 (bookworm) |
 | Binary | `/usr/local/bin/lynxx-gateway` |
 | Config | `/etc/lynxx/config.toml` |
 | Data | `/var/lib/lynxx/` |
-| GCS | `gs://vexarr-com/lynxx/binaries/linux/amd64/` |
+| GCS | `gs://$GCS_BUCKET/lynxx/binaries/linux/amd64/` |

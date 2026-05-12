@@ -3,7 +3,7 @@
 The OAuth Client ID for "Sign in with Google" cannot be provisioned
 via `gcloud` for an *external* OAuth brand — Cloud Console is the
 only supported path. The steps below set everything up in the
-`vexarr-com-495315` project; once done, hand the Client ID to the
+`$PROJECT_ID` project; once done, hand the Client ID to the
 billing service and the website via env vars.
 
 ## 1. Configure the consent screen (one-time)
@@ -12,7 +12,7 @@ The brand `Vexarr` already exists (see `gcloud alpha iap oauth-brands
 list`). Make sure it's set to **External** so customers from any
 Google account can sign in:
 
-- Visit <https://console.cloud.google.com/apis/credentials/consent?project=vexarr-com-495315>
+- Visit <https://console.cloud.google.com/apis/credentials/consent?project=$PROJECT_ID>
 - User type: **External**
 - App name: `Lynxx`
 - User support email: `support@lynxx.dev`
@@ -22,19 +22,19 @@ Google account can sign in:
 
 ## 2. Create the OAuth Client ID
 
-- Visit <https://console.cloud.google.com/apis/credentials?project=vexarr-com-495315>
+- Visit <https://console.cloud.google.com/apis/credentials?project=$PROJECT_ID>
 - **+ CREATE CREDENTIALS** → **OAuth client ID**
 - Application type: **Web application**
 - Name: `Lynxx Web`
 - Authorized JavaScript origins:
   - `https://lynxx.vexarr.com`
   - `https://www.lynxx.vexarr.com`
-  - `https://lynxx-website-588755157227.us-central1.run.app`
+  - `https://lynxx-website-$PROJECT_NUMBER.us-central1.run.app`
   - `https://lynxx-website-7jnb4axmhq-uc.a.run.app`
   - `http://localhost:5173` (dev)
 - Authorized redirect URIs:
   - `https://lynxx.vexarr.com`
-  - `https://lynxx-website-588755157227.us-central1.run.app`
+  - `https://lynxx-website-$PROJECT_NUMBER.us-central1.run.app`
   - `http://localhost:5173`
 - Click **Create** and copy the Client ID (looks like
   `123456789-abc.apps.googleusercontent.com`).
@@ -45,7 +45,7 @@ Google account can sign in:
 # Backend reads it from this secret at startup.
 echo -n "<your-client-id>.apps.googleusercontent.com" | \
   gcloud secrets create LYNXX_GOOGLE_OAUTH_CLIENT_ID \
-  --project=vexarr-com-495315 --data-file=- --labels=product=lynxx
+  --project=$PROJECT_ID --data-file=- --labels=product=lynxx
 
 # Same value is baked into the website bundle at build time.
 # Pass it to `docker buildx build` via:
@@ -68,10 +68,10 @@ For the website, rebuild the image with the build-arg:
 docker buildx build --platform=linux/amd64 \
   --build-arg VITE_BILLING_API_URL=https://api.lynxx.vexarr.com \
   --build-arg VITE_GOOGLE_OAUTH_CLIENT_ID="$(gcloud secrets versions access latest --secret=LYNXX_GOOGLE_OAUTH_CLIENT_ID)" \
-  -t us-central1-docker.pkg.dev/vexarr-com-495315/lynxx/lynxx-website:latest \
+  -t us-central1-docker.pkg.dev/$PROJECT_ID/lynxx/lynxx-website:latest \
   --push .
 gcloud run services update lynxx-website --region=us-central1 \
-  --image=us-central1-docker.pkg.dev/vexarr-com-495315/lynxx/lynxx-website:latest \
+  --image=us-central1-docker.pkg.dev/$PROJECT_ID/lynxx/lynxx-website:latest \
   --port=80
 ```
 
