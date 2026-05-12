@@ -152,10 +152,13 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_service(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("UPDATE services SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE services SET is_deleted = 1, name = name || '__deleted_' || id \
+             WHERE id = ? AND is_deleted = 0",
+        )
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -418,10 +421,13 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_consumer(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("UPDATE consumers SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE consumers SET is_deleted = 1, username = username || '__deleted_' || id \
+             WHERE id = ? AND is_deleted = 0",
+        )
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -580,10 +586,13 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_admin_token(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("UPDATE admin_tokens SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE admin_tokens SET is_deleted = 1, token_hash = token_hash || '__deleted_' || id \
+             WHERE id = ? AND is_deleted = 0",
+        )
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 

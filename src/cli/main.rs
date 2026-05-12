@@ -96,6 +96,30 @@ enum Cmd {
     /// Manage upstream targets
     #[command(subcommand)]
     Targets(TargetsCmd),
+    /// Admin token management
+    #[command(subcommand)]
+    Tokens(TokensCmd),
+    /// Audit log inspection
+    #[command(subcommand)]
+    Audit(AuditCmd),
+    /// Circuit breaker management
+    #[command(subcommand, alias = "cb")]
+    CircuitBreakers(CircuitBreakersCmd),
+    /// View quota usage snapshot
+    Quota,
+    /// Show upstream health across all services
+    Upstreams,
+    /// Dump raw Prometheus metrics
+    Metrics,
+    /// ACME certificate management
+    #[command(subcommand)]
+    Acme(AcmeCmd),
+    /// Runtime profiling and debug info
+    #[command(subcommand)]
+    Debug(DebugCmd),
+    /// Live gateway configuration management
+    #[command(subcommand)]
+    LiveConfig(LiveConfigCmd),
     /// Show per-service circuit/health summary
     Health,
     /// Trigger a config.toml reload on the gateway
@@ -244,6 +268,36 @@ enum ServicesCmd {
         #[arg(long = "lb")]
         lb_strategy: Option<String>,
     },
+    /// Full update (PUT) — replaces all fields
+    Update {
+        /// Service name or id
+        ident: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        url: String,
+        #[arg(long, default_value_t = 3)]
+        retries: u32,
+        #[arg(long = "timeout", default_value_t = 5000)]
+        connect_timeout_ms: u64,
+        #[arg(long = "lb")]
+        lb_strategy: Option<String>,
+    },
+    /// Partial update (PATCH) — only supplied fields are changed
+    Patch {
+        /// Service name or id
+        ident: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        retries: Option<u32>,
+        #[arg(long = "timeout")]
+        connect_timeout_ms: Option<u64>,
+        #[arg(long = "lb")]
+        lb_strategy: Option<String>,
+    },
     Delete {
         ident: String,
     },
@@ -252,6 +306,8 @@ enum ServicesCmd {
 #[derive(Subcommand, Debug)]
 enum RoutesCmd {
     List,
+    /// Show a single route by id
+    Get { id: String },
     Create {
         #[arg(long)]
         service: String,
@@ -263,6 +319,30 @@ enum RoutesCmd {
         methods: Vec<String>,
         #[arg(long)]
         strip_path: bool,
+    },
+    /// Full update (PUT)
+    Update {
+        id: String,
+        #[arg(long)]
+        service: String,
+        #[arg(long, value_delimiter = ',')]
+        paths: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        methods: Vec<String>,
+        #[arg(long)]
+        strip_path: bool,
+    },
+    /// Partial update (PATCH) — only supplied fields are changed
+    Patch {
+        id: String,
+        #[arg(long)]
+        service: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        paths: Option<Vec<String>>,
+        #[arg(long, value_delimiter = ',')]
+        methods: Option<Vec<String>>,
+        #[arg(long)]
+        strip_path: Option<bool>,
     },
     Delete {
         id: String,
@@ -406,6 +486,139 @@ enum TargetsCmd {
     },
     Delete {
         id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TokensCmd {
+    /// List all admin tokens
+    List,
+    /// Create a new admin token
+    Create {
+        #[arg(long)]
+        name: String,
+        /// Role: viewer, operator, admin
+        #[arg(long)]
+        role: String,
+        /// Expiration in days from now
+        #[arg(long)]
+        expires_in_days: Option<u32>,
+    },
+    /// Update an existing token
+    Update {
+        /// Token id or name
+        ident: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        role: Option<String>,
+    },
+    /// Revoke (delete) a token
+    Delete {
+        /// Token id or name
+        ident: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AuditCmd {
+    /// List audit log entries
+    List {
+        /// Filter by action (create, update, delete)
+        #[arg(long)]
+        action: Option<String>,
+        /// Filter by resource type (service, route, plugin, consumer, token)
+        #[arg(long = "type")]
+        resource_type: Option<String>,
+        /// Max entries to return
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Verify audit log hash chain integrity
+    Verify,
+}
+
+#[derive(Subcommand, Debug)]
+enum CircuitBreakersCmd {
+    /// List all circuit breaker states
+    List,
+    /// Reset a service's circuit breaker to Closed
+    Reset {
+        /// Service name or id
+        service: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AcmeCmd {
+    /// Show ACME status
+    Status,
+    /// Trigger certificate renewal
+    Renew,
+    /// Revoke the current certificate
+    Revoke,
+    /// Set an HTTP-01 challenge response
+    SetHttp01 {
+        #[arg(long)]
+        token: String,
+        #[arg(long)]
+        key_authorization: String,
+    },
+    /// Clear an HTTP-01 challenge
+    ClearHttp01 {
+        #[arg(long)]
+        token: String,
+    },
+    /// Set a TLS-ALPN-01 challenge
+    SetTlsAlpn01 {
+        #[arg(long)]
+        domain: String,
+        #[arg(long)]
+        key_authorization: String,
+    },
+    /// Clear a TLS-ALPN-01 challenge
+    ClearTlsAlpn01 {
+        #[arg(long)]
+        domain: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DebugCmd {
+    /// Heap memory profile
+    Heap,
+    /// Tokio tasks profile
+    Tasks,
+    /// Thread listing
+    Threads,
+    /// Process uptime and resource usage
+    Uptime,
+    /// Combined stats (heap + tasks + uptime)
+    Stats,
+}
+
+#[derive(Subcommand, Debug)]
+enum LiveConfigCmd {
+    /// Show the current live configuration
+    Get,
+    /// Set a configuration value at a dotted path
+    Set {
+        /// Dotted config path (e.g. gateway.log_level)
+        path: String,
+        /// JSON value to set (e.g. '"debug"', '9000', 'true')
+        value: String,
+    },
+    /// Validate a configuration body without applying
+    Validate {
+        /// JSON body to validate
+        body: String,
+    },
+    /// Show configuration change history
+    History,
+    /// Lookup a service or route by its id tag (e.g. service:name or route:path)
+    Lookup {
+        /// Tag in the form "service:name" or "route:/path"
+        tag: String,
     },
 }
 
@@ -638,6 +851,60 @@ struct ServiceHealth {
     consecutive_failures: u32,
     last_check_at: Option<DateTime<Utc>>,
     last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdminTokenView {
+    id: Uuid,
+    name: String,
+    role: String,
+    created_at: DateTime<Utc>,
+    #[serde(default)]
+    expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    last_used_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditEntry {
+    id: i64,
+    ts: DateTime<Utc>,
+    #[serde(default)]
+    actor_id: Option<String>,
+    #[serde(default)]
+    actor_name: Option<String>,
+    #[serde(default)]
+    actor_role: Option<String>,
+    action: String,
+    resource_type: String,
+    #[serde(default)]
+    resource_id: Option<String>,
+    #[serde(default)]
+    diff: Option<Json>,
+    hash: String,
+    #[serde(default)]
+    prev_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditVerifyResult {
+    ok: bool,
+    checked: u64,
+    #[serde(default)]
+    broken_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AcmeStatusView {
+    enabled: bool,
+    #[serde(default)]
+    has_cert: Option<bool>,
+    #[serde(default)]
+    http01_challenges: Option<usize>,
+    #[serde(default)]
+    tls_alpn01_challenges: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -966,6 +1233,62 @@ impl Client {
             .into());
         }
         Ok(())
+    }
+
+    async fn put<B: Serialize, T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let url = format!("{}{}", self.base, path);
+        let resp = self
+            .http
+            .put(&url)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("PUT {url}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(ApiError {
+                method: "PUT",
+                url,
+                status,
+                message: parse_error_envelope(&text),
+                body: text,
+            }
+            .into());
+        }
+        serde_json::from_str(&text).with_context(|| format!("decoding response from {url}"))
+    }
+
+    async fn patch_json<B: Serialize, T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let url = format!("{}{}", self.base, path);
+        let resp = self
+            .http
+            .patch(&url)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("PATCH {url}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(ApiError {
+                method: "PATCH",
+                url,
+                status,
+                message: parse_error_envelope(&text),
+                body: text,
+            }
+            .into());
+        }
+        serde_json::from_str(&text).with_context(|| format!("decoding response from {url}"))
     }
 }
 
@@ -1341,6 +1664,84 @@ async fn cmd_services_delete(client: &Client, ident: &str) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_services_update(
+    client: &Client,
+    ident: &str,
+    name: String,
+    url: String,
+    retries: u32,
+    connect_timeout_ms: u64,
+    lb_strategy: Option<String>,
+    fmt: OutputFormat,
+) -> Result<()> {
+    let svc = resolve_service(client, ident).await?;
+    let mut body = serde_json::json!({
+        "name": name, "url": url,
+        "retries": retries, "connect_timeout_ms": connect_timeout_ms,
+    });
+    if let Some(lb) = lb_strategy {
+        body["lb_strategy"] = Json::String(lb);
+    }
+    let updated: Service = client.put(&format!("/services/{}", svc.id), &body).await?;
+    if fmt == OutputFormat::Table {
+        println!(
+            "{} updated service {} ({})",
+            green("✓"),
+            updated.name,
+            fmt_id(&updated.id)
+        );
+    } else {
+        emit(&updated, fmt)?;
+    }
+    Ok(())
+}
+
+async fn cmd_services_patch(
+    client: &Client,
+    ident: &str,
+    name: Option<String>,
+    url: Option<String>,
+    retries: Option<u32>,
+    connect_timeout_ms: Option<u64>,
+    lb_strategy: Option<String>,
+    fmt: OutputFormat,
+) -> Result<()> {
+    let svc = resolve_service(client, ident).await?;
+    let mut body = serde_json::Map::new();
+    if let Some(v) = name {
+        body.insert("name".into(), Json::String(v));
+    }
+    if let Some(v) = url {
+        body.insert("url".into(), Json::String(v));
+    }
+    if let Some(v) = retries {
+        body.insert("retries".into(), Json::from(v));
+    }
+    if let Some(v) = connect_timeout_ms {
+        body.insert("connect_timeout_ms".into(), Json::from(v));
+    }
+    if let Some(v) = lb_strategy {
+        body.insert("lb_strategy".into(), Json::String(v));
+    }
+    if body.is_empty() {
+        bail!("no fields supplied — nothing to patch");
+    }
+    let updated: Service = client
+        .patch_json(&format!("/services/{}", svc.id), &Json::Object(body))
+        .await?;
+    if fmt == OutputFormat::Table {
+        println!(
+            "{} patched service {} ({})",
+            green("✓"),
+            updated.name,
+            fmt_id(&updated.id)
+        );
+    } else {
+        emit(&updated, fmt)?;
+    }
+    Ok(())
+}
+
 async fn cmd_routes_list(client: &Client, fmt: OutputFormat) -> Result<()> {
     let routes: Vec<Route> = client.get("/routes").await?;
     if fmt != OutputFormat::Table {
@@ -1399,6 +1800,86 @@ async fn cmd_routes_create(
         );
     } else {
         emit(&route, fmt)?;
+    }
+    Ok(())
+}
+
+async fn cmd_routes_get(client: &Client, id: &str, fmt: OutputFormat) -> Result<()> {
+    let uuid = Uuid::parse_str(id).context("route id must be a UUID")?;
+    let route: Route = client.get(&format!("/routes/{uuid}")).await?;
+    emit(&route, fmt)
+}
+
+async fn cmd_routes_update(
+    client: &Client,
+    id: &str,
+    service: String,
+    paths: Vec<String>,
+    methods: Vec<String>,
+    strip_path: bool,
+    fmt: OutputFormat,
+) -> Result<()> {
+    let uuid = Uuid::parse_str(id).context("route id must be a UUID")?;
+    let svc = resolve_service(client, &service).await?;
+    let body = serde_json::json!({
+        "service_id": svc.id,
+        "paths": paths,
+        "methods": methods,
+        "strip_path": strip_path,
+    });
+    let updated: Route = client.put(&format!("/routes/{uuid}"), &body).await?;
+    if fmt == OutputFormat::Table {
+        println!(
+            "{} updated route {} (paths: {})",
+            green("✓"),
+            fmt_id(&updated.id),
+            updated.paths.join(", ")
+        );
+    } else {
+        emit(&updated, fmt)?;
+    }
+    Ok(())
+}
+
+async fn cmd_routes_patch(
+    client: &Client,
+    id: &str,
+    service: Option<String>,
+    paths: Option<Vec<String>>,
+    methods: Option<Vec<String>>,
+    strip_path: Option<bool>,
+    fmt: OutputFormat,
+) -> Result<()> {
+    let uuid = Uuid::parse_str(id).context("route id must be a UUID")?;
+    let mut body = serde_json::Map::new();
+    if let Some(svc_name) = service {
+        let svc = resolve_service(client, &svc_name).await?;
+        body.insert("service_id".into(), Json::String(svc.id.to_string()));
+    }
+    if let Some(p) = paths {
+        body.insert("paths".into(), serde_json::to_value(p)?);
+    }
+    if let Some(m) = methods {
+        body.insert("methods".into(), serde_json::to_value(m)?);
+    }
+    if let Some(sp) = strip_path {
+        body.insert("strip_path".into(), Json::Bool(sp));
+    }
+    if body.is_empty() {
+        bail!("no fields supplied — nothing to patch");
+    }
+    let updated: Route = client
+        .patch_json(&format!("/routes/{uuid}"), &Json::Object(body))
+        .await?;
+    if fmt == OutputFormat::Table {
+        println!(
+            "{} patched route {} (paths: {})",
+            green("✓"),
+            fmt_id(&updated.id),
+            updated.paths.join(", ")
+        );
+    } else {
+        emit(&updated, fmt)?;
     }
     Ok(())
 }
@@ -2260,6 +2741,506 @@ async fn cmd_reload(client: &Client) -> Result<()> {
     if !v.is_null() {
         println!("{}", dim(&serde_json::to_string_pretty(&v)?));
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tokens
+// ---------------------------------------------------------------------------
+
+async fn cmd_tokens_list(client: &Client, fmt: OutputFormat) -> Result<()> {
+    let tokens: Vec<AdminTokenView> = client.get("/tokens").await?;
+    if fmt != OutputFormat::Table {
+        return emit(&tokens, fmt);
+    }
+    let rows: Vec<Vec<String>> = tokens
+        .iter()
+        .map(|t| {
+            vec![
+                fmt_id(&t.id),
+                t.name.clone(),
+                t.role.clone(),
+                t.created_at.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string(),
+                t.expires_at
+                    .map(|e| e.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "never".into()),
+                t.last_used_at
+                    .map(|u| u.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "-".into()),
+            ]
+        })
+        .collect();
+    print_table(
+        &["ID", "NAME", "ROLE", "CREATED", "EXPIRES", "LAST_USED"],
+        &rows,
+    );
+    Ok(())
+}
+
+async fn cmd_tokens_create(
+    client: &Client,
+    name: String,
+    role: String,
+    expires_in_days: Option<u32>,
+    fmt: OutputFormat,
+) -> Result<()> {
+    let mut body = serde_json::json!({ "name": name, "role": role });
+    if let Some(d) = expires_in_days {
+        body["expires_in_days"] = Json::from(d);
+    }
+    let tok: AdminTokenView = client.post("/tokens", &body).await?;
+    if fmt == OutputFormat::Table {
+        println!(
+            "{} created token {} ({}) role={}",
+            green("✓"),
+            tok.name,
+            fmt_id(&tok.id),
+            tok.role
+        );
+        if let Some(raw) = &tok.token {
+            println!("{} {}", bold("token:"), raw);
+            println!(
+                "{}",
+                dim("  (this is the only time the raw token is shown)")
+            );
+        }
+    } else {
+        emit(&tok, fmt)?;
+    }
+    Ok(())
+}
+
+async fn cmd_tokens_update(
+    client: &Client,
+    ident: &str,
+    name: Option<String>,
+    role: Option<String>,
+    fmt: OutputFormat,
+) -> Result<()> {
+    let tokens: Vec<AdminTokenView> = client.get("/tokens").await?;
+    let tok = resolve_by_name_or_id(&tokens, ident, |t| &t.name, |t| &t.id)
+        .ok_or_else(|| anyhow!("no token matched '{ident}'"))?;
+    let mut body = serde_json::Map::new();
+    if let Some(n) = name {
+        body.insert("name".into(), Json::String(n));
+    }
+    if let Some(r) = role {
+        body.insert("role".into(), Json::String(r));
+    }
+    if body.is_empty() {
+        bail!("no fields supplied — nothing to update");
+    }
+    let updated: AdminTokenView = client
+        .put(&format!("/tokens/{}", tok.id), &Json::Object(body))
+        .await?;
+    if fmt == OutputFormat::Table {
+        println!(
+            "{} updated token {} ({})",
+            green("✓"),
+            updated.name,
+            fmt_id(&updated.id)
+        );
+    } else {
+        emit(&updated, fmt)?;
+    }
+    Ok(())
+}
+
+async fn cmd_tokens_delete(client: &Client, ident: &str) -> Result<()> {
+    let tokens: Vec<AdminTokenView> = client.get("/tokens").await?;
+    let tok = resolve_by_name_or_id(&tokens, ident, |t| &t.name, |t| &t.id)
+        .ok_or_else(|| anyhow!("no token matched '{ident}'"))?;
+    client.delete(&format!("/tokens/{}", tok.id)).await?;
+    println!(
+        "{} deleted token {} ({})",
+        green("✓"),
+        tok.name,
+        fmt_id(&tok.id)
+    );
+    Ok(())
+}
+
+fn resolve_by_name_or_id<'a, T>(
+    items: &'a [T],
+    ident: &str,
+    name_fn: impl Fn(&T) -> &String,
+    id_fn: impl Fn(&T) -> &Uuid,
+) -> Option<&'a T> {
+    if let Ok(uuid) = Uuid::parse_str(ident) {
+        if let Some(it) = items.iter().find(|i| *id_fn(i) == uuid) {
+            return Some(it);
+        }
+    }
+    if let Some(it) = items.iter().find(|i| name_fn(i) == ident) {
+        return Some(it);
+    }
+    items
+        .iter()
+        .find(|i| id_fn(i).to_string().starts_with(ident))
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------------------
+
+async fn cmd_audit_list(
+    client: &Client,
+    action: Option<String>,
+    resource_type: Option<String>,
+    limit: u32,
+    fmt: OutputFormat,
+) -> Result<()> {
+    let mut qs = vec![format!("limit={limit}")];
+    if let Some(a) = &action {
+        qs.push(format!("action={a}"));
+    }
+    if let Some(rt) = &resource_type {
+        qs.push(format!("resource_type={rt}"));
+    }
+    let path = format!("/audit?{}", qs.join("&"));
+    let entries: Vec<AuditEntry> = client.get(&path).await?;
+    if fmt != OutputFormat::Table {
+        return emit(&entries, fmt);
+    }
+    let rows: Vec<Vec<String>> = entries
+        .iter()
+        .map(|e| {
+            vec![
+                e.id.to_string(),
+                e.ts.with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string(),
+                e.actor_name.clone().unwrap_or_default(),
+                e.action.clone(),
+                e.resource_type.clone(),
+                e.resource_id.clone().unwrap_or_default(),
+            ]
+        })
+        .collect();
+    print_table(
+        &["ID", "TIMESTAMP", "ACTOR", "ACTION", "TYPE", "RESOURCE_ID"],
+        &rows,
+    );
+    Ok(())
+}
+
+async fn cmd_audit_verify(client: &Client, fmt: OutputFormat) -> Result<()> {
+    let result: AuditVerifyResult = client.get("/audit/verify").await?;
+    if fmt != OutputFormat::Table {
+        return emit(&result, fmt);
+    }
+    if result.ok {
+        println!(
+            "{} audit chain intact ({} entries verified)",
+            green("✓"),
+            result.checked
+        );
+    } else {
+        println!(
+            "{} audit chain broken at entry {}",
+            red("✗"),
+            result.broken_at.unwrap_or(0)
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Circuit breakers
+// ---------------------------------------------------------------------------
+
+async fn cmd_circuit_breakers_list(client: &Client, fmt: OutputFormat) -> Result<()> {
+    let cbs: Vec<ServiceHealth> = client.get("/circuit-breakers").await?;
+    if fmt != OutputFormat::Table {
+        return emit(&cbs, fmt);
+    }
+    let services: Vec<Service> = client.get("/services").await.unwrap_or_default();
+    let svc_name = |id: &Uuid| {
+        services
+            .iter()
+            .find(|s| s.id == *id)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| fmt_id(id))
+    };
+    let rows: Vec<Vec<String>> = cbs
+        .iter()
+        .map(|cb| {
+            vec![
+                svc_name(&cb.service_id),
+                cb.status.clone(),
+                cb.circuit.clone(),
+                cb.consecutive_failures.to_string(),
+                cb.last_error.clone().unwrap_or_else(|| "-".into()),
+            ]
+        })
+        .collect();
+    print_table(&["SERVICE", "STATUS", "CIRCUIT", "FAILS", "LAST_ERROR"], &rows);
+    Ok(())
+}
+
+async fn cmd_circuit_breakers_reset(client: &Client, service: &str) -> Result<()> {
+    let svc = resolve_service(client, service).await?;
+    client
+        .post_empty(&format!("/circuit-breakers/{}/reset", svc.id))
+        .await?;
+    println!(
+        "{} reset circuit breaker for {} ({})",
+        green("✓"),
+        svc.name,
+        fmt_id(&svc.id)
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Quota / Upstreams / Metrics
+// ---------------------------------------------------------------------------
+
+async fn cmd_quota(client: &Client, fmt: OutputFormat) -> Result<()> {
+    let q: Json = client.get("/quota").await?;
+    if fmt != OutputFormat::Table {
+        return emit(&q, fmt);
+    }
+    println!("{}", serde_json::to_string_pretty(&q)?);
+    Ok(())
+}
+
+async fn cmd_upstreams(client: &Client, fmt: OutputFormat) -> Result<()> {
+    let u: Json = client.get("/upstreams").await?;
+    if fmt != OutputFormat::Table {
+        return emit(&u, fmt);
+    }
+    let total = u.get("total_targets").and_then(|v| v.as_u64()).unwrap_or(0);
+    let healthy = u
+        .get("healthy_targets")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let unhealthy = u
+        .get("unhealthy_targets")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    println!(
+        "total: {}  healthy: {}  unhealthy: {}",
+        bold(&total.to_string()),
+        green(&healthy.to_string()),
+        if unhealthy > 0 {
+            red(&unhealthy.to_string())
+        } else {
+            unhealthy.to_string()
+        }
+    );
+    if let Some(targets) = u.get("targets").and_then(|v| v.as_array()) {
+        let rows: Vec<Vec<String>> = targets
+            .iter()
+            .map(|t| {
+                vec![
+                    t.get("target_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s[..8].to_string())
+                        .unwrap_or_default(),
+                    t.get("service_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("-")
+                        .to_string(),
+                    t.get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("-")
+                        .to_string(),
+                    t.get("weight").and_then(|v| v.as_u64()).unwrap_or(1).to_string(),
+                    if t.get("healthy").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        green("yes")
+                    } else {
+                        red("no")
+                    },
+                ]
+            })
+            .collect();
+        if !rows.is_empty() {
+            print_table(&["ID", "SERVICE", "URL", "WEIGHT", "HEALTHY"], &rows);
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_metrics(client: &Client) -> Result<()> {
+    let text = client.get_text("/metrics").await?;
+    print!("{text}");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ACME
+// ---------------------------------------------------------------------------
+
+async fn cmd_acme_status(client: &Client, fmt: OutputFormat) -> Result<()> {
+    let st: AcmeStatusView = client.get("/acme/status").await?;
+    if fmt != OutputFormat::Table {
+        return emit(&st, fmt);
+    }
+    println!(
+        "enabled: {}  has_cert: {}  http01: {}  tls-alpn01: {}",
+        if st.enabled { green("yes") } else { dim("no") },
+        if st.has_cert.unwrap_or(false) {
+            green("yes")
+        } else {
+            dim("no")
+        },
+        st.http01_challenges.unwrap_or(0),
+        st.tls_alpn01_challenges.unwrap_or(0),
+    );
+    Ok(())
+}
+
+async fn cmd_acme_renew(client: &Client) -> Result<()> {
+    let v = client.post_empty("/acme/renew").await?;
+    println!("{} renewal triggered", green("✓"));
+    if !v.is_null() {
+        println!("{}", dim(&serde_json::to_string_pretty(&v)?));
+    }
+    Ok(())
+}
+
+async fn cmd_acme_revoke(client: &Client) -> Result<()> {
+    let v = client.post_empty("/acme/revoke").await?;
+    println!("{} revocation triggered", green("✓"));
+    if !v.is_null() {
+        println!("{}", dim(&serde_json::to_string_pretty(&v)?));
+    }
+    Ok(())
+}
+
+async fn cmd_acme_set_http01(
+    client: &Client,
+    token: String,
+    key_authorization: String,
+) -> Result<()> {
+    let body = serde_json::json!({ "token": token, "key_authorization": key_authorization });
+    let _: Json = client.post("/acme/http-01-challenges", &body).await?;
+    println!("{} set HTTP-01 challenge for token {}", green("✓"), token);
+    Ok(())
+}
+
+async fn cmd_acme_clear_http01(client: &Client, token: &str) -> Result<()> {
+    client
+        .delete(&format!("/acme/http-01-challenges/{token}"))
+        .await?;
+    println!("{} cleared HTTP-01 challenge for {}", green("✓"), token);
+    Ok(())
+}
+
+async fn cmd_acme_set_tls_alpn01(
+    client: &Client,
+    domain: String,
+    key_authorization: String,
+) -> Result<()> {
+    let body = serde_json::json!({ "domain": domain, "key_authorization": key_authorization });
+    let _: Json = client
+        .post("/acme/tls-alpn-01-challenges", &body)
+        .await?;
+    println!(
+        "{} set TLS-ALPN-01 challenge for {}",
+        green("✓"),
+        domain
+    );
+    Ok(())
+}
+
+async fn cmd_acme_clear_tls_alpn01(client: &Client, domain: &str) -> Result<()> {
+    client
+        .delete(&format!("/acme/tls-alpn-01-challenges/{domain}"))
+        .await?;
+    println!(
+        "{} cleared TLS-ALPN-01 challenge for {}",
+        green("✓"),
+        domain
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Debug / profiling
+// ---------------------------------------------------------------------------
+
+async fn cmd_debug(client: &Client, endpoint: &str, fmt: OutputFormat) -> Result<()> {
+    let data: Json = client.get(&format!("/debug/pprof/{endpoint}")).await?;
+    if fmt != OutputFormat::Table {
+        return emit(&data, fmt);
+    }
+    println!("{}", serde_json::to_string_pretty(&data)?);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Live config
+// ---------------------------------------------------------------------------
+
+async fn cmd_live_config_get(client: &Client, fmt: OutputFormat) -> Result<()> {
+    let data: Json = client.get("/admin/v1/config").await?;
+    if fmt != OutputFormat::Table {
+        return emit(&data, fmt);
+    }
+    println!("{}", serde_json::to_string_pretty(&data)?);
+    Ok(())
+}
+
+async fn cmd_live_config_set(
+    client: &Client,
+    path: &str,
+    value_str: &str,
+    fmt: OutputFormat,
+) -> Result<()> {
+    let value: Json =
+        serde_json::from_str(value_str).context("value must be valid JSON (e.g. '\"debug\"', '9000', 'true')")?;
+    let api_path = format!("/admin/v1/config/{}", path.replace('.', "/"));
+    let body = serde_json::json!({ "value": value });
+    let result: Json = client.patch_json(&api_path, &body).await?;
+    if fmt != OutputFormat::Table {
+        return emit(&result, fmt);
+    }
+    println!("{} config set {} = {}", green("✓"), path, value_str);
+    Ok(())
+}
+
+async fn cmd_live_config_lookup(client: &Client, tag: &str, fmt: OutputFormat) -> Result<()> {
+    let data: Json = client
+        .get(&format!("/admin/v1/config/@id/{tag}"))
+        .await?;
+    if fmt != OutputFormat::Table {
+        return emit(&data, fmt);
+    }
+    println!("{}", serde_json::to_string_pretty(&data)?);
+    Ok(())
+}
+
+async fn cmd_live_config_validate(client: &Client, body_str: &str, fmt: OutputFormat) -> Result<()> {
+    let body: Json = serde_json::from_str(body_str)
+        .context("body must be valid JSON")?;
+    let result: Json = client.post("/admin/v1/config/validate", &body).await?;
+    if fmt != OutputFormat::Table {
+        return emit(&result, fmt);
+    }
+    let valid = result
+        .get("valid")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if valid {
+        println!("{} configuration is valid", green("✓"));
+    } else {
+        let err = result
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        println!("{} configuration invalid: {}", red("✗"), err);
+    }
+    Ok(())
+}
+
+async fn cmd_live_config_history(client: &Client, fmt: OutputFormat) -> Result<()> {
+    let data: Json = client.get("/admin/v1/config/history").await?;
+    if fmt != OutputFormat::Table {
+        return emit(&data, fmt);
+    }
+    println!("{}", serde_json::to_string_pretty(&data)?);
     Ok(())
 }
 
@@ -4065,16 +5046,71 @@ async fn main() -> ExitCode {
                 )
                 .await
             }
+            ServicesCmd::Update {
+                ident,
+                name,
+                url,
+                retries,
+                connect_timeout_ms,
+                lb_strategy,
+            } => {
+                cmd_services_update(
+                    &client,
+                    &ident,
+                    name,
+                    url,
+                    retries,
+                    connect_timeout_ms,
+                    lb_strategy,
+                    output,
+                )
+                .await
+            }
+            ServicesCmd::Patch {
+                ident,
+                name,
+                url,
+                retries,
+                connect_timeout_ms,
+                lb_strategy,
+            } => {
+                cmd_services_patch(
+                    &client,
+                    &ident,
+                    name,
+                    url,
+                    retries,
+                    connect_timeout_ms,
+                    lb_strategy,
+                    output,
+                )
+                .await
+            }
             ServicesCmd::Delete { ident } => cmd_services_delete(&client, &ident).await,
         },
         Cmd::Routes(r) => match r {
             RoutesCmd::List => cmd_routes_list(&client, output).await,
+            RoutesCmd::Get { id } => cmd_routes_get(&client, &id, output).await,
             RoutesCmd::Create {
                 service,
                 paths,
                 methods,
                 strip_path,
             } => cmd_routes_create(&client, service, paths, methods, strip_path, output).await,
+            RoutesCmd::Update {
+                id,
+                service,
+                paths,
+                methods,
+                strip_path,
+            } => cmd_routes_update(&client, &id, service, paths, methods, strip_path, output).await,
+            RoutesCmd::Patch {
+                id,
+                service,
+                paths,
+                methods,
+                strip_path,
+            } => cmd_routes_patch(&client, &id, service, paths, methods, strip_path, output).await,
             RoutesCmd::Delete { id } => cmd_routes_delete(&client, &id).await,
         },
         Cmd::Plugins(p) => match p {
@@ -4152,6 +5188,75 @@ async fn main() -> ExitCode {
                 weight,
             } => cmd_targets_add(&client, service, url, weight, output).await,
             TargetsCmd::Delete { id } => cmd_targets_delete(&client, &id).await,
+        },
+        Cmd::Tokens(t) => match t {
+            TokensCmd::List => cmd_tokens_list(&client, output).await,
+            TokensCmd::Create {
+                name,
+                role,
+                expires_in_days,
+            } => cmd_tokens_create(&client, name, role, expires_in_days, output).await,
+            TokensCmd::Update { ident, name, role } => {
+                cmd_tokens_update(&client, &ident, name, role, output).await
+            }
+            TokensCmd::Delete { ident } => cmd_tokens_delete(&client, &ident).await,
+        },
+        Cmd::Audit(a) => match a {
+            AuditCmd::List {
+                action,
+                resource_type,
+                limit,
+            } => cmd_audit_list(&client, action, resource_type, limit, output).await,
+            AuditCmd::Verify => cmd_audit_verify(&client, output).await,
+        },
+        Cmd::CircuitBreakers(cb) => match cb {
+            CircuitBreakersCmd::List => cmd_circuit_breakers_list(&client, output).await,
+            CircuitBreakersCmd::Reset { service } => {
+                cmd_circuit_breakers_reset(&client, &service).await
+            }
+        },
+        Cmd::Quota => cmd_quota(&client, output).await,
+        Cmd::Upstreams => cmd_upstreams(&client, output).await,
+        Cmd::Metrics => cmd_metrics(&client).await,
+        Cmd::Acme(a) => match a {
+            AcmeCmd::Status => cmd_acme_status(&client, output).await,
+            AcmeCmd::Renew => cmd_acme_renew(&client).await,
+            AcmeCmd::Revoke => cmd_acme_revoke(&client).await,
+            AcmeCmd::SetHttp01 {
+                token,
+                key_authorization,
+            } => cmd_acme_set_http01(&client, token, key_authorization).await,
+            AcmeCmd::ClearHttp01 { token } => cmd_acme_clear_http01(&client, &token).await,
+            AcmeCmd::SetTlsAlpn01 {
+                domain,
+                key_authorization,
+            } => cmd_acme_set_tls_alpn01(&client, domain, key_authorization).await,
+            AcmeCmd::ClearTlsAlpn01 { domain } => {
+                cmd_acme_clear_tls_alpn01(&client, &domain).await
+            }
+        },
+        Cmd::Debug(d) => {
+            let endpoint = match d {
+                DebugCmd::Heap => "heap",
+                DebugCmd::Tasks => "tasks",
+                DebugCmd::Threads => "threads",
+                DebugCmd::Uptime => "uptime",
+                DebugCmd::Stats => "stats",
+            };
+            cmd_debug(&client, endpoint, output).await
+        }
+        Cmd::LiveConfig(lc) => match lc {
+            LiveConfigCmd::Get => cmd_live_config_get(&client, output).await,
+            LiveConfigCmd::Set { path, value } => {
+                cmd_live_config_set(&client, &path, &value, output).await
+            }
+            LiveConfigCmd::Validate { body } => {
+                cmd_live_config_validate(&client, &body, output).await
+            }
+            LiveConfigCmd::History => cmd_live_config_history(&client, output).await,
+            LiveConfigCmd::Lookup { tag } => {
+                cmd_live_config_lookup(&client, &tag, output).await
+            }
         },
         Cmd::Health => cmd_health(&client, output).await,
         Cmd::Reload => cmd_reload(&client).await,

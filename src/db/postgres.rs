@@ -146,10 +146,13 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_service(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("UPDATE services SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE services SET is_deleted = TRUE, name = name || '__deleted_' || id \
+             WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -407,10 +410,13 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_consumer(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("UPDATE consumers SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE consumers SET is_deleted = TRUE, username = username || '__deleted_' || id \
+             WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -567,10 +573,13 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_admin_token(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("UPDATE admin_tokens SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE admin_tokens SET is_deleted = TRUE, token_hash = token_hash || '__deleted_' || id \
+             WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
