@@ -1008,19 +1008,40 @@ async fn apply_remote_event(
 }
 
 fn print_banner() {
-    use std::io::IsTerminal;
+    use std::io::{IsTerminal, Write};
     let is_tty = std::io::stderr().is_terminal();
-    // b = bold white, r = bold + brand red, z = reset
-    let (b, r, z) = if is_tty {
-        ("\x1b[1m", "\x1b[1;38;2;198;45;49m", "\x1b[0m")
-    } else {
-        ("", "", "")
-    };
-    eprintln!("\
-\n{b} ██       ██    ██ ███    ██ ██   ██ {r}██   ██{z}\
-\n{b} ██        ██  ██  ████   ██  ██ ██  {r} ██ ██{z}\
-\n{b} ██         ████   ██ ██  ██   ███   {r}  ███{z}\
-\n{b} ██          ██    ██  ██ ██  ██ ██  {r} ██ ██{z}\
-\n{b} ███████    ██    ██   ████ ██   ██ {r}██   ██{z}\
-\n");
+    if !is_tty {
+        eprintln!("\n  L Y N X X\n");
+        return;
+    }
+    const ROWS: [&str; 7] = [
+        "##       ##    ## ##    ## ##     ## ##     ## ",
+        "##        ##  ##  ###   ##  ##   ##   ##   ##  ",
+        "##         ####   ####  ##   ## ##     ## ##   ",
+        "##          ##    ## ## ##    ###       ###    ",
+        "##          ##    ##  ####   ## ##     ## ##   ",
+        "##          ##    ##   ###  ##   ##   ##   ##  ",
+        "########    ##    ##    ## ##     ## ##     ## ",
+    ];
+    let fg = "\x1b[97;1m";
+    let bg = "\x1b[38;5;236m";
+    let red = "\x1b[1;38;2;198;45;49m";
+    let reset = "\x1b[0m";
+    let mut buf = String::with_capacity(2048);
+    buf.push('\n');
+    for row in &ROWS {
+        buf.push_str("  ");
+        for (i, ch) in row.chars().enumerate() {
+            if ch == '#' {
+                buf.push_str(if i >= 37 { red } else { fg });
+            } else {
+                buf.push_str(bg);
+            }
+            buf.push('\u{2588}');
+        }
+        buf.push_str(reset);
+        buf.push('\n');
+    }
+    buf.push('\n');
+    let _ = std::io::stderr().write_all(buf.as_bytes());
 }

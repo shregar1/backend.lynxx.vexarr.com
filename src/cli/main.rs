@@ -1261,18 +1261,40 @@ async fn cmd_status(client: &Client, fmt: OutputFormat) -> Result<()> {
 }
 
 fn print_banner() {
-    let (b, r, z) = if color_enabled_stderr() {
-        ("\x1b[1m", "\x1b[1;38;2;198;45;49m", "\x1b[0m")
-    } else {
-        ("", "", "")
-    };
-    eprintln!("\
-\n{b} ██       ██    ██ ███    ██ ██   ██ {r}██   ██{z}\
-\n{b} ██        ██  ██  ████   ██  ██ ██  {r} ██ ██{z}\
-\n{b} ██         ████   ██ ██  ██   ███   {r}  ███{z}\
-\n{b} ██          ██    ██  ██ ██  ██ ██  {r} ██ ██{z}\
-\n{b} ███████    ██    ██   ████ ██   ██ {r}██   ██{z}\
-\n");
+    if !color_enabled_stderr() {
+        eprintln!("\n  L Y N X X\n");
+        return;
+    }
+    const ROWS: [&str; 7] = [
+        "##       ##    ## ##    ## ##     ## ##     ## ",
+        "##        ##  ##  ###   ##  ##   ##   ##   ##  ",
+        "##         ####   ####  ##   ## ##     ## ##   ",
+        "##          ##    ## ## ##    ###       ###    ",
+        "##          ##    ##  ####   ## ##     ## ##   ",
+        "##          ##    ##   ###  ##   ##   ##   ##  ",
+        "########    ##    ##    ## ##     ## ##     ## ",
+    ];
+    let fg = "\x1b[97;1m";
+    let bg = "\x1b[38;5;236m";
+    let red = "\x1b[1;38;2;198;45;49m";
+    let reset = "\x1b[0m";
+    let mut buf = String::with_capacity(2048);
+    buf.push('\n');
+    for row in &ROWS {
+        buf.push_str("  ");
+        for (i, ch) in row.chars().enumerate() {
+            if ch == '#' {
+                buf.push_str(if i >= 37 { red } else { fg });
+            } else {
+                buf.push_str(bg);
+            }
+            buf.push('\u{2588}');
+        }
+        buf.push_str(reset);
+        buf.push('\n');
+    }
+    buf.push('\n');
+    eprint!("{buf}");
 }
 
 fn humanize_secs(s: i64) -> String {
