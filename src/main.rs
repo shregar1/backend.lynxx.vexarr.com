@@ -246,6 +246,8 @@ async fn async_main() -> anyhow::Result<()> {
         }
     };
 
+    print_banner();
+
     tracing::info!(
         proxy_port = config.gateway.proxy_port,
         admin_port = config.gateway.admin_port,
@@ -1003,4 +1005,22 @@ async fn apply_remote_event(
         }
     }
     Ok(())
+}
+
+fn print_banner() {
+    use std::io::IsTerminal;
+    let is_tty = std::io::stderr().is_terminal();
+    // b = bold white, r = bold + brand red, z = reset
+    let (b, r, z) = if is_tty {
+        ("\x1b[1m", "\x1b[1;38;2;198;45;49m", "\x1b[0m")
+    } else {
+        ("", "", "")
+    };
+    eprintln!("\
+\n{b} ██       ██    ██ ███    ██ ██   ██ {r}██   ██{z}\
+\n{b} ██        ██  ██  ████   ██  ██ ██  {r} ██ ██{z}\
+\n{b} ██         ████   ██ ██  ██   ███   {r}  ███{z}\
+\n{b} ██          ██    ██  ██ ██  ██ ██  {r} ██ ██{z}\
+\n{b} ███████    ██    ██   ████ ██   ██ {r}██   ██{z}\
+\n");
 }

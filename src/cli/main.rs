@@ -1253,8 +1253,26 @@ async fn cmd_ping(client: &Client) -> Result<()> {
 }
 
 async fn cmd_status(client: &Client, fmt: OutputFormat) -> Result<()> {
+    if fmt == OutputFormat::Table {
+        print_banner();
+    }
     let s: StatusResponse = client.get("/status").await?;
     emit(&s, fmt)
+}
+
+fn print_banner() {
+    let (b, r, z) = if color_enabled_stderr() {
+        ("\x1b[1m", "\x1b[1;38;2;198;45;49m", "\x1b[0m")
+    } else {
+        ("", "", "")
+    };
+    eprintln!("\
+\n{b} ██       ██    ██ ███    ██ ██   ██ {r}██   ██{z}\
+\n{b} ██        ██  ██  ████   ██  ██ ██  {r} ██ ██{z}\
+\n{b} ██         ████   ██ ██  ██   ███   {r}  ███{z}\
+\n{b} ██          ██    ██  ██ ██  ██ ██  {r} ██ ██{z}\
+\n{b} ███████    ██    ██   ████ ██   ██ {r}██   ██{z}\
+\n");
 }
 
 fn humanize_secs(s: i64) -> String {
