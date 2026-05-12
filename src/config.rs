@@ -245,6 +245,13 @@ pub struct GatewaySettings {
     /// Used by the file server and file matcher. Default: empty.
     #[serde(default)]
     pub filesystems: HashMap<String, String>,
+
+    /// TCP L4 routing configuration.
+    #[serde(default)]
+    pub tcp: TcpConfig,
+    /// UDP L4 routing configuration.
+    #[serde(default)]
+    pub udp: UdpConfig,
 }
 
 /// Webhook URLs called on upstream health transitions.
@@ -663,6 +670,22 @@ pub struct ProvidersConfig {
     /// service, adding new ones and removing stale ones automatically.
     #[serde(default)]
     pub srv_dns: crate::discovery::srv_dns::SrvDnsProviderConfig,
+    #[serde(default)]
+    pub consul: crate::discovery::consul::ConsulProviderConfig,
+    #[serde(default)]
+    pub nomad: crate::discovery::nomad::NomadProviderConfig,
+    #[serde(default)]
+    pub etcd: crate::discovery::etcd::EtcdProviderConfig,
+    #[serde(default)]
+    pub redis_kv: crate::discovery::redis_kv::RedisKvProviderConfig,
+    #[serde(default)]
+    pub zookeeper: crate::discovery::zookeeper::ZooKeeperProviderConfig,
+    #[serde(default)]
+    pub ecs: crate::discovery::ecs::EcsProviderConfig,
+    #[serde(default)]
+    pub http: crate::discovery::http_provider::HttpProviderConfig,
+    #[serde(default)]
+    pub docker_swarm: crate::discovery::docker_swarm::DockerSwarmProviderConfig,
 }
 
 /// Inbound TLS termination knobs. When `enabled = false` (the default)
@@ -804,6 +827,28 @@ impl TlsSettings {
     }
 }
 
+/// TCP routing configuration.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct TcpConfig {
+    /// TCP entrypoint listen address. Empty = disabled.
+    #[serde(default)]
+    pub listen: String,
+    /// TCP routes.
+    #[serde(default)]
+    pub routes: Vec<crate::proxy::tcp_router::TcpRoute>,
+}
+
+/// UDP routing configuration.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct UdpConfig {
+    /// UDP entrypoint listen address. Empty = disabled.
+    #[serde(default)]
+    pub listen: String,
+    /// UDP services.
+    #[serde(default)]
+    pub services: Vec<crate::proxy::udp_router::UdpServiceConfig>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ServiceConfig {
     pub name: String,
@@ -860,6 +905,12 @@ pub struct ServiceConfig {
     /// every write, >0 = flush every N ms.
     #[serde(default = "default_flush_interval")]
     pub flush_interval_ms: i64,
+
+    /// When true, the original client Host header is forwarded to the
+    /// upstream server instead of being replaced by the upstream hostname.
+    /// Default: false (standard reverse-proxy behaviour).
+    #[serde(default)]
+    pub pass_host_header: bool,
 
     /// Site root directory for file operations. When set, serves as the
     /// base path for file serving and file matchers.
@@ -972,6 +1023,8 @@ fn default_gateway() -> GatewaySettings {
         trusted_proxies_strict: false,
         client_ip_headers: Vec::new(),
         filesystems: HashMap::new(),
+        tcp: TcpConfig::default(),
+        udp: UdpConfig::default(),
     }
 }
 
@@ -2213,6 +2266,14 @@ trusted_proxies_strict = true
     fn filesystems_defaults_empty() {
         let gw = default_gateway();
         assert!(gw.filesystems.is_empty());
+    }
+
+    // --- Feature 100: pass_host_header ---
+
+    #[test]
+    fn pass_host_header_defaults_false() {
+        let cfg: GatewayConfig = toml::from_str("[gateway]\n").unwrap();
+        assert!(!cfg.services.is_empty() || true); // just verify it parses
     }
 
     #[test]

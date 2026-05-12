@@ -378,6 +378,7 @@ pub async fn update_service(
         flush_interval_ms: existing.flush_interval_ms,
         stream_timeout_ms: existing.stream_timeout_ms,
         stream_close_delay_ms: existing.stream_close_delay_ms,
+        pass_host_header: existing.pass_host_header,
         created_at: existing.created_at,
         updated_at: now,
     };
@@ -775,6 +776,7 @@ pub async fn patch_service(
         flush_interval_ms: existing.flush_interval_ms,
         stream_timeout_ms: existing.stream_timeout_ms,
         stream_close_delay_ms: existing.stream_close_delay_ms,
+        pass_host_header: existing.pass_host_header,
         created_at: existing.created_at,
         updated_at: now,
     };

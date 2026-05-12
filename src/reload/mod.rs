@@ -208,6 +208,7 @@ async fn diff_services(
                         flush_interval_ms: cur.flush_interval_ms,
                         stream_timeout_ms: cur.stream_timeout_ms,
                         stream_close_delay_ms: cur.stream_close_delay_ms,
+                        pass_host_header: cur.pass_host_header,
                         created_at: cur.created_at,
                         updated_at: Utc::now(),
                     };

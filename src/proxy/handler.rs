@@ -566,6 +566,9 @@ pub async fn proxy_handler(
                 .cloned();
             let recorder_id = req.headers().get("x-lynxx-recorder-id").cloned();
 
+            // Feature 110: capture original Host before HOP_BY_HOP stripping.
+            let unix_original_host_hv = req.headers().get(axum::http::header::HOST).cloned();
+
             let (mut parts, body) = req.into_parts();
 
             let unix_uri: Uri = http_path
@@ -585,6 +588,14 @@ pub async fn proxy_handler(
                     parts.headers.remove(&name);
                 }
             }
+
+            // Feature 110: passHostHeader for unix socket upstreams.
+            if service.pass_host_header.unwrap_or(false) {
+                if let Some(hv) = unix_original_host_hv {
+                    parts.headers.insert(axum::http::header::HOST, hv);
+                }
+            }
+
             parts.version = axum::http::Version::HTTP_11;
 
             let unix_req = Request::from_parts(parts, body);
@@ -710,6 +721,10 @@ pub async fn proxy_handler(
     // request header in on_request and reads it back in on_response.
     let recorder_id = req.headers().get("x-lynxx-recorder-id").cloned();
 
+    // Feature 110: capture the original Host header before HOP_BY_HOP
+    // stripping so we can re-insert it when pass_host_header is enabled.
+    let original_host_hv = req.headers().get(axum::http::header::HOST).cloned();
+
     // Move parts out so we don't clone the HeaderMap. `req` is consumed.
     let (mut parts, body) = req.into_parts();
     parts.uri = upstream_uri;
@@ -729,6 +744,16 @@ pub async fn proxy_handler(
             parts.headers.remove(&name);
         }
     }
+
+    // Feature 110: passHostHeader — re-insert the original client Host header
+    // when the service opts in. By default the Host is stripped (standard
+    // reverse-proxy behaviour) and hyper sets it from the upstream URI.
+    if service.pass_host_header.unwrap_or(false) {
+        if let Some(hv) = original_host_hv {
+            parts.headers.insert(axum::http::header::HOST, hv);
+        }
+    }
+
     // Force HTTP/1.1 over the wire — the connector negotiates h2 via ALPN
     // for https. For http:// we use HTTP/1.1 which is what most
     // upstreams expect from a forward proxy.

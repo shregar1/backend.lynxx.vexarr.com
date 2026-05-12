@@ -18,5 +18,13 @@
 //! (`docker:my-app` etc.) so they're recognisable in the admin UI and
 //! distinguishable from operator-created entries.
 
+pub mod consul;
 pub mod docker;
+pub mod docker_swarm;
+pub mod ecs;
+pub mod etcd;
+pub mod http_provider;
+pub mod nomad;
+pub mod redis_kv;
 pub mod srv_dns;
+pub mod zookeeper;

@@ -40,6 +40,9 @@ pub enum LbStrategy {
     /// Hash the X-Forwarded-For client IP (as opposed to IpHash which uses
     /// the direct remote/socket IP).
     ClientIpHash,
+    /// Least-time: routes to the target with the lowest composite score of
+    /// response latency and active connections. Score = avg_response_us * (in_flight + 1).
+    LeastTime,
 }
 
 impl LbStrategy {
@@ -56,6 +59,7 @@ impl LbStrategy {
             "query-hash" | "query_hash" | "queryhash" => LbStrategy::QueryHash,
             "uri-hash" | "uri_hash" | "urihash" => LbStrategy::UriHash,
             "client-ip-hash" | "client_ip_hash" => LbStrategy::ClientIpHash,
+            "least-time" | "least_time" | "leasttime" => LbStrategy::LeastTime,
             _ => LbStrategy::RoundRobin,
         }
     }
@@ -98,6 +102,8 @@ pub struct TargetState {
     pub target: Target,
     pub in_flight: AtomicU64,
     pub healthy: AtomicBool,
+    /// Exponentially weighted moving average of response time in microseconds.
+    pub avg_response_us: AtomicU64,
 }
 
 impl TargetState {
@@ -106,7 +112,20 @@ impl TargetState {
             target,
             in_flight: AtomicU64::new(0),
             healthy: AtomicBool::new(true),
+            avg_response_us: AtomicU64::new(0),
         }
+    }
+
+    /// Update the EWMA response time with a new sample.
+    /// Uses alpha=0.25: new = old*0.75 + sample*0.25.
+    pub fn record_response_time(&self, micros: u64) {
+        let old = self.avg_response_us.load(Ordering::Relaxed);
+        let new = if old == 0 {
+            micros
+        } else {
+            (old * 3 + micros) / 4
+        };
+        self.avg_response_us.store(new, Ordering::Relaxed);
     }
 }
 
@@ -188,6 +207,7 @@ impl ServiceLoadBalancer {
                     | LbStrategy::LeastConn
                     | LbStrategy::RandomChoose
                     | LbStrategy::First
+                    | LbStrategy::LeastTime
             ) {
                 let zone_targets: Vec<_> = self
                     .targets
@@ -207,6 +227,9 @@ impl ServiceLoadBalancer {
                             self.pick_random_choose_from_subset(&zone_targets)
                         }
                         LbStrategy::First => Some(zone_targets[0].clone()),
+                        LbStrategy::LeastTime => {
+                            self.pick_least_time_from_subset(&zone_targets)
+                        }
                         _ => unreachable!(),
                     };
                 }
@@ -232,6 +255,7 @@ impl ServiceLoadBalancer {
             LbStrategy::ClientIpHash => {
                 self.pick_hrw(ctx.client_ip.unwrap_or("0.0.0.0"))
             }
+            LbStrategy::LeastTime => self.pick_least_time(),
         }
     }
 
@@ -382,6 +406,48 @@ impl ServiceLoadBalancer {
         let fa = a.in_flight.load(Ordering::Relaxed);
         let fb = b.in_flight.load(Ordering::Relaxed);
         Some(if fa <= fb { a } else { b }.clone())
+    }
+
+    /// Least-time: pick the healthy, enabled target with the lowest composite
+    /// score of `avg_response_us * (in_flight + 1)`. Combines latency
+    /// awareness with connection count for optimal routing.
+    fn pick_least_time(&self) -> Option<Arc<TargetState>> {
+        let mut best: Option<&Arc<TargetState>> = None;
+        let mut best_score = u64::MAX;
+        for s in &self.targets {
+            if !s.target.enabled || !s.healthy.load(Ordering::Relaxed) {
+                continue;
+            }
+            let avg = s.avg_response_us.load(Ordering::Relaxed);
+            let inflight = s.in_flight.load(Ordering::Relaxed);
+            // Use max(avg, 1) so that targets with no samples yet (avg=0)
+            // get a score equal to their in-flight count + 1, giving them
+            // a slight advantage to attract initial probes.
+            let score = avg.max(1).saturating_mul(inflight + 1);
+            if score < best_score {
+                best_score = score;
+                best = Some(s);
+            }
+        }
+        best.cloned()
+    }
+
+    fn pick_least_time_from_subset(
+        &self,
+        subset: &[&Arc<TargetState>],
+    ) -> Option<Arc<TargetState>> {
+        let mut best: Option<&Arc<TargetState>> = None;
+        let mut best_score = u64::MAX;
+        for s in subset {
+            let avg = s.avg_response_us.load(Ordering::Relaxed);
+            let inflight = s.in_flight.load(Ordering::Relaxed);
+            let score = avg.max(1).saturating_mul(inflight + 1);
+            if score < best_score {
+                best_score = score;
+                best = Some(s);
+            }
+        }
+        best.cloned()
     }
 
     /// Primary / failover: always pick the first healthy, enabled target in
@@ -759,6 +825,9 @@ mod tests {
         assert_eq!(LbStrategy::from_str("header_hash"), LbStrategy::HeaderHash);
         assert_eq!(LbStrategy::from_str("query-hash"), LbStrategy::QueryHash);
         assert_eq!(LbStrategy::from_str("query_hash"), LbStrategy::QueryHash);
+        assert_eq!(LbStrategy::from_str("least-time"), LbStrategy::LeastTime);
+        assert_eq!(LbStrategy::from_str("least_time"), LbStrategy::LeastTime);
+        assert_eq!(LbStrategy::from_str("leasttime"), LbStrategy::LeastTime);
         assert_eq!(LbStrategy::from_str("unknown-thing"), LbStrategy::RoundRobin);
     }
 
@@ -864,6 +933,96 @@ mod tests {
             seen.insert(t.target.url.clone());
         }
         assert!(seen.len() > 1, "client_ip_hash didn't spread: {:?}", seen);
+    }
+
+    // ── Feature 108: LeastTime ──
+
+    #[test]
+    fn least_time_picks_fastest_server() {
+        let targets = make_targets(3);
+        let lb = ServiceLoadBalancer::new(LbStrategy::LeastTime, targets);
+        // Simulate different response times.
+        lb.targets[0].record_response_time(5000); // 5ms
+        lb.targets[1].record_response_time(1000); // 1ms — fastest
+        lb.targets[2].record_response_time(8000); // 8ms
+        let ctx = default_ctx();
+        let picked = lb.pick(None, &ctx).unwrap();
+        assert_eq!(
+            picked.target.url, "http://host-1:8080",
+            "should pick the target with the lowest response time"
+        );
+    }
+
+    #[test]
+    fn least_time_picks_least_loaded_when_times_equal() {
+        let targets = make_targets(3);
+        let lb = ServiceLoadBalancer::new(LbStrategy::LeastTime, targets);
+        // Same response times, different in-flight counts.
+        for t in &lb.targets {
+            t.record_response_time(2000);
+        }
+        lb.targets[0].in_flight.store(10, Ordering::Relaxed);
+        lb.targets[1].in_flight.store(1, Ordering::Relaxed);
+        lb.targets[2].in_flight.store(5, Ordering::Relaxed);
+        let ctx = default_ctx();
+        let picked = lb.pick(None, &ctx).unwrap();
+        assert_eq!(
+            picked.target.url, "http://host-1:8080",
+            "with equal times, should pick the target with fewest in-flight"
+        );
+    }
+
+    #[test]
+    fn least_time_handles_all_unhealthy() {
+        let targets = make_targets(3);
+        let lb = ServiceLoadBalancer::new(LbStrategy::LeastTime, targets);
+        for t in &lb.targets {
+            t.healthy.store(false, Ordering::Relaxed);
+        }
+        assert!(lb.pick(None, &default_ctx()).is_none());
+    }
+
+    #[test]
+    fn ewma_updates_correctly() {
+        let targets = make_targets(1);
+        let lb = ServiceLoadBalancer::new(LbStrategy::LeastTime, targets);
+        let ts = &lb.targets[0];
+
+        // First sample initialises directly.
+        ts.record_response_time(1000);
+        assert_eq!(ts.avg_response_us.load(Ordering::Relaxed), 1000);
+
+        // Second sample: EWMA = 1000*0.75 + 2000*0.25 = 1250.
+        ts.record_response_time(2000);
+        assert_eq!(ts.avg_response_us.load(Ordering::Relaxed), 1250);
+
+        // Third sample: EWMA = 1250*0.75 + 4000*0.25 = 937 + 1000 = 1937.
+        ts.record_response_time(4000);
+        let avg = ts.avg_response_us.load(Ordering::Relaxed);
+        // Integer arithmetic: (1250*3 + 4000) / 4 = (3750+4000)/4 = 7750/4 = 1937.
+        assert_eq!(avg, 1937);
+    }
+
+    #[test]
+    fn least_time_zone_aware() {
+        let mut targets = make_targets(4);
+        targets[0].zone = Some("us-east-1a".to_string());
+        targets[1].zone = Some("us-east-1a".to_string());
+        targets[2].zone = Some("us-east-1b".to_string());
+        targets[3].zone = Some("us-east-1b".to_string());
+        let lb = ServiceLoadBalancer::new(LbStrategy::LeastTime, targets);
+        // Make target 1 faster than target 0 in zone-a.
+        lb.targets[0].record_response_time(5000);
+        lb.targets[1].record_response_time(1000);
+        lb.targets[2].record_response_time(100); // zone-b is fastest overall
+        lb.targets[3].record_response_time(100);
+        let ctx = default_ctx();
+        // Zone-aware should restrict to zone-a.
+        let picked = lb.pick(Some("us-east-1a"), &ctx).unwrap();
+        assert_eq!(
+            picked.target.url, "http://host-1:8080",
+            "zone-aware least-time should pick fastest in zone"
+        );
     }
 
     #[test]

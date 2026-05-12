@@ -231,6 +231,7 @@ impl<'a> Parser<'a> {
             request_buffer_size: 0,
             response_buffer_size: 0,
             flush_interval_ms: -1,
+            pass_host_header: false,
             root: String::new(),
         });
 

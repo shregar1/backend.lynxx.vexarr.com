@@ -1046,6 +1046,7 @@ fn row_to_service(row: sqlx::postgres::PgRow) -> Result<Service, GatewayError> {
         flush_interval_ms: row.try_get::<Option<i64>, _>("flush_interval_ms").ok().flatten(),
         stream_timeout_ms: row.try_get::<Option<i64>, _>("stream_timeout_ms").ok().flatten().map(|v| v as u64),
         stream_close_delay_ms: row.try_get::<Option<i64>, _>("stream_close_delay_ms").ok().flatten().map(|v| v as u64),
+        pass_host_header: row.try_get::<Option<bool>, _>("pass_host_header").ok().flatten(),
         created_at,
         updated_at,
     })

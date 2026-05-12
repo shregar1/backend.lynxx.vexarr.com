@@ -390,6 +390,7 @@ impl DockerProvider {
             flush_interval_ms: None,
             stream_timeout_ms: None,
             stream_close_delay_ms: None,
+            pass_host_header: None,
             created_at: now,
             updated_at: now,
         };

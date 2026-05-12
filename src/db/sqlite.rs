@@ -957,6 +957,7 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
                 flush_interval_ms: existing.flush_interval_ms,
                 stream_timeout_ms: existing.stream_timeout_ms,
                 stream_close_delay_ms: existing.stream_close_delay_ms,
+                pass_host_header: existing.pass_host_header,
                 created_at: existing.created_at,
                 updated_at: Utc::now(),
             };
@@ -1183,6 +1184,7 @@ fn row_to_service(row: sqlx::sqlite::SqliteRow) -> Result<Service, GatewayError>
         flush_interval_ms: row.try_get::<Option<i64>, _>("flush_interval_ms").ok().flatten(),
         stream_timeout_ms: row.try_get::<Option<i64>, _>("stream_timeout_ms").ok().flatten().map(|v| v as u64),
         stream_close_delay_ms: row.try_get::<Option<i64>, _>("stream_close_delay_ms").ok().flatten().map(|v| v as u64),
+        pass_host_header: row.try_get::<Option<bool>, _>("pass_host_header").ok().flatten(),
         created_at: parse_dt(&created_at)?,
         updated_at: parse_dt(&updated_at)?,
     })

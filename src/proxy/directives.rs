@@ -134,10 +134,7 @@ pub struct TryFilesConfig {
 
 /// Evaluate `try_files` — returns the first existing file's rewritten
 /// path, or the fallback entry.
-pub async fn try_files_rewrite(
-    config: &TryFilesConfig,
-    request_path: &str,
-) -> TryFilesResult {
+pub async fn try_files_rewrite(config: &TryFilesConfig, request_path: &str) -> TryFilesResult {
     let root = Path::new(&config.root);
     let clean_path = request_path.trim_start_matches('/');
 
@@ -156,9 +153,7 @@ pub async fn try_files_rewrite(
             .replace("{path.dir}", {
                 // Directory portion of the path.
                 let p = std::path::Path::new(clean_path);
-                p.parent()
-                    .map(|pp| pp.to_str().unwrap_or(""))
-                    .unwrap_or("")
+                p.parent().map(|pp| pp.to_str().unwrap_or("")).unwrap_or("")
             });
 
         let file_path = root.join(expanded.trim_start_matches('/'));
@@ -215,6 +210,17 @@ pub enum UriDirective {
     /// Replace the entire path with a new value. `{path}` placeholder
     /// expands to the original path.
     Rewrite { to: String },
+    /// Prepend a prefix to the path: `/users` → `/api/users` with prefix `/api`.
+    AddPrefix { prefix: String },
+    /// Regex-based path replacement with capture-group support.
+    /// E.g. pattern `^/api/(.*)` with replacement `/v2/$1`.
+    ReplacePathRegex {
+        pattern: String,
+        replacement: String,
+    },
+    /// Strip the first regex-matched prefix. Each entry is a regex pattern;
+    /// the first one that matches the start of the path wins.
+    StripPrefixRegex { patterns: Vec<String> },
 }
 
 /// Apply a sequence of URI directives to a path, returning the transformed path.
@@ -252,8 +258,46 @@ pub fn apply_uri_directives(directives: &[UriDirective], path: &str) -> String {
             UriDirective::PathEscape => {
                 url::form_urlencoded::byte_serialize(result.as_bytes()).collect()
             }
-            UriDirective::Rewrite { to } => {
-                to.replace("{path}", &result)
+            UriDirective::Rewrite { to } => to.replace("{path}", &result),
+            UriDirective::AddPrefix { prefix } => {
+                // Ensure no double slash between prefix and path.
+                if result.starts_with('/') && prefix.ends_with('/') {
+                    format!("{}{}", prefix, &result[1..])
+                } else if !result.starts_with('/') && !prefix.ends_with('/') {
+                    format!("{prefix}/{result}")
+                } else {
+                    format!("{prefix}{result}")
+                }
+            }
+            UriDirective::ReplacePathRegex {
+                pattern,
+                replacement,
+            } => {
+                match regex::Regex::new(pattern) {
+                    Ok(re) => re.replace_all(&result, replacement.as_str()).into_owned(),
+                    Err(_) => result, // invalid regex — pass through unchanged
+                }
+            }
+            UriDirective::StripPrefixRegex { patterns } => {
+                let mut stripped = result.clone();
+                for pat in patterns {
+                    if let Ok(re) = regex::Regex::new(pat) {
+                        if let Some(m) = re.find(&stripped) {
+                            if m.start() == 0 {
+                                let remainder = &stripped[m.end()..];
+                                stripped = if remainder.is_empty() {
+                                    "/".to_string()
+                                } else if !remainder.starts_with('/') {
+                                    format!("/{remainder}")
+                                } else {
+                                    remainder.to_string()
+                                };
+                                break; // first match wins
+                            }
+                        }
+                    }
+                }
+                stripped
             }
         };
     }
@@ -312,9 +356,7 @@ pub fn apply_intercept_rules(
 ) -> Option<InterceptAction> {
     for rule in rules {
         // Status match.
-        if !rule.match_status.is_empty()
-            && !rule.match_status.contains(&status.as_u16())
-        {
+        if !rule.match_status.is_empty() && !rule.match_status.contains(&status.as_u16()) {
             continue;
         }
         // Header match.
@@ -638,5 +680,106 @@ mod tests {
             TryFilesResult::StatusCode(code) => assert_eq!(code, 404),
             _ => panic!("expected StatusCode"),
         }
+    }
+
+    // ── AddPrefix ──
+
+    #[test]
+    fn add_prefix_simple() {
+        let directives = vec![UriDirective::AddPrefix {
+            prefix: "/api".to_string(),
+        }];
+        assert_eq!(apply_uri_directives(&directives, "/users"), "/api/users");
+    }
+
+    #[test]
+    fn add_prefix_no_double_slash() {
+        let directives = vec![UriDirective::AddPrefix {
+            prefix: "/api/".to_string(),
+        }];
+        // prefix ends with '/' and path starts with '/' — no double slash
+        assert_eq!(apply_uri_directives(&directives, "/users"), "/api/users");
+    }
+
+    #[test]
+    fn add_prefix_root_path() {
+        let directives = vec![UriDirective::AddPrefix {
+            prefix: "/v2".to_string(),
+        }];
+        assert_eq!(apply_uri_directives(&directives, "/"), "/v2/");
+    }
+
+    // ── ReplacePathRegex ──
+
+    #[test]
+    fn replace_path_regex_capture_group() {
+        let directives = vec![UriDirective::ReplacePathRegex {
+            pattern: r"^/api/(.*)".to_string(),
+            replacement: "/v2/$1".to_string(),
+        }];
+        assert_eq!(
+            apply_uri_directives(&directives, "/api/users/123"),
+            "/v2/users/123"
+        );
+    }
+
+    #[test]
+    fn replace_path_regex_no_match() {
+        let directives = vec![UriDirective::ReplacePathRegex {
+            pattern: r"^/api/(.*)".to_string(),
+            replacement: "/v2/$1".to_string(),
+        }];
+        assert_eq!(apply_uri_directives(&directives, "/web/page"), "/web/page");
+    }
+
+    #[test]
+    fn replace_path_regex_multiple_groups() {
+        let directives = vec![UriDirective::ReplacePathRegex {
+            pattern: r"^/(\w+)/(\w+)$".to_string(),
+            replacement: "/$2/$1".to_string(),
+        }];
+        assert_eq!(
+            apply_uri_directives(&directives, "/users/admin"),
+            "/admin/users"
+        );
+    }
+
+    // ── StripPrefixRegex ──
+
+    #[test]
+    fn strip_prefix_regex_first_match_wins() {
+        let directives = vec![UriDirective::StripPrefixRegex {
+            patterns: vec![r"/api/v\d+".to_string(), r"/api".to_string()],
+        }];
+        // The first pattern matches "/api/v1", stripping it
+        assert_eq!(apply_uri_directives(&directives, "/api/v1/users"), "/users");
+    }
+
+    #[test]
+    fn strip_prefix_regex_fallback_to_second() {
+        let directives = vec![UriDirective::StripPrefixRegex {
+            patterns: vec![r"/admin".to_string(), r"/api".to_string()],
+        }];
+        // First pattern doesn't match, second does
+        assert_eq!(apply_uri_directives(&directives, "/api/users"), "/users");
+    }
+
+    #[test]
+    fn strip_prefix_regex_no_match() {
+        let directives = vec![UriDirective::StripPrefixRegex {
+            patterns: vec![r"/admin".to_string()],
+        }];
+        assert_eq!(
+            apply_uri_directives(&directives, "/api/users"),
+            "/api/users"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_regex_entire_path() {
+        let directives = vec![UriDirective::StripPrefixRegex {
+            patterns: vec![r"/api".to_string()],
+        }];
+        assert_eq!(apply_uri_directives(&directives, "/api"), "/");
     }
 }

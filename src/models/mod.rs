@@ -63,6 +63,11 @@ pub struct Service {
     /// in-progress writes to the client finish.
     #[serde(default)]
     pub stream_close_delay_ms: Option<u64>,
+    /// When `true`, the proxy re-inserts the original client `Host` header
+    /// into the upstream request instead of letting hyper derive it from the
+    /// upstream URI. Useful for upstreams that perform virtual-host routing.
+    #[serde(default)]
+    pub pass_host_header: Option<bool>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -314,6 +319,7 @@ impl Service {
             flush_interval_ms: None,
             stream_timeout_ms: None,
             stream_close_delay_ms: None,
+            pass_host_header: None,
             created_at: now,
             updated_at: now,
         }

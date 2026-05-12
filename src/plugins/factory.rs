@@ -2,6 +2,11 @@ use crate::db::Repository;
 use crate::error::GatewayError;
 use crate::plugins::abort::AbortPlugin;
 use crate::plugins::acl::AclPlugin;
+use crate::plugins::buffering::BufferingPlugin;
+use crate::plugins::content_type::ContentTypePlugin;
+use crate::plugins::digest_auth::DigestAuthPlugin;
+use crate::plugins::inflight_req::InFlightReqPlugin;
+use crate::plugins::redirect_regex::RedirectRegexPlugin;
 use crate::plugins::anomaly_detector::AnomalyDetectorPlugin;
 use crate::plugins::client_cert_header::ClientCertHeaderPlugin;
 use crate::plugins::error_handler::ErrorHandlerPlugin;
@@ -133,6 +138,11 @@ pub fn build(
         "client-cert-header" => Arc::new(ClientCertHeaderPlugin::from_config(config)?),
         "response-filter" => Arc::new(ResponseFilterPlugin::from_config(config)?),
         "map-vars" => Arc::new(MapVarsPlugin::from_config(config)?),
+        "content-type" => Arc::new(ContentTypePlugin::from_config(config)?),
+        "digest-auth" => Arc::new(DigestAuthPlugin::from_config(config)?),
+        "inflight-req" => Arc::new(InFlightReqPlugin::from_config(config)?),
+        "redirect-regex" => Arc::new(RedirectRegexPlugin::from_config(config)?),
+        "buffering" => Arc::new(BufferingPlugin::from_config(config)?),
         other => {
             return Err(GatewayError::BadRequest(format!("unknown plugin: {other}")));
         }
