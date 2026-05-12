@@ -50,7 +50,7 @@ impl Repository for PostgresRepository {
                     document_root, index_file, spa_fallback, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     created_at, updated_at \
-             FROM services",
+             FROM services WHERE is_deleted = FALSE",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -64,7 +64,7 @@ impl Repository for PostgresRepository {
                     document_root, index_file, spa_fallback, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     created_at, updated_at \
-             FROM services WHERE id = $1",
+             FROM services WHERE id = $1 AND is_deleted = FALSE",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -79,7 +79,7 @@ impl Repository for PostgresRepository {
                     document_root, index_file, spa_fallback, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     created_at, updated_at \
-             FROM services WHERE name = $1",
+             FROM services WHERE name = $1 AND is_deleted = FALSE",
         )
         .bind(name)
         .fetch_optional(&self.pool)
@@ -123,7 +123,7 @@ impl Repository for PostgresRepository {
                                  document_root = $7, index_file = $8, spa_fallback = $9, \
                                  tls_verify = $10, tls_client_cert_path = $11, tls_client_key_path = $12, tls_ca_path = $13, \
                                  updated_at = $14 \
-             WHERE id = $15",
+             WHERE id = $15 AND is_deleted = FALSE",
         )
         .bind(&svc.name)
         .bind(&svc.url)
@@ -146,7 +146,7 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_service(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("DELETE FROM services WHERE id = $1")
+        let result = sqlx::query("UPDATE services SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -157,7 +157,7 @@ impl Repository for PostgresRepository {
 
     async fn list_targets(&self) -> Result<Vec<Target>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at FROM targets",
+            "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at FROM targets WHERE is_deleted = FALSE",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -170,7 +170,7 @@ impl Repository for PostgresRepository {
     ) -> Result<Vec<Target>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at \
-             FROM targets WHERE service_id = $1",
+             FROM targets WHERE service_id = $1 AND is_deleted = FALSE",
         )
         .bind(service_id)
         .fetch_all(&self.pool)
@@ -181,7 +181,7 @@ impl Repository for PostgresRepository {
     async fn get_target(&self, id: &Uuid) -> Result<Option<Target>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at \
-             FROM targets WHERE id = $1",
+             FROM targets WHERE id = $1 AND is_deleted = FALSE",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -209,7 +209,7 @@ impl Repository for PostgresRepository {
 
     async fn update_target(&self, id: &Uuid, target: &Target) -> Result<(), GatewayError> {
         sqlx::query(
-            "UPDATE targets SET url = $1, weight = $2, enabled = $3, zone = $4, updated_at = $5 WHERE id = $6",
+            "UPDATE targets SET url = $1, weight = $2, enabled = $3, zone = $4, updated_at = $5 WHERE id = $6 AND is_deleted = FALSE",
         )
         .bind(&target.url)
         .bind(target.weight as i64)
@@ -223,7 +223,7 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_target(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("DELETE FROM targets WHERE id = $1")
+        let result = sqlx::query("UPDATE targets SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -235,7 +235,7 @@ impl Repository for PostgresRepository {
     async fn list_routes(&self) -> Result<Vec<Route>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, service_id, paths, methods, hosts, strip_path, created_at, updated_at \
-             FROM routes",
+             FROM routes WHERE is_deleted = FALSE",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -246,7 +246,7 @@ impl Repository for PostgresRepository {
     async fn get_route(&self, id: &Uuid) -> Result<Option<Route>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, service_id, paths, methods, hosts, strip_path, created_at, updated_at \
-             FROM routes WHERE id = $1",
+             FROM routes WHERE id = $1 AND is_deleted = FALSE",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -290,7 +290,7 @@ impl Repository for PostgresRepository {
 
         sqlx::query(
             "UPDATE routes SET service_id = $1, paths = $2, methods = $3, hosts = $4, strip_path = $5, updated_at = $6 \
-             WHERE id = $7",
+             WHERE id = $7 AND is_deleted = FALSE",
         )
         .bind(route.service_id)
         .bind(paths)
@@ -305,7 +305,7 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_route(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("DELETE FROM routes WHERE id = $1")
+        let result = sqlx::query("UPDATE routes SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -316,7 +316,7 @@ impl Repository for PostgresRepository {
 
     async fn list_plugins(&self) -> Result<Vec<PluginInstance>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, name, service_id, route_id, enabled, config, created_at, updated_at FROM plugins",
+            "SELECT id, name, service_id, route_id, enabled, config, created_at, updated_at FROM plugins WHERE is_deleted = FALSE",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -327,7 +327,7 @@ impl Repository for PostgresRepository {
     async fn get_plugin(&self, id: &Uuid) -> Result<Option<PluginInstance>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, name, service_id, route_id, enabled, config, created_at, updated_at \
-             FROM plugins WHERE id = $1",
+             FROM plugins WHERE id = $1 AND is_deleted = FALSE",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -356,7 +356,7 @@ impl Repository for PostgresRepository {
     async fn update_plugin(&self, id: &Uuid, plugin: &PluginInstance) -> Result<(), GatewayError> {
         sqlx::query(
             "UPDATE plugins SET name = $1, service_id = $2, route_id = $3, enabled = $4, config = $5, updated_at = $6 \
-             WHERE id = $7",
+             WHERE id = $7 AND is_deleted = FALSE",
         )
         .bind(&plugin.name)
         .bind(plugin.service_id)
@@ -371,7 +371,7 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_plugin(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("DELETE FROM plugins WHERE id = $1")
+        let result = sqlx::query("UPDATE plugins SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -382,7 +382,7 @@ impl Repository for PostgresRepository {
 
     async fn list_consumers(&self) -> Result<Vec<Consumer>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, username, custom_id, api_key, created_at, updated_at FROM consumers",
+            "SELECT id, username, custom_id, api_key, created_at, updated_at FROM consumers WHERE is_deleted = FALSE",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -407,7 +407,7 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_consumer(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("DELETE FROM consumers WHERE id = $1")
+        let result = sqlx::query("UPDATE consumers SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -418,10 +418,10 @@ impl Repository for PostgresRepository {
 
     async fn is_empty(&self) -> Result<bool, GatewayError> {
         let total: i64 = sqlx::query_scalar(
-            "SELECT (SELECT COUNT(*) FROM services) \
-                  + (SELECT COUNT(*) FROM routes) \
-                  + (SELECT COUNT(*) FROM plugins) \
-                  + (SELECT COUNT(*) FROM consumers)",
+            "SELECT (SELECT COUNT(*) FROM services WHERE is_deleted = FALSE) \
+                  + (SELECT COUNT(*) FROM routes WHERE is_deleted = FALSE) \
+                  + (SELECT COUNT(*) FROM plugins WHERE is_deleted = FALSE) \
+                  + (SELECT COUNT(*) FROM consumers WHERE is_deleted = FALSE)",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -481,7 +481,7 @@ impl Repository for PostgresRepository {
     async fn list_admin_tokens(&self) -> Result<Vec<AdminToken>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, name, role, created_at, expires_at, last_used_at \
-             FROM admin_tokens ORDER BY created_at ASC",
+             FROM admin_tokens WHERE is_deleted = FALSE ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -494,7 +494,7 @@ impl Repository for PostgresRepository {
     ) -> Result<Option<AdminToken>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, name, role, created_at, expires_at, last_used_at \
-             FROM admin_tokens WHERE token_hash = $1",
+             FROM admin_tokens WHERE token_hash = $1 AND is_deleted = FALSE",
         )
         .bind(token_hash)
         .fetch_optional(&self.pool)
@@ -505,7 +505,7 @@ impl Repository for PostgresRepository {
     async fn get_admin_token(&self, id: &Uuid) -> Result<Option<AdminToken>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, name, role, created_at, expires_at, last_used_at \
-             FROM admin_tokens WHERE id = $1",
+             FROM admin_tokens WHERE id = $1 AND is_deleted = FALSE",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -537,7 +537,7 @@ impl Repository for PostgresRepository {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(
             "SELECT id, name, role, created_at, expires_at, last_used_at \
-             FROM admin_tokens WHERE id = $1",
+             FROM admin_tokens WHERE id = $1 AND is_deleted = FALSE",
         )
         .bind(id)
         .fetch_optional(&mut *tx)
@@ -567,7 +567,7 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_admin_token(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("DELETE FROM admin_tokens WHERE id = $1")
+        let result = sqlx::query("UPDATE admin_tokens SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -588,7 +588,7 @@ impl Repository for PostgresRepository {
     }
 
     async fn has_any_admin_token(&self) -> Result<bool, GatewayError> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_tokens")
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_tokens WHERE is_deleted = FALSE")
             .fetch_one(&self.pool)
             .await?;
         Ok(count > 0)
@@ -742,7 +742,7 @@ impl Repository for PostgresRepository {
         let limit = filter.effective_limit() as i64;
         let mut sql = String::from(
             "SELECT id, ts, method, path, status, duration_ms, service_id, route_id, consumer, bytes_request, bytes_response \
-             FROM recordings WHERE TRUE",
+             FROM recordings WHERE is_deleted = FALSE",
         );
         let mut idx = 1;
         if filter.since.is_some() {
@@ -797,7 +797,7 @@ impl Repository for PostgresRepository {
     ) -> Result<Option<RecordingIndexRow>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, ts, method, path, status, duration_ms, service_id, route_id, consumer, bytes_request, bytes_response \
-             FROM recordings WHERE id = $1",
+             FROM recordings WHERE id = $1 AND is_deleted = FALSE",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -806,7 +806,7 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_recording(&self, id: &str) -> Result<bool, GatewayError> {
-        let result = sqlx::query("DELETE FROM recordings WHERE id = $1")
+        let result = sqlx::query("UPDATE recordings SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -814,7 +814,7 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_recordings_before(&self, ts: DateTime<Utc>) -> Result<u64, GatewayError> {
-        let result = sqlx::query("DELETE FROM recordings WHERE ts < $1")
+        let result = sqlx::query("UPDATE recordings SET is_deleted = TRUE WHERE ts < $1 AND is_deleted = FALSE")
             .bind(ts)
             .execute(&self.pool)
             .await?;

@@ -56,7 +56,7 @@ impl Repository for SqliteRepository {
                     document_root, index_file, spa_fallback, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     created_at, updated_at \
-             FROM services",
+             FROM services WHERE is_deleted = 0",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -70,7 +70,7 @@ impl Repository for SqliteRepository {
                     document_root, index_file, spa_fallback, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     created_at, updated_at \
-             FROM services WHERE id = ?",
+             FROM services WHERE id = ? AND is_deleted = 0",
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
@@ -85,7 +85,7 @@ impl Repository for SqliteRepository {
                     document_root, index_file, spa_fallback, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     created_at, updated_at \
-             FROM services WHERE name = ?",
+             FROM services WHERE name = ? AND is_deleted = 0",
         )
         .bind(name)
         .fetch_optional(&self.pool)
@@ -129,7 +129,7 @@ impl Repository for SqliteRepository {
                                  document_root = ?, index_file = ?, spa_fallback = ?, \
                                  tls_verify = ?, tls_client_cert_path = ?, tls_client_key_path = ?, tls_ca_path = ?, \
                                  updated_at = ? \
-             WHERE id = ?",
+             WHERE id = ? AND is_deleted = 0",
         )
         .bind(&svc.name)
         .bind(&svc.url)
@@ -152,7 +152,7 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_service(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("DELETE FROM services WHERE id = ?")
+        let result = sqlx::query("UPDATE services SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
             .bind(id.to_string())
             .execute(&self.pool)
             .await?;
@@ -163,7 +163,7 @@ impl Repository for SqliteRepository {
 
     async fn list_targets(&self) -> Result<Vec<Target>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at FROM targets",
+            "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at FROM targets WHERE is_deleted = 0",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -176,7 +176,7 @@ impl Repository for SqliteRepository {
     ) -> Result<Vec<Target>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at \
-             FROM targets WHERE service_id = ?",
+             FROM targets WHERE service_id = ? AND is_deleted = 0",
         )
         .bind(service_id.to_string())
         .fetch_all(&self.pool)
@@ -187,7 +187,7 @@ impl Repository for SqliteRepository {
     async fn get_target(&self, id: &Uuid) -> Result<Option<Target>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at \
-             FROM targets WHERE id = ?",
+             FROM targets WHERE id = ? AND is_deleted = 0",
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
@@ -215,7 +215,7 @@ impl Repository for SqliteRepository {
 
     async fn update_target(&self, id: &Uuid, target: &Target) -> Result<(), GatewayError> {
         sqlx::query(
-            "UPDATE targets SET url = ?, weight = ?, enabled = ?, zone = ?, updated_at = ? WHERE id = ?",
+            "UPDATE targets SET url = ?, weight = ?, enabled = ?, zone = ?, updated_at = ? WHERE id = ? AND is_deleted = 0",
         )
         .bind(&target.url)
         .bind(target.weight as i64)
@@ -229,7 +229,7 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_target(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("DELETE FROM targets WHERE id = ?")
+        let result = sqlx::query("UPDATE targets SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
             .bind(id.to_string())
             .execute(&self.pool)
             .await?;
@@ -241,7 +241,7 @@ impl Repository for SqliteRepository {
     async fn list_routes(&self) -> Result<Vec<Route>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, service_id, paths, methods, hosts, strip_path, created_at, updated_at \
-             FROM routes",
+             FROM routes WHERE is_deleted = 0",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -252,7 +252,7 @@ impl Repository for SqliteRepository {
     async fn get_route(&self, id: &Uuid) -> Result<Option<Route>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, service_id, paths, methods, hosts, strip_path, created_at, updated_at \
-             FROM routes WHERE id = ?",
+             FROM routes WHERE id = ? AND is_deleted = 0",
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
@@ -296,7 +296,7 @@ impl Repository for SqliteRepository {
 
         sqlx::query(
             "UPDATE routes SET service_id = ?, paths = ?, methods = ?, hosts = ?, strip_path = ?, updated_at = ? \
-             WHERE id = ?",
+             WHERE id = ? AND is_deleted = 0",
         )
         .bind(route.service_id.to_string())
         .bind(paths)
@@ -311,7 +311,7 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_route(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("DELETE FROM routes WHERE id = ?")
+        let result = sqlx::query("UPDATE routes SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
             .bind(id.to_string())
             .execute(&self.pool)
             .await?;
@@ -322,7 +322,7 @@ impl Repository for SqliteRepository {
 
     async fn list_plugins(&self) -> Result<Vec<PluginInstance>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, name, service_id, route_id, enabled, config, created_at, updated_at FROM plugins",
+            "SELECT id, name, service_id, route_id, enabled, config, created_at, updated_at FROM plugins WHERE is_deleted = 0",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -333,7 +333,7 @@ impl Repository for SqliteRepository {
     async fn get_plugin(&self, id: &Uuid) -> Result<Option<PluginInstance>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, name, service_id, route_id, enabled, config, created_at, updated_at \
-             FROM plugins WHERE id = ?",
+             FROM plugins WHERE id = ? AND is_deleted = 0",
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
@@ -367,7 +367,7 @@ impl Repository for SqliteRepository {
             .map_err(|e| GatewayError::Internal(e.to_string()))?;
         sqlx::query(
             "UPDATE plugins SET name = ?, service_id = ?, route_id = ?, enabled = ?, config = ?, updated_at = ? \
-             WHERE id = ?",
+             WHERE id = ? AND is_deleted = 0",
         )
         .bind(&plugin.name)
         .bind(plugin.service_id.map(|v| v.to_string()))
@@ -382,7 +382,7 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_plugin(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("DELETE FROM plugins WHERE id = ?")
+        let result = sqlx::query("UPDATE plugins SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
             .bind(id.to_string())
             .execute(&self.pool)
             .await?;
@@ -393,7 +393,7 @@ impl Repository for SqliteRepository {
 
     async fn list_consumers(&self) -> Result<Vec<Consumer>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, username, custom_id, api_key, created_at, updated_at FROM consumers",
+            "SELECT id, username, custom_id, api_key, created_at, updated_at FROM consumers WHERE is_deleted = 0",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -418,7 +418,7 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_consumer(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("DELETE FROM consumers WHERE id = ?")
+        let result = sqlx::query("UPDATE consumers SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
             .bind(id.to_string())
             .execute(&self.pool)
             .await?;
@@ -429,10 +429,10 @@ impl Repository for SqliteRepository {
 
     async fn is_empty(&self) -> Result<bool, GatewayError> {
         let total: i64 = sqlx::query_scalar(
-            "SELECT (SELECT COUNT(*) FROM services) \
-                  + (SELECT COUNT(*) FROM routes) \
-                  + (SELECT COUNT(*) FROM plugins) \
-                  + (SELECT COUNT(*) FROM consumers)",
+            "SELECT (SELECT COUNT(*) FROM services WHERE is_deleted = 0) \
+                  + (SELECT COUNT(*) FROM routes WHERE is_deleted = 0) \
+                  + (SELECT COUNT(*) FROM plugins WHERE is_deleted = 0) \
+                  + (SELECT COUNT(*) FROM consumers WHERE is_deleted = 0)",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -492,7 +492,7 @@ impl Repository for SqliteRepository {
     async fn list_admin_tokens(&self) -> Result<Vec<AdminToken>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, name, role, created_at, expires_at, last_used_at \
-             FROM admin_tokens ORDER BY created_at ASC",
+             FROM admin_tokens WHERE is_deleted = 0 ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -505,7 +505,7 @@ impl Repository for SqliteRepository {
     ) -> Result<Option<AdminToken>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, name, role, created_at, expires_at, last_used_at \
-             FROM admin_tokens WHERE token_hash = ?",
+             FROM admin_tokens WHERE token_hash = ? AND is_deleted = 0",
         )
         .bind(token_hash)
         .fetch_optional(&self.pool)
@@ -516,7 +516,7 @@ impl Repository for SqliteRepository {
     async fn get_admin_token(&self, id: &Uuid) -> Result<Option<AdminToken>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, name, role, created_at, expires_at, last_used_at \
-             FROM admin_tokens WHERE id = ?",
+             FROM admin_tokens WHERE id = ? AND is_deleted = 0",
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
@@ -550,7 +550,7 @@ impl Repository for SqliteRepository {
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(
             "SELECT id, name, role, created_at, expires_at, last_used_at \
-             FROM admin_tokens WHERE id = ?",
+             FROM admin_tokens WHERE id = ? AND is_deleted = 0",
         )
         .bind(id.to_string())
         .fetch_optional(&mut *tx)
@@ -580,7 +580,7 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_admin_token(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("DELETE FROM admin_tokens WHERE id = ?")
+        let result = sqlx::query("UPDATE admin_tokens SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
             .bind(id.to_string())
             .execute(&self.pool)
             .await?;
@@ -601,7 +601,7 @@ impl Repository for SqliteRepository {
     }
 
     async fn has_any_admin_token(&self) -> Result<bool, GatewayError> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_tokens")
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_tokens WHERE is_deleted = 0")
             .fetch_one(&self.pool)
             .await?;
         Ok(count > 0)
@@ -739,7 +739,7 @@ impl Repository for SqliteRepository {
         let limit = filter.effective_limit() as i64;
         let mut sql = String::from(
             "SELECT id, ts, method, path, status, duration_ms, service_id, route_id, consumer, bytes_request, bytes_response \
-             FROM recordings WHERE 1=1",
+             FROM recordings WHERE is_deleted = 0",
         );
         if filter.since.is_some() {
             sql.push_str(" AND ts >= ?");
@@ -788,7 +788,7 @@ impl Repository for SqliteRepository {
     ) -> Result<Option<RecordingIndexRow>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, ts, method, path, status, duration_ms, service_id, route_id, consumer, bytes_request, bytes_response \
-             FROM recordings WHERE id = ?",
+             FROM recordings WHERE id = ? AND is_deleted = 0",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -797,7 +797,7 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_recording(&self, id: &str) -> Result<bool, GatewayError> {
-        let result = sqlx::query("DELETE FROM recordings WHERE id = ?")
+        let result = sqlx::query("UPDATE recordings SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -805,7 +805,7 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_recordings_before(&self, ts: DateTime<Utc>) -> Result<u64, GatewayError> {
-        let result = sqlx::query("DELETE FROM recordings WHERE ts < ?")
+        let result = sqlx::query("UPDATE recordings SET is_deleted = 1 WHERE ts < ? AND is_deleted = 0")
             .bind(ts.to_rfc3339())
             .execute(&self.pool)
             .await?;
