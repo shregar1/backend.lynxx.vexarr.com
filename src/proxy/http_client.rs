@@ -155,10 +155,30 @@ fn build_http_connector(resolver: CachingDnsResolver) -> HttpConnector<CachingDn
     http
 }
 
+/// Tuning knobs for the proxy HTTP client, read from `GatewaySettings`.
+#[derive(Clone, Debug)]
+pub struct HttpClientConfig {
+    pub pool_max_idle_per_host: usize,
+    pub pool_idle_timeout_secs: u64,
+    pub h2_keepalive_interval_secs: u64,
+    pub max_header_size: usize,
+}
+
+impl Default for HttpClientConfig {
+    fn default() -> Self {
+        Self {
+            pool_max_idle_per_host: 128,
+            pool_idle_timeout_secs: 120,
+            h2_keepalive_interval_secs: 10,
+            max_header_size: 16384,
+        }
+    }
+}
+
 /// Build the proxy hot-path client. Returns an error rather than panicking if
 /// the platform certificate store cannot be loaded — startup will surface this
 /// to the operator instead of crashing on the first HTTPS upstream call.
-pub fn build_http_proxy_client() -> anyhow::Result<HttpProxyClient> {
+pub fn build_http_proxy_client(cfg: &HttpClientConfig) -> anyhow::Result<HttpProxyClient> {
     let resolver = CachingDnsResolver::new()?;
     let http = build_http_connector(resolver);
 
@@ -171,9 +191,9 @@ pub fn build_http_proxy_client() -> anyhow::Result<HttpProxyClient> {
 
     let client = Client::builder(TokioExecutor::new())
         .timer(TokioTimer::new())
-        .pool_idle_timeout(Duration::from_secs(120))
-        .pool_max_idle_per_host(128)
-        .http2_keep_alive_interval(Duration::from_secs(10))
+        .pool_idle_timeout(Duration::from_secs(cfg.pool_idle_timeout_secs))
+        .pool_max_idle_per_host(cfg.pool_max_idle_per_host)
+        .http2_keep_alive_interval(Duration::from_secs(cfg.h2_keepalive_interval_secs))
         .http2_keep_alive_while_idle(true)
         .build(https);
 
@@ -201,6 +221,8 @@ pub struct ProxyClientPool {
     /// Shared resolver — building one per service would needlessly multiply
     /// the in-flight DNS futures.
     resolver: CachingDnsResolver,
+    /// Pool/keepalive settings from gateway config.
+    cfg: HttpClientConfig,
 }
 
 /// A single cached entry. We track the TLS fingerprint so that a service
@@ -212,11 +234,12 @@ struct CachedServiceClient {
 }
 
 impl ProxyClientPool {
-    pub fn new(default_client: HttpProxyClient) -> anyhow::Result<Self> {
+    pub fn new(default_client: HttpProxyClient, cfg: HttpClientConfig) -> anyhow::Result<Self> {
         Ok(Self {
             default_client,
             overrides: DashMap::new(),
             resolver: CachingDnsResolver::new()?,
+            cfg,
         })
     }
 
@@ -283,9 +306,9 @@ impl ProxyClientPool {
 
         let client = Client::builder(TokioExecutor::new())
             .timer(TokioTimer::new())
-            .pool_idle_timeout(Duration::from_secs(120))
-            .pool_max_idle_per_host(128)
-            .http2_keep_alive_interval(Duration::from_secs(10))
+            .pool_idle_timeout(Duration::from_secs(self.cfg.pool_idle_timeout_secs))
+            .pool_max_idle_per_host(self.cfg.pool_max_idle_per_host)
+            .http2_keep_alive_interval(Duration::from_secs(self.cfg.h2_keepalive_interval_secs))
             .http2_keep_alive_while_idle(true)
             .build(https);
 

@@ -308,7 +308,13 @@ async fn async_main() -> anyhow::Result<()> {
     // via ALPN). Separate from the `reqwest::Client` used by the health
     // checker and out-of-band plugins (oauth2-introspect) — those benefit
     // from reqwest's higher-level conveniences and aren't latency-critical.
-    let http_client = crate::proxy::http_client::build_http_proxy_client()?;
+    let http_client_cfg = crate::proxy::http_client::HttpClientConfig {
+        pool_max_idle_per_host: config.gateway.pool_max_idle_per_host,
+        pool_idle_timeout_secs: config.gateway.pool_idle_timeout_secs,
+        h2_keepalive_interval_secs: config.gateway.h2_keepalive_interval_secs,
+        max_header_size: config.gateway.max_header_size,
+    };
+    let http_client = crate::proxy::http_client::build_http_proxy_client(&http_client_cfg)?;
     let health_http_client = reqwest::Client::new();
     let grpc_client = crate::proxy::grpc::build_grpc_client();
 
@@ -335,7 +341,7 @@ async fn async_main() -> anyhow::Result<()> {
     );
 
     let client_pool = Arc::new(
-        crate::proxy::http_client::ProxyClientPool::new(http_client.clone())
+        crate::proxy::http_client::ProxyClientPool::new(http_client.clone(), http_client_cfg)
             .expect("init proxy client pool"),
     );
 
