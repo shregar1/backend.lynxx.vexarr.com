@@ -17,6 +17,7 @@ mod discovery;
 mod error;
 mod health;
 mod license;
+mod logging;
 mod lynxfile;
 mod metrics;
 mod models;
@@ -331,6 +332,7 @@ async fn async_main() -> anyhow::Result<()> {
         lb.rebuild_for_service(svc.id, LbStrategy::from_str(&svc.lb_strategy), targets);
     }
 
+    let hc_config = Arc::new(health::checker::HealthCheckConfig::default());
     health::checker::spawn_health_checker(
         route_table.clone(),
         health.clone(),
@@ -338,7 +340,10 @@ async fn async_main() -> anyhow::Result<()> {
         lb.clone(),
         health_http_client,
         config.gateway.health_check_interval_ms,
+        hc_config,
     );
+
+    let passive_health = Arc::new(health::PassiveHealthTracker::default());
 
     let client_pool = Arc::new(
         crate::proxy::http_client::ProxyClientPool::new(http_client.clone(), http_client_cfg)
@@ -383,6 +388,7 @@ async fn async_main() -> anyhow::Result<()> {
         grpc_client,
         health: health.clone(),
         lb: lb.clone(),
+        passive_health: passive_health.clone(),
         quota: quota.clone(),
         license: license_state.clone(),
         local_zone: None,
@@ -533,6 +539,27 @@ async fn async_main() -> anyhow::Result<()> {
                 tracing::error!(
                     error = %e,
                     "docker provider connect failed; continuing without docker discovery"
+                );
+            }
+        }
+    }
+
+    // ---------- SRV DNS provider ----------
+    if config.gateway.providers.srv_dns.enabled {
+        let srv_cfg = config.gateway.providers.srv_dns.clone();
+        match crate::discovery::srv_dns::SrvDnsProvider::new(
+            srv_cfg,
+            repo.clone(),
+            bus.clone(),
+        ) {
+            Ok(provider) => {
+                tracing::info!("srv-dns provider started; polling SRV records");
+                provider.spawn();
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "srv-dns provider init failed; continuing without DNS discovery"
                 );
             }
         }
@@ -741,15 +768,28 @@ async fn async_main() -> anyhow::Result<()> {
     // TLS it's already spawned as a background task — we just need to
     // shut it down gracefully. When admin is plain HTTP we await it
     // alongside the proxy.
+    let shutdown_delay = std::time::Duration::from_secs(config.gateway.shutdown_delay_secs);
+    let grace_period = std::time::Duration::from_secs(config.gateway.grace_period_secs);
+
     macro_rules! run_select {
         ($proxy_fut:expr, $shutdown_handle:expr) => {
             match admin_serve_mode {
                 AdminServe::Plain(admin_serve) => {
                     tokio::select! {
                         _ = shutdown_notify.notified() => {
-                            tracing::info!("graceful shutdown: draining in-flight (30s max)");
+                            if !shutdown_delay.is_zero() {
+                                tracing::info!(
+                                    delay_secs = shutdown_delay.as_secs(),
+                                    "shutdown delay: waiting for load balancer drain"
+                                );
+                                tokio::time::sleep(shutdown_delay).await;
+                            }
+                            tracing::info!(
+                                grace_secs = grace_period.as_secs(),
+                                "graceful shutdown: draining in-flight requests"
+                            );
                             if let Some(ref h) = $shutdown_handle {
-                                h.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+                                h.graceful_shutdown(Some(grace_period));
                             }
                         }
                         result = $proxy_fut => { if let Err(e) = result { tracing::error!("proxy server error: {e}"); } }
@@ -759,11 +799,21 @@ async fn async_main() -> anyhow::Result<()> {
                 AdminServe::Tls(admin_handle) => {
                     tokio::select! {
                         _ = shutdown_notify.notified() => {
-                            tracing::info!("graceful shutdown: draining in-flight (30s max)");
-                            if let Some(ref h) = $shutdown_handle {
-                                h.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+                            if !shutdown_delay.is_zero() {
+                                tracing::info!(
+                                    delay_secs = shutdown_delay.as_secs(),
+                                    "shutdown delay: waiting for load balancer drain"
+                                );
+                                tokio::time::sleep(shutdown_delay).await;
                             }
-                            admin_handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+                            tracing::info!(
+                                grace_secs = grace_period.as_secs(),
+                                "graceful shutdown: draining in-flight requests"
+                            );
+                            if let Some(ref h) = $shutdown_handle {
+                                h.graceful_shutdown(Some(grace_period));
+                            }
+                            admin_handle.graceful_shutdown(Some(grace_period));
                         }
                         result = $proxy_fut => { if let Err(e) = result { tracing::error!("proxy server error: {e}"); } }
                     }

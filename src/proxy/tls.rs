@@ -66,7 +66,7 @@ pub fn build_server_config(settings: &TlsSettings) -> Result<ServerConfig, Gatew
     let versions = resolve_tls_versions(&settings.min_version, &settings.max_version)?;
 
     // --- Key exchange group / curve selection ---
-    let provider = resolve_crypto_provider(&settings.curves)?;
+    let provider = resolve_crypto_provider(&settings.curves, &settings.crypto_provider)?;
 
     // --- Cipher suite selection ---
     let provider = if !settings.cipher_suites.is_empty() {
@@ -101,6 +101,38 @@ pub fn build_server_config(settings: &TlsSettings) -> Result<ServerConfig, Gatew
     if let Some(ref path) = keylog_path {
         config.key_log = Arc::new(rustls::KeyLogFile::new());
         tracing::warn!(path = %path, "TLS key logging enabled — DO NOT USE IN PRODUCTION");
+    }
+
+    // --- Encrypted ClientHello (ECH) ---
+    if !settings.ech_config_list.is_empty() {
+        use base64::Engine;
+        let _ech_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&settings.ech_config_list)
+            .map_err(|e| {
+                GatewayError::Internal(format!("tls.ech_config_list: invalid base64: {e}"))
+            })?;
+        tracing::warn!(
+            "ECH config provided but server-side ECH is not yet supported by rustls; \
+             config stored for future use"
+        );
+    }
+
+    // --- TLS 1.3 0-RTT early data ---
+    if settings.enable_0rtt {
+        let max_ver = parse_tls_version(&settings.max_version, "max_version")?;
+        if max_ver >= 13 {
+            config.max_early_data_size = 16384;
+            tracing::warn!(
+                "TLS 1.3 0-RTT early data enabled (max 16384 bytes). \
+                 WARNING: 0-RTT data is susceptible to replay attacks — \
+                 ensure upstream endpoints are idempotent or replay-safe"
+            );
+        } else {
+            tracing::info!(
+                "enable_0rtt is true but max_version is TLS 1.2; \
+                 0-RTT requires TLS 1.3, skipping"
+            );
+        }
     }
 
     // Match what axum/hyper would advertise. Order matters — h2 first so
@@ -216,10 +248,42 @@ fn parse_tls_version(s: &str, field: &str) -> Result<u8, GatewayError> {
     }
 }
 
-/// Build a [`CryptoProvider`] with the ring backend, optionally filtered to
-/// only the named key-exchange groups listed in `curves`. An empty list
+/// Build a [`CryptoProvider`] with the configured backend, optionally filtered
+/// to only the named key-exchange groups listed in `curves`. An empty list
 /// means "use all supported groups".
-fn resolve_crypto_provider(curves: &[String]) -> Result<CryptoProvider, GatewayError> {
+///
+/// The `provider_name` selects the backend: `"ring"` (default) or
+/// `"aws-lc-rs"` (post-quantum, requires cargo feature).
+fn resolve_crypto_provider(
+    curves: &[String],
+    provider_name: &str,
+) -> Result<CryptoProvider, GatewayError> {
+    if provider_name != "ring" && provider_name != "aws-lc-rs" {
+        return Err(GatewayError::Internal(format!(
+            "tls.crypto_provider: unknown provider \"{provider_name}\" \
+             (accepted: \"ring\", \"aws-lc-rs\")"
+        )));
+    }
+
+    if provider_name == "aws-lc-rs" {
+        return Err(GatewayError::Internal(
+            "tls.crypto_provider: aws-lc-rs provider requires the `aws-lc-rs` cargo \
+             feature (not enabled in this build)"
+                .into(),
+        ));
+    }
+
+    // Check for post-quantum curves early, before we try to resolve them
+    // against the ring provider which doesn't support them.
+    if curves.iter().any(|c| c.to_lowercase() == "x25519mlkem768") {
+        return Err(GatewayError::Internal(
+            "tls.curves: x25519mlkem768 (post-quantum) requires the aws-lc-rs crypto \
+             provider — set crypto_provider = \"aws-lc-rs\" and enable the aws-lc-rs \
+             cargo feature"
+                .into(),
+        ));
+    }
+
     let mut provider = ring_provider::default_provider();
 
     if !curves.is_empty() {
@@ -450,13 +514,13 @@ mod tests {
     #[test]
     fn resolve_provider_defaults() {
         // Empty curves = all three groups.
-        let p = resolve_crypto_provider(&[]).unwrap();
+        let p = resolve_crypto_provider(&[], "ring").unwrap();
         assert_eq!(p.kx_groups.len(), 3);
     }
 
     #[test]
     fn resolve_provider_single_curve() {
-        let p = resolve_crypto_provider(&["x25519".to_string()]).unwrap();
+        let p = resolve_crypto_provider(&["x25519".to_string()], "ring").unwrap();
         assert_eq!(p.kx_groups.len(), 1);
         assert_eq!(
             p.kx_groups[0].name(),
@@ -466,10 +530,10 @@ mod tests {
 
     #[test]
     fn resolve_provider_multiple_curves() {
-        let p = resolve_crypto_provider(&[
-            "secp384r1".to_string(),
-            "x25519".to_string(),
-        ])
+        let p = resolve_crypto_provider(
+            &["secp384r1".to_string(), "x25519".to_string()],
+            "ring",
+        )
         .unwrap();
         assert_eq!(p.kx_groups.len(), 2);
         // Order preserved from config.
@@ -485,20 +549,20 @@ mod tests {
 
     #[test]
     fn resolve_provider_deduplicates() {
-        let p = resolve_crypto_provider(&[
-            "x25519".to_string(),
-            "x25519".to_string(),
-        ])
+        let p = resolve_crypto_provider(
+            &["x25519".to_string(), "x25519".to_string()],
+            "ring",
+        )
         .unwrap();
         assert_eq!(p.kx_groups.len(), 1);
     }
 
     #[test]
     fn resolve_provider_aliases() {
-        let p = resolve_crypto_provider(&[
-            "p256".to_string(),
-            "p384".to_string(),
-        ])
+        let p = resolve_crypto_provider(
+            &["p256".to_string(), "p384".to_string()],
+            "ring",
+        )
         .unwrap();
         assert_eq!(p.kx_groups.len(), 2);
         assert_eq!(
@@ -509,8 +573,67 @@ mod tests {
 
     #[test]
     fn resolve_provider_unknown_curve() {
-        let err = resolve_crypto_provider(&["x448".to_string()]).unwrap_err();
+        let err = resolve_crypto_provider(&["x448".to_string()], "ring").unwrap_err();
         assert!(err.to_string().contains("unknown curve"));
+        assert!(err.to_string().contains("aws-lc-rs"));
+    }
+
+    // --- Feature 30: ECH ---
+
+    #[test]
+    fn ech_config_deserializes() {
+        let json = r#"{"ech_config_list": "SGVsbG8gV29ybGQ="}"#;
+        let settings: TlsSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.ech_config_list, "SGVsbG8gV29ybGQ=");
+    }
+
+    #[test]
+    fn ech_config_defaults_empty() {
+        let settings = TlsSettings::default();
+        assert!(settings.ech_config_list.is_empty());
+    }
+
+    // --- Feature 31: 0-RTT ---
+
+    #[test]
+    fn zero_rtt_disabled_by_default() {
+        let settings = TlsSettings::default();
+        assert!(!settings.enable_0rtt);
+    }
+
+    #[test]
+    fn zero_rtt_config_deserializes() {
+        let json = r#"{"enable_0rtt": true}"#;
+        let settings: TlsSettings = serde_json::from_str(json).unwrap();
+        assert!(settings.enable_0rtt);
+    }
+
+    // --- Feature 32: Post-quantum / crypto_provider ---
+
+    #[test]
+    fn crypto_provider_defaults_ring() {
+        let settings = TlsSettings::default();
+        assert_eq!(settings.crypto_provider, "ring");
+    }
+
+    #[test]
+    fn crypto_provider_aws_lc_rs_errors() {
+        let err = resolve_crypto_provider(&[], "aws-lc-rs").unwrap_err();
+        assert!(err.to_string().contains("aws-lc-rs"));
+        assert!(err.to_string().contains("cargo feature"));
+    }
+
+    #[test]
+    fn crypto_provider_unknown_errors() {
+        let err = resolve_crypto_provider(&[], "boringssl").unwrap_err();
+        assert!(err.to_string().contains("unknown provider"));
+    }
+
+    #[test]
+    fn x25519mlkem768_requires_aws_lc_rs() {
+        let err =
+            resolve_crypto_provider(&["x25519mlkem768".to_string()], "ring").unwrap_err();
+        assert!(err.to_string().contains("x25519mlkem768"));
         assert!(err.to_string().contains("aws-lc-rs"));
     }
 

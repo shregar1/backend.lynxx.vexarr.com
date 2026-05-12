@@ -16,7 +16,7 @@ use uuid::Uuid;
 /// this provider (no admin actor).
 const PROVIDER_ORIGIN: Uuid = Uuid::nil();
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 pub struct SrvDnsProviderConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -39,7 +39,7 @@ impl Default for SrvDnsProviderConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 pub struct SrvEntry {
     pub srv_name: String,
     pub service_id: Uuid,

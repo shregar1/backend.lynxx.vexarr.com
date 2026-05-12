@@ -221,6 +221,7 @@ impl<'a> Parser<'a> {
             document_root: None,
             index_file: None,
             spa_fallback: None,
+            id_tag: None,
         });
 
         Ok(())
@@ -276,6 +277,7 @@ impl<'a> Parser<'a> {
             hosts,
             service: service.to_string(),
             strip_path,
+            id_tag: None,
         })
     }
 
@@ -320,6 +322,7 @@ impl<'a> Parser<'a> {
             name: name.to_string(),
             enabled: true,
             config: serde_json::Value::Object(map),
+            id_tag: None,
         })
     }
 

@@ -1,4 +1,5 @@
 pub mod config_api;
+pub mod profiling;
 pub mod routes;
 
 use crate::audit::AuditLog;
@@ -100,6 +101,12 @@ pub fn admin_router(
         .route("/metrics", get(routes::metrics))
         .route("/quota", get(routes::quota_snapshot))
         .route("/circuit-breakers", get(routes::list_circuit_breakers))
+        .route("/upstreams", get(routes::list_upstreams))
+        .route("/debug/pprof/heap", get(profiling::heap_profile))
+        .route("/debug/pprof/tasks", get(profiling::tasks_profile))
+        .route("/debug/pprof/threads", get(profiling::threads_profile))
+        .route("/debug/pprof/uptime", get(profiling::runtime_profile))
+        .route("/debug/pprof/stats", get(profiling::combined_profile))
         .route_layer(middleware::from_fn(viewer));
 
     // ---- mutations (operator) ----

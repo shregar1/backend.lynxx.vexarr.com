@@ -362,6 +362,65 @@ async fn try_reinitialize(cfg: &GatewayConfig) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// @id tag lookup
+// ---------------------------------------------------------------------------
+
+/// Result returned by `GET /admin/v1/config/@id/:tag`.
+#[derive(Serialize)]
+pub struct IdLookupResult {
+    pub kind: String,
+    pub index: usize,
+    pub value: serde_json::Value,
+}
+
+/// `GET /admin/v1/config/@id/:tag` — find a service, route, or plugin
+/// config entry by its `@id` tag.
+pub async fn get_by_id_tag(
+    State(state): State<ConfigApiState>,
+    Path(tag): Path<String>,
+) -> Result<Json<IdLookupResult>, GatewayError> {
+    let config = state.store.current().await;
+
+    for (i, svc) in config.services.iter().enumerate() {
+        if svc.id_tag.as_deref() == Some(&tag) {
+            let value = serde_json::to_value(svc)
+                .map_err(|e| GatewayError::Internal(format!("serialisation error: {e}")))?;
+            return Ok(Json(IdLookupResult {
+                kind: "service".into(),
+                index: i,
+                value,
+            }));
+        }
+    }
+
+    for (i, rt) in config.routes.iter().enumerate() {
+        if rt.id_tag.as_deref() == Some(&tag) {
+            let value = serde_json::to_value(rt)
+                .map_err(|e| GatewayError::Internal(format!("serialisation error: {e}")))?;
+            return Ok(Json(IdLookupResult {
+                kind: "route".into(),
+                index: i,
+                value,
+            }));
+        }
+    }
+
+    for (i, pl) in config.plugins.iter().enumerate() {
+        if pl.id_tag.as_deref() == Some(&tag) {
+            let value = serde_json::to_value(pl)
+                .map_err(|e| GatewayError::Internal(format!("serialisation error: {e}")))?;
+            return Ok(Json(IdLookupResult {
+                kind: "plugin".into(),
+                index: i,
+                value,
+            }));
+        }
+    }
+
+    Err(GatewayError::NotFound(format!("@id tag '{tag}' not found")))
+}
+
+// ---------------------------------------------------------------------------
 // Router constructor
 // ---------------------------------------------------------------------------
 
@@ -372,6 +431,7 @@ pub fn config_router(store: ConfigStore) -> axum::Router {
 
     axum::Router::new()
         .route("/", axum::routing::get(get_config).put(put_config))
+        .route("/@id/:tag", axum::routing::get(get_by_id_tag))
         .route("/*path", axum::routing::patch(patch_config))
         .route("/validate", axum::routing::post(validate_config_handler))
         .route("/history", axum::routing::get(config_history))

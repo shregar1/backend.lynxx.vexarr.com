@@ -1056,19 +1056,44 @@ impl AcmeManager {
                     })?;
                 csr_params.distinguished_name = rcgen::DistinguishedName::new();
 
-                let algo = self.key_algorithm();
-                tracing::info!(
-                    label = %label,
-                    key_type = %self.config.key_type,
-                    "generating ACME CSR key"
-                );
-                private_key =
-                    rcgen::KeyPair::generate_for(algo)
-                        .map_err(|e| {
-                            GatewayError::Internal(format!(
-                                "generate key ({label}): {e}"
-                            ))
-                        })?;
+                let existing_key_path = output_dir.join("key.pem");
+                if self.config.reuse_private_keys {
+                    if let Some(existing) = load_existing_key(&existing_key_path) {
+                        tracing::info!(
+                            label = %label,
+                            path = %existing_key_path.display(),
+                            "reusing existing private key for renewal"
+                        );
+                        private_key = existing;
+                    } else {
+                        tracing::info!(
+                            label = %label,
+                            key_type = %self.config.key_type,
+                            "no existing key found; generating new ACME CSR key"
+                        );
+                        private_key =
+                            rcgen::KeyPair::generate_for(self.key_algorithm())
+                                .map_err(|e| {
+                                    GatewayError::Internal(format!(
+                                        "generate key ({label}): {e}"
+                                    ))
+                                })?;
+                    }
+                } else {
+                    let algo = self.key_algorithm();
+                    tracing::info!(
+                        label = %label,
+                        key_type = %self.config.key_type,
+                        "generating ACME CSR key"
+                    );
+                    private_key =
+                        rcgen::KeyPair::generate_for(algo)
+                            .map_err(|e| {
+                                GatewayError::Internal(format!(
+                                    "generate key ({label}): {e}"
+                                ))
+                            })?;
+                }
 
                 let csr = csr_params.serialize_request(&private_key).map_err(|e| {
                     GatewayError::Internal(format!("serialize CSR ({label}): {e}"))
@@ -1130,6 +1155,28 @@ impl AcmeManager {
                 ))
             })?
         };
+
+        // Check preferred certificate chain if configured.
+        if !self.config.preferred_chain.is_empty() {
+            if check_preferred_chain(&cert_pem, &self.config.preferred_chain) {
+                tracing::info!(
+                    label = %label,
+                    preferred = %self.config.preferred_chain,
+                    "certificate chain matches preferred issuer"
+                );
+            } else {
+                // instant-acme's order.certificate() returns only one chain;
+                // we cannot request alternates. Log a warning and use whatever
+                // the CA returned. This makes the config forward-compatible
+                // for when alternate chain selection is available.
+                tracing::warn!(
+                    label = %label,
+                    preferred = %self.config.preferred_chain,
+                    "certificate chain does NOT match preferred issuer; \
+                     using default chain (alternate chain selection not available)"
+                );
+            }
+        }
 
         // Persist to output directory.
         std::fs::create_dir_all(output_dir).map_err(|e| {
@@ -1542,6 +1589,69 @@ fn generate_self_signed_cert(
 }
 
 // ======================================================================
+// Helper: reuse existing private key (Feature 36)
+// ======================================================================
+
+/// Try to load an existing PEM private key from `path`. Returns `None`
+/// if the file doesn't exist or can't be parsed, so callers fall back
+/// to generating a new key.
+fn load_existing_key(path: &Path) -> Option<rcgen::KeyPair> {
+    let pem = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+    match rcgen::KeyPair::from_pem(&pem) {
+        Ok(kp) => Some(kp),
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "existing key file found but could not be parsed; generating new key"
+            );
+            None
+        }
+    }
+}
+
+// ======================================================================
+// Helper: preferred certificate chain (Feature 38)
+// ======================================================================
+
+/// Check whether any certificate in the PEM chain has an issuer CN that
+/// contains `preferred`. Returns `true` if a match is found.
+fn check_preferred_chain(cert_pem: &str, preferred: &str) -> bool {
+    let mut cursor = std::io::Cursor::new(cert_pem.as_bytes());
+    let certs: Vec<rustls_pki_types::CertificateDer<'static>> =
+        match rustls_pemfile::certs(&mut cursor).collect::<Result<Vec<_>, _>>() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+    for der in &certs {
+        if let Ok((_, parsed)) = x509_parser::parse_x509_certificate(der.as_ref()) {
+            // Check issuer CN.
+            for attr in parsed.issuer().iter_common_name() {
+                if let Ok(cn) = attr.as_str() {
+                    if cn.contains(preferred) {
+                        return true;
+                    }
+                }
+            }
+            // Also check subject CN (the root cert is self-signed, so
+            // subject == issuer).
+            for attr in parsed.subject().iter_common_name() {
+                if let Ok(cn) = attr.as_str() {
+                    if cn.contains(preferred) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+// ======================================================================
 // Tests
 // ======================================================================
 
@@ -1757,5 +1867,119 @@ mod tests {
         assert_eq!(mgr.tls_alpn_challenge_count(), 1);
         mgr.clear_tls_alpn_challenge("admin.example.com");
         assert_eq!(mgr.tls_alpn_challenge_count(), 0);
+    }
+
+    // ----------------------------------------------------------------
+    // Feature 36: reuse_private_keys
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_reuse_key_config_deserializes() {
+        let json = r#"{
+            "enabled": true,
+            "domains": ["example.com"],
+            "reuse_private_keys": true
+        }"#;
+        let config: AcmeConfig = serde_json::from_str(json).unwrap();
+        assert!(config.reuse_private_keys);
+    }
+
+    #[test]
+    fn test_reuse_key_config_defaults_false() {
+        let config = AcmeConfig::default();
+        assert!(!config.reuse_private_keys);
+    }
+
+    #[test]
+    fn test_load_existing_key_valid() {
+        let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let pem = kp.serialize_pem();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let key_path = tmp.path().join("key.pem");
+        std::fs::write(&key_path, pem.as_bytes()).unwrap();
+
+        let loaded = load_existing_key(&key_path);
+        assert!(loaded.is_some(), "should load a valid PEM key");
+    }
+
+    #[test]
+    fn test_load_existing_key_missing_file() {
+        let loaded = load_existing_key(Path::new("/nonexistent/path/key.pem"));
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn test_load_existing_key_invalid_pem() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key_path = tmp.path().join("key.pem");
+        std::fs::write(&key_path, b"not-a-valid-pem").unwrap();
+
+        let loaded = load_existing_key(&key_path);
+        assert!(loaded.is_none());
+    }
+
+    // ----------------------------------------------------------------
+    // Feature 38: preferred certificate chains
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_preferred_chain_config_deserializes() {
+        let json = r#"{
+            "enabled": true,
+            "domains": ["example.com"],
+            "preferred_chain": "ISRG Root X1"
+        }"#;
+        let config: AcmeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.preferred_chain, "ISRG Root X1");
+    }
+
+    #[test]
+    fn test_preferred_chain_config_defaults_empty() {
+        let config = AcmeConfig::default();
+        assert!(config.preferred_chain.is_empty());
+    }
+
+    #[test]
+    fn test_check_preferred_chain_matches_self_signed() {
+        // Generate a self-signed cert whose CN contains a known string,
+        // then verify check_preferred_chain finds it.
+        let mut params = rcgen::CertificateParams::default();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "Lynxx Test Root CA");
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        let pem = cert.pem();
+
+        assert!(
+            check_preferred_chain(&pem, "Lynxx Test Root"),
+            "should match partial CN"
+        );
+        assert!(
+            check_preferred_chain(&pem, "Test Root CA"),
+            "should match another substring"
+        );
+    }
+
+    #[test]
+    fn test_check_preferred_chain_no_match() {
+        let mut params = rcgen::CertificateParams::default();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "Some Other CA");
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        let pem = cert.pem();
+
+        assert!(
+            !check_preferred_chain(&pem, "ISRG Root X1"),
+            "should not match unrelated CN"
+        );
+    }
+
+    #[test]
+    fn test_check_preferred_chain_invalid_pem() {
+        assert!(!check_preferred_chain("garbage data", "anything"));
     }
 }

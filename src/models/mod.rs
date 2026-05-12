@@ -39,6 +39,30 @@ pub struct Service {
     /// server certificate. Useful for private/internal CAs.
     #[serde(default)]
     pub tls_ca_path: Option<String>,
+    /// Request header name to hash for `header-hash` LB strategy.
+    /// E.g. `"X-Tenant-Id"` — all requests with the same value land on
+    /// the same upstream.
+    #[serde(default)]
+    pub lb_hash_header: Option<String>,
+    /// Query parameter name to hash for `query-hash` LB strategy.
+    /// E.g. `"user_id"` — all requests with `?user_id=42` go to the same
+    /// upstream.
+    #[serde(default)]
+    pub lb_hash_query_param: Option<String>,
+    /// Flush interval in milliseconds for chunked/streamed response
+    /// forwarding. `0` = flush every chunk immediately (default). `-1` =
+    /// buffer the full response before sending. Positive values flush on
+    /// the given cadence.
+    #[serde(default)]
+    pub flush_interval_ms: Option<i64>,
+    /// Overall stream timeout in milliseconds. If the entire response body
+    /// is not received within this window the proxy aborts.
+    #[serde(default)]
+    pub stream_timeout_ms: Option<u64>,
+    /// Grace period in milliseconds after the upstream closes to let
+    /// in-progress writes to the client finish.
+    #[serde(default)]
+    pub stream_close_delay_ms: Option<u64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -121,8 +145,61 @@ pub struct Route {
     /// Empty = retry only on connection errors (default behavior).
     #[serde(default)]
     pub retry_on_status: Vec<u16>,
+
+    // ── Advanced matchers & directives (Caddy parity) ──
+
+    /// Additional matchers beyond basic path/method/host. All must pass
+    /// (implicit AND). Supports `remote_ip`, `client_ip`, `not`,
+    /// `expression`, `header`, `query`, `path_prefix`, `path_regex`,
+    /// `all`, `any`.
+    #[serde(default)]
+    pub matchers: Vec<crate::proxy::matchers::Matcher>,
+    /// References to named matcher blocks defined in the gateway config.
+    /// E.g. `["@internal", "@api_only"]`. All referenced matchers must
+    /// pass for the route to match.
+    #[serde(default)]
+    pub matcher_refs: Vec<String>,
+    /// Mutually-exclusive first-match handler groups. Evaluated in order;
+    /// the first matching block wins and the rest are skipped. Implements
+    /// Caddy's `handle` / `handle_path` semantics.
+    #[serde(default)]
+    pub handle_blocks: Vec<crate::proxy::directives::HandleBlock>,
+    /// `try_files` configuration. When set, the proxy checks for file
+    /// existence on disk before forwarding to the upstream, rewriting
+    /// the path to the first existing file or the fallback.
+    #[serde(default)]
+    pub try_files: Option<crate::proxy::directives::TryFilesConfig>,
+    /// URI manipulation directives applied to the request path before
+    /// proxying. Supports `strip_prefix`, `strip_suffix`, `replace`,
+    /// `path_escape`, and `rewrite`.
+    #[serde(default)]
+    pub uri_directives: Vec<crate::proxy::directives::UriDirective>,
+    /// Response interception rules. Evaluated after the upstream responds.
+    /// Can rewrite status, body, or headers based on the upstream response.
+    #[serde(default)]
+    pub intercept_rules: Vec<crate::proxy::directives::InterceptRule>,
+    /// HTTP/2 server push configuration. When set, the proxy sends
+    /// PUSH_PROMISE frames for the configured resources.
+    #[serde(default)]
+    pub push: Option<crate::proxy::h2_push::PushConfig>,
+    /// Static response without upstream. When set, the route returns this
+    /// response directly without proxying to any upstream. Implements
+    /// Caddy's `respond` directive.
+    #[serde(default)]
+    pub static_response: Option<StaticResponse>,
+
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Static response configuration for the `respond` directive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StaticResponse {
+    pub status: u16,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +309,11 @@ impl Service {
             tls_client_cert_path: None,
             tls_client_key_path: None,
             tls_ca_path: None,
+            lb_hash_header: None,
+            lb_hash_query_param: None,
+            flush_interval_ms: None,
+            stream_timeout_ms: None,
+            stream_close_delay_ms: None,
             created_at: now,
             updated_at: now,
         }
@@ -264,6 +346,14 @@ impl Route {
             write_timeout_ms: None,
             idle_timeout_ms: None,
             retry_on_status: Vec::new(),
+            matchers: Vec::new(),
+            matcher_refs: Vec::new(),
+            handle_blocks: Vec::new(),
+            try_files: None,
+            uri_directives: Vec::new(),
+            intercept_rules: Vec::new(),
+            push: None,
+            static_response: None,
             created_at: now,
             updated_at: now,
         }

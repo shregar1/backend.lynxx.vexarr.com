@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GatewayConfig {
@@ -15,6 +16,21 @@ pub struct GatewayConfig {
     /// gateway refuses to start. See `src/license/mod.rs`.
     #[serde(default)]
     pub license: LicenseSettings,
+    /// Named matchers (`@name`) that can be referenced by routes.
+    /// Equivalent to Caddy's `@name` matcher blocks.
+    #[serde(default)]
+    pub named_matchers: Vec<crate::proxy::matchers::NamedMatcher>,
+    /// Named reusable config snippets. Define a block once under
+    /// `[snippets.<name>]` and reference it via `import = "<name>"`.
+    /// When an import value matches a snippet name (rather than a file
+    /// path), the snippet is inlined at the import site.
+    #[serde(default)]
+    pub snippets: HashMap<String, serde_json::Value>,
+    /// Directive execution order. Plugins are evaluated in this order;
+    /// plugins not listed run after all listed ones in their natural
+    /// (creation) order. Mirrors Caddy's `order` global option.
+    #[serde(default)]
+    pub order: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -140,6 +156,20 @@ pub struct GatewaySettings {
     /// to share state across multiple gateway nodes.
     #[serde(default)]
     pub cert_store: CertStoreConfig,
+
+    /// Delay in seconds before the server starts draining after
+    /// receiving a shutdown signal. During this window the server
+    /// continues accepting new connections normally so upstream
+    /// load balancers can detect the pending shutdown via failing
+    /// health checks. Default: 0 (drain immediately).
+    #[serde(default)]
+    pub shutdown_delay_secs: u64,
+
+    /// Maximum time in seconds to wait for in-flight requests to
+    /// complete after the shutdown delay. Connections still active
+    /// after this grace period are forcibly closed. Default: 30.
+    #[serde(default = "default_grace_period")]
+    pub grace_period_secs: u64,
 }
 
 /// Built-in PKI configuration. When `enabled = true` the gateway
@@ -303,6 +333,21 @@ pub struct AcmeConfig {
     /// and the resulting certificate.
     #[serde(default = "default_acme_key_type")]
     pub key_type: String,
+
+    /// When `true`, certificate renewals reuse the existing private key
+    /// instead of generating a fresh one. Reduces HPKP / pin rotation
+    /// churn. Defaults to `false`.
+    #[serde(default)]
+    pub reuse_private_keys: bool,
+
+    /// Preferred certificate chain issuer CN. When non-empty, the
+    /// gateway checks whether the downloaded chain's issuer contains
+    /// this string (e.g. `"ISRG Root X1"`). If the chain doesn't
+    /// match, a warning is logged. Forward-compatible: when the ACME
+    /// API supports alternate chains, the gateway will select the
+    /// matching one automatically. Defaults to `""` (accept any chain).
+    #[serde(default)]
+    pub preferred_chain: String,
 }
 
 /// On-Demand TLS settings. When enabled, the gateway provisions ACME
@@ -447,6 +492,8 @@ impl Default for AcmeConfig {
             eab_kid: String::new(),
             eab_hmac_key: String::new(),
             key_type: default_acme_key_type(),
+            reuse_private_keys: false,
+            preferred_chain: String::new(),
         }
     }
 }
@@ -475,13 +522,16 @@ fn default_acme_fallback_urls() -> Vec<String> {
     vec!["https://acme.zerossl.com/v2/DV90".to_string()]
 }
 
-/// External service-discovery providers. Today only `docker` is
-/// implemented; future providers (Kubernetes, Consul, Nomad) plug in
-/// here with their own config blocks.
+/// External service-discovery providers.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct ProvidersConfig {
     #[serde(default)]
     pub docker: crate::discovery::docker::DockerProviderConfig,
+    /// SRV/A DNS-based dynamic upstream discovery. Polls DNS SRV records
+    /// and reconciles the discovered hosts as targets for the referenced
+    /// service, adding new ones and removing stale ones automatically.
+    #[serde(default)]
+    pub srv_dns: crate::discovery::srv_dns::SrvDnsProviderConfig,
 }
 
 /// Inbound TLS termination knobs. When `enabled = false` (the default)
@@ -541,6 +591,24 @@ pub struct TlsSettings {
     /// PROXY protocol header. Required for AWS NLB, HAProxy, etc.
     #[serde(default)]
     pub proxy_protocol: bool,
+    /// Base64-encoded ECH (Encrypted ClientHello) config list. When
+    /// non-empty the gateway stores the decoded config for future use.
+    /// Server-side ECH is not yet supported by rustls — a warning is
+    /// logged at startup when this field is set.
+    #[serde(default)]
+    pub ech_config_list: String,
+    /// Enable TLS 1.3 0-RTT (early data) acceptance. When true *and*
+    /// max_version includes TLS 1.3, the server advertises support for
+    /// up to 16 KB of early data. **Warning:** 0-RTT data is susceptible
+    /// to replay attacks — only enable when upstream endpoints are
+    /// idempotent or replay-safe.
+    #[serde(default)]
+    pub enable_0rtt: bool,
+    /// Crypto provider backend. Defaults to `"ring"`. Set to
+    /// `"aws-lc-rs"` to unlock post-quantum key exchange
+    /// (`x25519mlkem768`). Requires the `aws-lc-rs` cargo feature.
+    #[serde(default = "default_crypto_provider")]
+    pub crypto_provider: String,
 }
 
 impl Default for TlsSettings {
@@ -557,8 +625,15 @@ impl Default for TlsSettings {
             cipher_suites: Vec::new(),
             sslkeylogfile: String::new(),
             proxy_protocol: false,
+            ech_config_list: String::new(),
+            enable_0rtt: false,
+            crypto_provider: default_crypto_provider(),
         }
     }
+}
+
+fn default_crypto_provider() -> String {
+    "ring".to_string()
 }
 
 fn default_tls_min_version() -> String {
@@ -593,6 +668,11 @@ pub struct ServiceConfig {
     pub index_file: Option<String>,
     #[serde(default)]
     pub spa_fallback: Option<bool>,
+    /// Optional stable identifier for JSON config traversal. When set,
+    /// this entry can be looked up via `GET /admin/v1/config/@id/<tag>`
+    /// instead of navigating array indices.
+    #[serde(default, rename = "@id")]
+    pub id_tag: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -605,6 +685,11 @@ pub struct RouteConfig {
     pub service: String,
     #[serde(default)]
     pub strip_path: bool,
+    /// Optional stable identifier for JSON config traversal. When set,
+    /// this entry can be looked up via `GET /admin/v1/config/@id/<tag>`
+    /// instead of navigating array indices.
+    #[serde(default, rename = "@id")]
+    pub id_tag: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -614,6 +699,11 @@ pub struct PluginConfig {
     pub enabled: bool,
     #[serde(default)]
     pub config: serde_json::Value,
+    /// Optional stable identifier for JSON config traversal. When set,
+    /// this entry can be looked up via `GET /admin/v1/config/@id/<tag>`
+    /// instead of navigating array indices.
+    #[serde(default, rename = "@id")]
+    pub id_tag: Option<String>,
 }
 
 impl Default for GatewayConfig {
@@ -624,6 +714,9 @@ impl Default for GatewayConfig {
             routes: Vec::new(),
             plugins: Vec::new(),
             license: LicenseSettings::default(),
+            named_matchers: Vec::new(),
+            snippets: HashMap::new(),
+            order: Vec::new(),
         }
     }
 }
@@ -655,7 +748,13 @@ fn default_gateway() -> GatewaySettings {
         pki: PkiConfig::default(),
         cert_store: CertStoreConfig::default(),
         trusted_proxies: Vec::new(),
+        shutdown_delay_secs: 0,
+        grace_period_secs: default_grace_period(),
     }
+}
+
+fn default_grace_period() -> u64 {
+    30
 }
 
 fn default_prewarm_interval() -> u64 {
@@ -816,6 +915,15 @@ fn resolve_imports(contents: &str, base_dir: &std::path::Path, format: ConfigFor
     match format {
         ConfigFormat::Toml => {
             let mut table: toml::Value = toml::from_str(contents)?;
+            // Extract named snippets before processing imports.
+            let snippets: toml::map::Map<String, toml::Value> = table
+                .as_table_mut()
+                .and_then(|t| t.remove("snippets"))
+                .and_then(|v| match v {
+                    toml::Value::Table(m) => Some(m),
+                    _ => None,
+                })
+                .unwrap_or_default();
             if let Some(imports) = table.as_table_mut().and_then(|t| t.remove("import")) {
                 let paths = match imports {
                     toml::Value::String(s) => vec![s],
@@ -826,18 +934,43 @@ fn resolve_imports(contents: &str, base_dir: &std::path::Path, format: ConfigFor
                     _ => vec![],
                 };
                 for p in &paths {
-                    let resolved = resolve_import_path(p, base_dir);
-                    let snippet = std::fs::read_to_string(&resolved)
-                        .map_err(|e| anyhow::anyhow!("import {}: {e}", resolved.display()))?;
-                    tracing::info!("importing config snippet from {}", resolved.display());
-                    let snippet_val: toml::Value = toml::from_str(&snippet)?;
-                    merge_toml(&mut table, &snippet_val);
+                    if let Some(snippet_val) = snippets.get(p) {
+                        tracing::info!("expanding snippet '{p}'");
+                        let snippet_as_table = toml::Value::Table({
+                            let mut m = toml::map::Map::new();
+                            m.insert(p.clone(), snippet_val.clone());
+                            m
+                        });
+                        // Snippets are tables — merge their content directly.
+                        merge_toml(&mut table, &toml::Value::Table(snippet_val.as_table().cloned().unwrap_or_else(|| {
+                            let mut m = toml::map::Map::new();
+                            m.insert(p.clone(), snippet_val.clone());
+                            m
+                        })));
+                        let _ = snippet_as_table; // suppress warning
+                    } else {
+                        let resolved = resolve_import_path(p, base_dir);
+                        let snippet = std::fs::read_to_string(&resolved)
+                            .map_err(|e| anyhow::anyhow!("import {}: {e}", resolved.display()))?;
+                        tracing::info!("importing config snippet from {}", resolved.display());
+                        let snippet_val: toml::Value = toml::from_str(&snippet)?;
+                        merge_toml(&mut table, &snippet_val);
+                    }
                 }
             }
             Ok(toml::to_string_pretty(&table)?)
         }
         ConfigFormat::Yaml => {
             let mut val: serde_yaml::Value = serde_yaml::from_str(contents)?;
+            // Extract named snippets before processing imports.
+            let snippets: serde_yaml::Mapping = val
+                .as_mapping_mut()
+                .and_then(|m| m.remove(&serde_yaml::Value::String("snippets".into())))
+                .and_then(|v| match v {
+                    serde_yaml::Value::Mapping(m) => Some(m),
+                    _ => None,
+                })
+                .unwrap_or_default();
             if let Some(imports) = val.as_mapping_mut().and_then(|m| m.remove(&serde_yaml::Value::String("import".into()))) {
                 let paths: Vec<String> = match imports {
                     serde_yaml::Value::String(s) => vec![s],
@@ -848,12 +981,20 @@ fn resolve_imports(contents: &str, base_dir: &std::path::Path, format: ConfigFor
                     _ => vec![],
                 };
                 for p in &paths {
-                    let resolved = resolve_import_path(p, base_dir);
-                    let snippet = std::fs::read_to_string(&resolved)
-                        .map_err(|e| anyhow::anyhow!("import {}: {e}", resolved.display()))?;
-                    tracing::info!("importing config snippet from {}", resolved.display());
-                    let snippet_val: serde_yaml::Value = serde_yaml::from_str(&snippet)?;
-                    merge_yaml(&mut val, &snippet_val);
+                    let key = serde_yaml::Value::String(p.clone());
+                    if let Some(snippet_val) = snippets.get(&key) {
+                        tracing::info!("expanding snippet '{p}'");
+                        if let serde_yaml::Value::Mapping(ref m) = snippet_val {
+                            merge_yaml(&mut val, &serde_yaml::Value::Mapping(m.clone()));
+                        }
+                    } else {
+                        let resolved = resolve_import_path(p, base_dir);
+                        let snippet = std::fs::read_to_string(&resolved)
+                            .map_err(|e| anyhow::anyhow!("import {}: {e}", resolved.display()))?;
+                        tracing::info!("importing config snippet from {}", resolved.display());
+                        let snippet_val: serde_yaml::Value = serde_yaml::from_str(&snippet)?;
+                        merge_yaml(&mut val, &snippet_val);
+                    }
                 }
             }
             Ok(serde_yaml::to_string(&val)?)
@@ -861,6 +1002,15 @@ fn resolve_imports(contents: &str, base_dir: &std::path::Path, format: ConfigFor
         ConfigFormat::Json => {
             let clean = strip_jsonc_comments(contents);
             let mut val: serde_json::Value = serde_json::from_str(&clean)?;
+            // Extract named snippets before processing imports.
+            let snippets: serde_json::Map<String, serde_json::Value> = val
+                .as_object_mut()
+                .and_then(|m| m.remove("snippets"))
+                .and_then(|v| match v {
+                    serde_json::Value::Object(m) => Some(m),
+                    _ => None,
+                })
+                .unwrap_or_default();
             if let Some(imports) = val.as_object_mut().and_then(|m| m.remove("import")) {
                 let paths: Vec<String> = match imports {
                     serde_json::Value::String(s) => vec![s],
@@ -871,13 +1021,20 @@ fn resolve_imports(contents: &str, base_dir: &std::path::Path, format: ConfigFor
                     _ => vec![],
                 };
                 for p in &paths {
-                    let resolved = resolve_import_path(p, base_dir);
-                    let snippet = std::fs::read_to_string(&resolved)
-                        .map_err(|e| anyhow::anyhow!("import {}: {e}", resolved.display()))?;
-                    tracing::info!("importing config snippet from {}", resolved.display());
-                    let snippet_clean = strip_jsonc_comments(&snippet);
-                    let snippet_val: serde_json::Value = serde_json::from_str(&snippet_clean)?;
-                    merge_json(&mut val, &snippet_val);
+                    if let Some(snippet_val) = snippets.get(p) {
+                        tracing::info!("expanding snippet '{p}'");
+                        if let serde_json::Value::Object(ref m) = snippet_val {
+                            merge_json(&mut val, &serde_json::Value::Object(m.clone()));
+                        }
+                    } else {
+                        let resolved = resolve_import_path(p, base_dir);
+                        let snippet = std::fs::read_to_string(&resolved)
+                            .map_err(|e| anyhow::anyhow!("import {}: {e}", resolved.display()))?;
+                        tracing::info!("importing config snippet from {}", resolved.display());
+                        let snippet_clean = strip_jsonc_comments(&snippet);
+                        let snippet_val: serde_json::Value = serde_json::from_str(&snippet_clean)?;
+                        merge_json(&mut val, &snippet_val);
+                    }
                 }
             }
             Ok(serde_json::to_string_pretty(&val)?)
@@ -1058,5 +1215,184 @@ fn parse_port_env(name: &str) -> Option<u16> {
             tracing::warn!(var = name, value = %raw, error = %e, "ignoring invalid port env var");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_grace_period_30s() {
+        let gw = default_gateway();
+        assert_eq!(gw.grace_period_secs, 30);
+    }
+
+    #[test]
+    fn default_shutdown_delay_0() {
+        let gw = default_gateway();
+        assert_eq!(gw.shutdown_delay_secs, 0);
+    }
+
+    #[test]
+    fn custom_shutdown_config_deserializes() {
+        let toml_str = r#"
+[gateway]
+shutdown_delay_secs = 5
+grace_period_secs = 60
+"#;
+        let cfg: GatewayConfig = toml::from_str(toml_str).expect("valid TOML");
+        assert_eq!(cfg.gateway.shutdown_delay_secs, 5);
+        assert_eq!(cfg.gateway.grace_period_secs, 60);
+    }
+
+    // --- Feature 51: @id shortcut tag tests ---
+
+    #[test]
+    fn id_tag_deserializes() {
+        let json = r#"{
+            "services": [
+                { "name": "my-svc", "url": "http://localhost:3000", "@id": "my-svc" }
+            ],
+            "routes": [
+                { "paths": ["/api"], "service": "my-svc", "@id": "api-route" }
+            ],
+            "plugins": [
+                { "name": "cors", "@id": "cors-global" }
+            ]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.services[0].id_tag.as_deref(), Some("my-svc"));
+        assert_eq!(cfg.routes[0].id_tag.as_deref(), Some("api-route"));
+        assert_eq!(cfg.plugins[0].id_tag.as_deref(), Some("cors-global"));
+    }
+
+    #[test]
+    fn id_tag_optional() {
+        let json = r#"{
+            "services": [
+                { "name": "plain-svc", "url": "http://localhost:4000" }
+            ],
+            "routes": [
+                { "paths": ["/health"], "service": "plain-svc" }
+            ],
+            "plugins": [
+                { "name": "logging" }
+            ]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert!(cfg.services[0].id_tag.is_none());
+        assert!(cfg.routes[0].id_tag.is_none());
+        assert!(cfg.plugins[0].id_tag.is_none());
+    }
+
+    // --- Feature 52: directive ordering tests ---
+
+    #[test]
+    fn order_deserializes() {
+        let json = r#"{
+            "order": ["cors", "rate_limit", "jwt"]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.order, vec!["cors", "rate_limit", "jwt"]);
+    }
+
+    #[test]
+    fn order_default_empty() {
+        let cfg = GatewayConfig::default();
+        assert!(cfg.order.is_empty());
+    }
+
+    // --- Feature 48: snippets tests ---
+
+    #[test]
+    fn snippet_inline_toml() {
+        let dir = std::env::temp_dir().join("lynxx_snippet_test_inline");
+        let _ = std::fs::create_dir_all(&dir);
+        let cfg_path = dir.join("config.toml");
+        let toml_str = r#"
+[snippets.common_service]
+retries = 5
+connect_timeout_ms = 10000
+
+import = "common_service"
+
+[[services]]
+name = "api"
+url = "http://localhost:3000"
+"#;
+        std::fs::write(&cfg_path, toml_str).unwrap();
+        let cfg = load_config(cfg_path.to_str().unwrap()).expect("snippet should expand");
+        assert_eq!(cfg.services.len(), 1);
+        // The snippets field should not remain in the deserialized config
+        // (it's stripped during preprocessing).
+        assert!(cfg.snippets.is_empty());
+    }
+
+    #[test]
+    fn snippet_field_deserializes() {
+        let json = r#"{
+            "snippets": {
+                "common": { "retries": 5 }
+            }
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.snippets.len(), 1);
+        assert!(cfg.snippets.contains_key("common"));
+    }
+
+    #[test]
+    fn snippet_default_empty() {
+        let cfg = GatewayConfig::default();
+        assert!(cfg.snippets.is_empty());
+    }
+
+    // --- Config format detection tests ---
+
+    #[test]
+    fn detect_format_from_extension() {
+        assert_eq!(detect_format("config.toml"), Some(ConfigFormat::Toml));
+        assert_eq!(detect_format("config.yaml"), Some(ConfigFormat::Yaml));
+        assert_eq!(detect_format("config.yml"), Some(ConfigFormat::Yaml));
+        assert_eq!(detect_format("config.json"), Some(ConfigFormat::Json));
+        assert_eq!(detect_format("config.jsonc"), Some(ConfigFormat::Json));
+        assert_eq!(detect_format("config.unknown"), None);
+    }
+
+    #[test]
+    fn strip_jsonc_comments_basic() {
+        let input = r#"{ // comment
+            "key": "value" /* block */
+        }"#;
+        let clean = strip_jsonc_comments(input);
+        assert!(!clean.contains("comment"));
+        assert!(!clean.contains("block"));
+        assert!(clean.contains("\"key\""));
+    }
+
+    #[test]
+    fn env_var_expansion() {
+        std::env::set_var("LYNXX_TEST_PORT", "9999");
+        let result = expand_env_vars("port = {env.LYNXX_TEST_PORT}");
+        assert_eq!(result, "port = 9999");
+        std::env::remove_var("LYNXX_TEST_PORT");
+    }
+
+    #[test]
+    fn merge_toml_arrays_extend() {
+        let mut base: toml::Value = toml::from_str(r#"arr = [1, 2]"#).unwrap();
+        let overlay: toml::Value = toml::from_str(r#"arr = [3]"#).unwrap();
+        merge_toml(&mut base, &overlay);
+        let arr = base.get("arr").unwrap().as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+    }
+
+    #[test]
+    fn merge_json_deep() {
+        let mut base: serde_json::Value = serde_json::json!({"a": {"b": 1}});
+        let overlay: serde_json::Value = serde_json::json!({"a": {"c": 2}});
+        merge_json(&mut base, &overlay);
+        assert_eq!(base["a"]["b"], 1);
+        assert_eq!(base["a"]["c"], 2);
     }
 }

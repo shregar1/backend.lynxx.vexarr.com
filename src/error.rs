@@ -36,6 +36,9 @@ pub enum GatewayError {
     #[error("bad request: {0}")]
     BadRequest(String),
 
+    #[error("precondition failed: {0}")]
+    PreconditionFailed(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 
@@ -165,6 +168,9 @@ impl IntoResponse for GatewayError {
             },
             GatewayError::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             GatewayError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            GatewayError::PreconditionFailed(_) => {
+                (StatusCode::PRECONDITION_FAILED, self.to_string())
+            }
             GatewayError::ConfigError(_)
             | GatewayError::Internal(_)
             | GatewayError::Sqlx(_)

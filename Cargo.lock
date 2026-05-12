@@ -3244,6 +3244,7 @@ dependencies = [
  "jsonwebtoken",
  "k8s-openapi",
  "kube",
+ "libc",
  "machine-uid",
  "metrics",
  "metrics-exporter-prometheus",

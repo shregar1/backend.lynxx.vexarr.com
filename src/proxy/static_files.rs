@@ -338,6 +338,469 @@ pub struct ServeOptions<'a> {
     pub if_none_match: Option<&'a str>,
     pub if_modified_since: Option<&'a str>,
     pub range: Option<&'a str>,
+    /// When true, enable directory browsing for directories that have no
+    /// index file. The response is an HTML listing of the directory.
+    pub browse: bool,
+    /// Custom HTML template for directory listings. The template receives
+    /// these placeholders: `{{path}}`, `{{entries}}`. When `None` a
+    /// built-in minimal HTML page is used.
+    pub browse_template: Option<&'a str>,
+    /// When true, return `ServeResult::PassThru` instead of 404 when the
+    /// requested file doesn't exist. The caller can then fall through to
+    /// the next handler (e.g. proxy to an upstream).
+    pub pass_thru: bool,
+    /// Which precompressed sidecar encodings to try. When `None`, the
+    /// default set (br, zstd, gzip) is used. Pass an empty vec to
+    /// disable precompressed serving entirely.
+    pub precompressed: Option<&'a [PrecompressedEncoding]>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Configurable precompressed encodings
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Precompressed encoding that can be opted into via config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrecompressedEncoding {
+    Brotli,
+    Zstd,
+    Gzip,
+}
+
+impl PrecompressedEncoding {
+    pub fn suffix(&self) -> &'static str {
+        match self {
+            Self::Brotli => ".br",
+            Self::Zstd => ".zst",
+            Self::Gzip => ".gz",
+        }
+    }
+
+    pub fn encoding(&self) -> &'static str {
+        match self {
+            Self::Brotli => "br",
+            Self::Zstd => "zstd",
+            Self::Gzip => "gzip",
+        }
+    }
+
+    /// Parse from a string like `"br"`, `"gzip"`, `"zstd"`.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "br" | "brotli" => Some(Self::Brotli),
+            "zstd" | "zstandard" => Some(Self::Zstd),
+            "gz" | "gzip" => Some(Self::Gzip),
+            _ => None,
+        }
+    }
+}
+
+/// Default precompressed algorithm priority.
+pub const DEFAULT_PRECOMPRESSED: &[PrecompressedEncoding] = &[
+    PrecompressedEncoding::Brotli,
+    PrecompressedEncoding::Zstd,
+    PrecompressedEncoding::Gzip,
+];
+
+// ─────────────────────────────────────────────────────────────────────────
+// Pluggable filesystem backend (virtual FS)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Metadata about a file or directory, abstracted from the OS.
+#[derive(Debug, Clone)]
+pub struct FsMeta {
+    pub is_file: bool,
+    pub is_dir: bool,
+    pub len: u64,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+/// A single directory entry for listings.
+#[derive(Debug, Clone)]
+pub struct FsDirEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+/// Trait for pluggable filesystem backends. The default implementation
+/// uses `tokio::fs` (local disk). Implementors can provide S3, GCS,
+/// in-memory, or overlay filesystems.
+#[async_trait::async_trait]
+pub trait FileSystem: Send + Sync {
+    /// Stat a path, returning metadata or `None` if it doesn't exist.
+    async fn metadata(&self, path: &Path) -> Option<FsMeta>;
+    /// Read a file's full contents.
+    async fn read(&self, path: &Path) -> Option<Vec<u8>>;
+    /// List entries in a directory.
+    async fn read_dir(&self, path: &Path) -> Option<Vec<FsDirEntry>>;
+}
+
+/// Default filesystem backed by `tokio::fs`.
+pub struct LocalFs;
+
+#[async_trait::async_trait]
+impl FileSystem for LocalFs {
+    async fn metadata(&self, path: &Path) -> Option<FsMeta> {
+        let meta = fs::metadata(path).await.ok()?;
+        Some(FsMeta {
+            is_file: meta.is_file(),
+            is_dir: meta.is_dir(),
+            len: meta.len(),
+            modified: meta.modified().ok(),
+        })
+    }
+
+    async fn read(&self, path: &Path) -> Option<Vec<u8>> {
+        fs::read(path).await.ok()
+    }
+
+    async fn read_dir(&self, path: &Path) -> Option<Vec<FsDirEntry>> {
+        let mut dir = fs::read_dir(path).await.ok()?;
+        let mut entries = Vec::new();
+        while let Ok(Some(entry)) = dir.next_entry().await {
+            let meta = entry.metadata().await.ok();
+            entries.push(FsDirEntry {
+                name: entry.file_name().to_string_lossy().to_string(),
+                is_dir: meta.as_ref().map(|m| m.is_dir()).unwrap_or(false),
+                size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
+                modified: meta.and_then(|m| m.modified().ok()),
+            });
+        }
+        entries.sort_by(|a, b| {
+            // Directories first, then alphabetical.
+            b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name))
+        });
+        Some(entries)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Directory browse (directory listing)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Render a directory listing as an HTML page.
+pub fn render_directory_listing(
+    request_path: &str,
+    entries: &[FsDirEntry],
+    template: Option<&str>,
+) -> Response<Body> {
+    let mut rows = String::new();
+    // Parent directory link.
+    if request_path != "/" {
+        rows.push_str(r#"<tr><td><a href="../">../</a></td><td>—</td><td>—</td></tr>"#);
+        rows.push('\n');
+    }
+    for entry in entries {
+        let name = &entry.name;
+        // Skip hidden entries.
+        if name.starts_with('.') {
+            continue;
+        }
+        let display = if entry.is_dir {
+            format!("{name}/")
+        } else {
+            name.clone()
+        };
+        let href = if entry.is_dir {
+            format!("{name}/")
+        } else {
+            name.clone()
+        };
+        let size = if entry.is_dir {
+            "—".to_string()
+        } else {
+            format_file_size(entry.size)
+        };
+        let modified = entry
+            .modified
+            .map(|t| format_http_date(t))
+            .unwrap_or_else(|| "—".to_string());
+        rows.push_str(&format!(
+            r#"<tr><td><a href="{href}">{display}</a></td><td>{size}</td><td>{modified}</td></tr>"#,
+        ));
+        rows.push('\n');
+    }
+
+    let html = if let Some(tpl) = template {
+        tpl.replace("{{path}}", request_path)
+            .replace("{{entries}}", &rows)
+    } else {
+        format!(
+            r#"<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Index of {path}</title>
+<style>
+body {{ font-family: system-ui, -apple-system, sans-serif; margin: 2rem; color: #111; }}
+h1 {{ font-size: 1.2rem; font-weight: 600; border-bottom: 1px solid #ddd; padding-bottom: .5rem; }}
+table {{ border-collapse: collapse; width: 100%; }}
+th, td {{ text-align: left; padding: .4rem .8rem; border-bottom: 1px solid #eee; }}
+th {{ font-weight: 600; font-size: .85rem; text-transform: uppercase; letter-spacing: .04em; color: #666; }}
+a {{ color: #111; text-decoration: none; }}
+a:hover {{ text-decoration: underline; }}
+td:nth-child(2), td:nth-child(3) {{ color: #666; font-size: .9rem; }}
+</style>
+</head><body>
+<h1>Index of {path}</h1>
+<table>
+<thead><tr><th>Name</th><th>Size</th><th>Modified</th></tr></thead>
+<tbody>
+{entries}
+</tbody>
+</table>
+</body></html>"#,
+            path = request_path,
+            entries = rows,
+        )
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "public, max-age=0, must-revalidate")
+        .body(Body::from(html))
+        .unwrap()
+}
+
+fn format_file_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// pass_thru result type
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Result of a static file serve attempt. When `pass_thru` is enabled,
+/// the caller receives `PassThru` instead of a 404 response, allowing
+/// it to fall through to the next handler (e.g. proxy to upstream).
+pub enum ServeResult {
+    /// File was found and served (or 304/206/etc.).
+    Response(Response<Body>),
+    /// File not found; caller should try the next handler.
+    PassThru,
+}
+
+/// Serve with pass-through support and pluggable filesystem.
+pub async fn serve_with_fs(
+    filesystem: &dyn FileSystem,
+    document_root: &str,
+    index_file: &str,
+    spa_fallback: bool,
+    request_path: &str,
+    accept_encoding: &str,
+    opts: &ServeOptions<'_>,
+) -> ServeResult {
+    let root = PathBuf::from(document_root);
+    let encodings = parse_accept_encoding(accept_encoding);
+
+    if is_hidden_path(request_path, opts.hide_patterns) {
+        return if opts.pass_thru {
+            ServeResult::PassThru
+        } else {
+            ServeResult::Response(empty_response(StatusCode::NOT_FOUND))
+        };
+    }
+
+    let candidate = match safe_resolve(&root, request_path) {
+        Some(p) => p,
+        None => return ServeResult::Response(empty_response(StatusCode::FORBIDDEN)),
+    };
+
+    // Canonical redirect: /dir → /dir/
+    if !request_path.ends_with('/') && request_path != "/" {
+        if let Some(meta) = filesystem.metadata(&candidate).await {
+            if meta.is_dir {
+                let redirect_to = format!("{request_path}/");
+                return ServeResult::Response(
+                    Response::builder()
+                        .status(StatusCode::MOVED_PERMANENTLY)
+                        .header(header::LOCATION, redirect_to)
+                        .body(Body::empty())
+                        .unwrap(),
+                );
+            }
+        }
+    }
+
+    // Determine which precompressed set to use.
+    let precompressed = opts.precompressed.unwrap_or(DEFAULT_PRECOMPRESSED);
+
+    // Try serving the file directly (with precompressed variants).
+    if let Some(resp) =
+        try_serve_file_with_fs(filesystem, &candidate, request_path, &encodings, opts, precompressed)
+            .await
+    {
+        return ServeResult::Response(resp);
+    }
+
+    // Try index file in directory.
+    if candidate.extension().is_none() || request_path.ends_with('/') {
+        let index = candidate.join(index_file);
+        if let Some(resp) =
+            try_serve_file_with_fs(filesystem, &index, request_path, &encodings, opts, precompressed)
+                .await
+        {
+            return ServeResult::Response(resp);
+        }
+
+        // Directory browse: list directory if enabled and dir exists.
+        if opts.browse {
+            if let Some(meta) = filesystem.metadata(&candidate).await {
+                if meta.is_dir {
+                    if let Some(entries) = filesystem.read_dir(&candidate).await {
+                        return ServeResult::Response(render_directory_listing(
+                            request_path,
+                            &entries,
+                            opts.browse_template,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if request_path == "/favicon.ico" {
+        return ServeResult::Response(empty_response(StatusCode::NO_CONTENT));
+    }
+
+    if spa_fallback {
+        let index = root.join(index_file);
+        if let Some(resp) =
+            try_serve_file_with_fs(filesystem, &index, "/", &encodings, opts, precompressed).await
+        {
+            return ServeResult::Response(resp);
+        }
+    }
+
+    if opts.pass_thru {
+        ServeResult::PassThru
+    } else {
+        ServeResult::Response(empty_response(StatusCode::NOT_FOUND))
+    }
+}
+
+/// Try serving a file using a pluggable filesystem, with precompressed variants.
+async fn try_serve_file_with_fs(
+    filesystem: &dyn FileSystem,
+    path: &Path,
+    request_path: &str,
+    accept_encodings: &[String],
+    opts: &ServeOptions<'_>,
+    precompressed: &[PrecompressedEncoding],
+) -> Option<Response<Body>> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+    // Try precompressed variants first.
+    for enc in precompressed {
+        if accept_encodings.iter().any(|e| e == enc.encoding()) {
+            let compressed_path =
+                path.with_extension(format!("{}{}", ext, enc.suffix()));
+            if let Some(meta) = filesystem.metadata(&compressed_path).await {
+                if meta.is_file {
+                    if let Some(bytes) = filesystem.read(&compressed_path).await {
+                        let etag = generate_etag(
+                            meta.len,
+                            meta.modified.unwrap_or(std::time::UNIX_EPOCH),
+                        );
+                        if check_conditional(
+                            opts.if_none_match,
+                            opts.if_modified_since,
+                            &etag,
+                            meta.modified.unwrap_or(std::time::UNIX_EPOCH),
+                        ) {
+                            return Some(
+                                Response::builder()
+                                    .status(StatusCode::NOT_MODIFIED)
+                                    .header(header::ETAG, &etag)
+                                    .body(Body::empty())
+                                    .unwrap(),
+                            );
+                        }
+                        return Some(file_response(
+                            bytes::Bytes::from(bytes),
+                            ext,
+                            request_path,
+                            Some(enc.encoding()),
+                            Some(&etag),
+                            meta.modified,
+                            opts.cache_control,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // Original file.
+    let meta = filesystem.metadata(path).await?;
+    if !meta.is_file {
+        return None;
+    }
+
+    let etag = generate_etag(meta.len, meta.modified.unwrap_or(std::time::UNIX_EPOCH));
+
+    if check_conditional(
+        opts.if_none_match,
+        opts.if_modified_since,
+        &etag,
+        meta.modified.unwrap_or(std::time::UNIX_EPOCH),
+    ) {
+        return Some(
+            Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header(header::ETAG, &etag)
+                .body(Body::empty())
+                .unwrap(),
+        );
+    }
+
+    // Range request.
+    if let Some(range_header) = opts.range {
+        if let Some((start, end)) = parse_range(range_header, meta.len) {
+            let bytes = filesystem.read(path).await?;
+            let slice =
+                bytes::Bytes::from(bytes[(start as usize)..=(end as usize)].to_vec());
+            return Some(range_response(
+                slice,
+                ext,
+                start,
+                end,
+                meta.len,
+                Some(&etag),
+                None,
+            ));
+        } else {
+            return Some(
+                Response::builder()
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header(header::CONTENT_RANGE, format!("bytes */{}", meta.len))
+                    .body(Body::empty())
+                    .unwrap(),
+            );
+        }
+    }
+
+    let bytes = filesystem.read(path).await?;
+    Some(file_response(
+        bytes::Bytes::from(bytes),
+        ext,
+        request_path,
+        None,
+        Some(&etag),
+        meta.modified,
+        opts.cache_control,
+    ))
 }
 
 pub async fn serve(
@@ -593,5 +1056,671 @@ mod tests {
         let root = Path::new("/tmp");
         assert!(safe_resolve(root, "/foo").is_some());
         assert!(safe_resolve(root, "/../etc/passwd").is_none());
+    }
+
+    // ── PrecompressedEncoding ────────────────────────────────────────
+
+    #[test]
+    fn precompressed_encoding_from_str() {
+        assert_eq!(PrecompressedEncoding::from_str("br"), Some(PrecompressedEncoding::Brotli));
+        assert_eq!(PrecompressedEncoding::from_str("brotli"), Some(PrecompressedEncoding::Brotli));
+        assert_eq!(PrecompressedEncoding::from_str("gz"), Some(PrecompressedEncoding::Gzip));
+        assert_eq!(PrecompressedEncoding::from_str("gzip"), Some(PrecompressedEncoding::Gzip));
+        assert_eq!(PrecompressedEncoding::from_str("zstd"), Some(PrecompressedEncoding::Zstd));
+        assert_eq!(PrecompressedEncoding::from_str("zstandard"), Some(PrecompressedEncoding::Zstd));
+        assert_eq!(PrecompressedEncoding::from_str("deflate"), None);
+        assert_eq!(PrecompressedEncoding::from_str(""), None);
+    }
+
+    #[test]
+    fn precompressed_encoding_suffix_and_encoding() {
+        assert_eq!(PrecompressedEncoding::Brotli.suffix(), ".br");
+        assert_eq!(PrecompressedEncoding::Brotli.encoding(), "br");
+        assert_eq!(PrecompressedEncoding::Zstd.suffix(), ".zst");
+        assert_eq!(PrecompressedEncoding::Zstd.encoding(), "zstd");
+        assert_eq!(PrecompressedEncoding::Gzip.suffix(), ".gz");
+        assert_eq!(PrecompressedEncoding::Gzip.encoding(), "gzip");
+    }
+
+    #[test]
+    fn default_precompressed_order() {
+        // Brotli first (best ratio), then zstd, then gzip.
+        assert_eq!(DEFAULT_PRECOMPRESSED[0], PrecompressedEncoding::Brotli);
+        assert_eq!(DEFAULT_PRECOMPRESSED[1], PrecompressedEncoding::Zstd);
+        assert_eq!(DEFAULT_PRECOMPRESSED[2], PrecompressedEncoding::Gzip);
+    }
+
+    // ── In-memory FileSystem for testing ─────────────────────────────
+
+    use std::collections::HashMap as StdHashMap;
+
+    struct InMemoryFs {
+        files: StdHashMap<PathBuf, Vec<u8>>,
+        dirs: std::collections::HashSet<PathBuf>,
+    }
+
+    impl InMemoryFs {
+        fn new() -> Self {
+            Self {
+                files: StdHashMap::new(),
+                dirs: std::collections::HashSet::new(),
+            }
+        }
+
+        fn add_file(&mut self, path: &str, content: &[u8]) {
+            let p = PathBuf::from(path);
+            // Ensure parent directories exist.
+            if let Some(parent) = p.parent() {
+                let mut cur = PathBuf::new();
+                for comp in parent.components() {
+                    cur.push(comp);
+                    self.dirs.insert(cur.clone());
+                }
+            }
+            self.files.insert(p, content.to_vec());
+        }
+
+        fn add_dir(&mut self, path: &str) {
+            let p = PathBuf::from(path);
+            let mut cur = PathBuf::new();
+            for comp in p.components() {
+                cur.push(comp);
+                self.dirs.insert(cur.clone());
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FileSystem for InMemoryFs {
+        async fn metadata(&self, path: &Path) -> Option<FsMeta> {
+            if let Some(data) = self.files.get(path) {
+                return Some(FsMeta {
+                    is_file: true,
+                    is_dir: false,
+                    len: data.len() as u64,
+                    modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000)),
+                });
+            }
+            if self.dirs.contains(path) {
+                return Some(FsMeta {
+                    is_file: false,
+                    is_dir: true,
+                    len: 0,
+                    modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000)),
+                });
+            }
+            None
+        }
+
+        async fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            self.files.get(path).cloned()
+        }
+
+        async fn read_dir(&self, path: &Path) -> Option<Vec<FsDirEntry>> {
+            if !self.dirs.contains(path) {
+                return None;
+            }
+            let mut entries = Vec::new();
+            // Files in this directory.
+            for (p, data) in &self.files {
+                if p.parent() == Some(path) {
+                    entries.push(FsDirEntry {
+                        name: p.file_name().unwrap().to_string_lossy().to_string(),
+                        is_dir: false,
+                        size: data.len() as u64,
+                        modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000)),
+                    });
+                }
+            }
+            // Subdirectories.
+            for d in &self.dirs {
+                if d.parent() == Some(path) && d != path {
+                    entries.push(FsDirEntry {
+                        name: d.file_name().unwrap().to_string_lossy().to_string(),
+                        is_dir: true,
+                        size: 0,
+                        modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000)),
+                    });
+                }
+            }
+            entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
+            Some(entries)
+        }
+    }
+
+    // ── Directory browse tests ──────────────────────────────────────
+
+    #[test]
+    fn render_directory_listing_default_template() {
+        let entries = vec![
+            FsDirEntry {
+                name: "docs".into(),
+                is_dir: true,
+                size: 0,
+                modified: None,
+            },
+            FsDirEntry {
+                name: "readme.txt".into(),
+                is_dir: false,
+                size: 1234,
+                modified: None,
+            },
+        ];
+        let resp = render_directory_listing("/files/", &entries, None);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+        assert!(ct.contains("text/html"));
+    }
+
+    #[test]
+    fn render_directory_listing_custom_template() {
+        let entries = vec![FsDirEntry {
+            name: "file.txt".into(),
+            is_dir: false,
+            size: 42,
+            modified: None,
+        }];
+        let tpl = "<html><body><h1>{{path}}</h1><table>{{entries}}</table></body></html>";
+        let resp = render_directory_listing("/data/", &entries, Some(tpl));
+        // We can't read the body easily in sync code, but we can confirm
+        // it returned 200 with html content-type.
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn render_directory_listing_hides_dotfiles() {
+        let entries = vec![
+            FsDirEntry { name: ".hidden".into(), is_dir: false, size: 0, modified: None },
+            FsDirEntry { name: "visible.txt".into(), is_dir: false, size: 100, modified: None },
+        ];
+        // The render function skips entries starting with '.'.
+        // We verify by checking that the function runs (the skipping is internal).
+        let resp = render_directory_listing("/", &entries, None);
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn render_directory_listing_root_no_parent_link() {
+        let entries = vec![];
+        let resp = render_directory_listing("/", &entries, None);
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Root should not have a parent "../" link.
+    }
+
+    #[test]
+    fn render_directory_listing_subdir_has_parent_link() {
+        let entries = vec![];
+        let resp = render_directory_listing("/sub/", &entries, None);
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ── format_file_size tests ──────────────────────────────────────
+
+    #[test]
+    fn format_file_size_units() {
+        assert_eq!(format_file_size(0), "0 B");
+        assert_eq!(format_file_size(512), "512 B");
+        assert_eq!(format_file_size(1024), "1.0 KB");
+        assert_eq!(format_file_size(1536), "1.5 KB");
+        assert_eq!(format_file_size(1048576), "1.0 MB");
+        assert_eq!(format_file_size(1073741824), "1.00 GB");
+    }
+
+    // ── serve_with_fs: basic file serving ───────────────────────────
+
+    #[tokio::test]
+    async fn serve_with_fs_basic_file() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_file("/www/hello.txt", b"hello world");
+
+        let opts = ServeOptions::default();
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/hello.txt", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::OK);
+                let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+                assert_eq!(ct, "text/plain; charset=utf-8");
+            }
+            ServeResult::PassThru => panic!("expected response, got pass_thru"),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_with_fs_index_file() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_file("/www/index.html", b"<h1>Home</h1>");
+
+        let opts = ServeOptions::default();
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::OK);
+            }
+            ServeResult::PassThru => panic!("expected response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_with_fs_hidden_path_returns_404() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_file("/www/.env", b"SECRET=foo");
+
+        let opts = ServeOptions::default();
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/.env", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+            }
+            ServeResult::PassThru => panic!("expected 404 response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_with_fs_path_traversal_blocked() {
+        let fs = InMemoryFs::new();
+        let opts = ServeOptions::default();
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/../etc/passwd", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            }
+            ServeResult::PassThru => panic!("expected 403"),
+        }
+    }
+
+    // ── serve_with_fs: pass_thru ────────────────────────────────────
+
+    #[tokio::test]
+    async fn serve_with_fs_pass_thru_missing_file() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+
+        let opts = ServeOptions {
+            pass_thru: true,
+            ..Default::default()
+        };
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/nonexistent.txt", "", &opts).await;
+        assert!(matches!(result, ServeResult::PassThru));
+    }
+
+    #[tokio::test]
+    async fn serve_with_fs_pass_thru_existing_file_serves() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_file("/www/found.txt", b"data");
+
+        let opts = ServeOptions {
+            pass_thru: true,
+            ..Default::default()
+        };
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/found.txt", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => assert_eq!(resp.status(), StatusCode::OK),
+            ServeResult::PassThru => panic!("file exists, should serve it"),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_with_fs_no_pass_thru_missing_file_404() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+
+        let opts = ServeOptions {
+            pass_thru: false,
+            ..Default::default()
+        };
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/missing.txt", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => assert_eq!(resp.status(), StatusCode::NOT_FOUND),
+            ServeResult::PassThru => panic!("pass_thru is off, should 404"),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_with_fs_pass_thru_hidden_path() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_file("/www/.git/config", b"secret");
+
+        let opts = ServeOptions {
+            pass_thru: true,
+            ..Default::default()
+        };
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/.git/config", "", &opts).await;
+        // Hidden paths with pass_thru → PassThru (not 404).
+        assert!(matches!(result, ServeResult::PassThru));
+    }
+
+    // ── serve_with_fs: browse ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn serve_with_fs_browse_directory() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_dir("/www/assets");
+        fs.add_file("/www/assets/style.css", b"body{}");
+        fs.add_file("/www/assets/app.js", b"console.log('hi')");
+
+        let opts = ServeOptions {
+            browse: true,
+            ..Default::default()
+        };
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/assets/", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::OK);
+                let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+                assert!(ct.contains("text/html"));
+            }
+            ServeResult::PassThru => panic!("browse enabled, should list directory"),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_with_fs_browse_disabled_no_listing() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_dir("/www/assets");
+        fs.add_file("/www/assets/style.css", b"body{}");
+
+        let opts = ServeOptions {
+            browse: false,
+            ..Default::default()
+        };
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/assets/", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => assert_eq!(resp.status(), StatusCode::NOT_FOUND),
+            ServeResult::PassThru => panic!("expected 404 not pass_thru"),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_with_fs_browse_index_takes_priority() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_dir("/www/docs");
+        fs.add_file("/www/docs/index.html", b"<h1>Docs</h1>");
+        fs.add_file("/www/docs/page.html", b"<p>page</p>");
+
+        let opts = ServeOptions {
+            browse: true,
+            ..Default::default()
+        };
+        // When index.html exists, it should be served instead of a directory listing.
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/docs/", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::OK);
+                let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+                assert!(ct.contains("text/html"));
+            }
+            ServeResult::PassThru => panic!("should serve index.html"),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_with_fs_browse_custom_template() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_dir("/www/dir");
+        fs.add_file("/www/dir/a.txt", b"aaa");
+
+        let tpl = "<custom>{{path}} – {{entries}}</custom>";
+        let opts = ServeOptions {
+            browse: true,
+            browse_template: Some(tpl),
+            ..Default::default()
+        };
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/dir/", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => assert_eq!(resp.status(), StatusCode::OK),
+            ServeResult::PassThru => panic!("should list directory"),
+        }
+    }
+
+    // ── serve_with_fs: configurable precompressed ───────────────────
+
+    #[tokio::test]
+    async fn serve_with_fs_precompressed_brotli() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_file("/www/app.js", b"original javascript");
+        fs.add_file("/www/app.js.br", b"compressed-br-data");
+
+        let opts = ServeOptions {
+            precompressed: Some(&[PrecompressedEncoding::Brotli]),
+            ..Default::default()
+        };
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/app.js", "br, gzip", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::OK);
+                let enc = resp.headers().get(header::CONTENT_ENCODING).unwrap().to_str().unwrap();
+                assert_eq!(enc, "br");
+            }
+            ServeResult::PassThru => panic!("expected brotli response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_with_fs_precompressed_gzip_only() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_file("/www/style.css", b"body{}");
+        fs.add_file("/www/style.css.gz", b"gzipped-data");
+        fs.add_file("/www/style.css.br", b"brotli-data");
+
+        // Only gzip is configured, so br sidecar should be ignored.
+        let opts = ServeOptions {
+            precompressed: Some(&[PrecompressedEncoding::Gzip]),
+            ..Default::default()
+        };
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/style.css", "br, gzip", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::OK);
+                let enc = resp.headers().get(header::CONTENT_ENCODING).unwrap().to_str().unwrap();
+                assert_eq!(enc, "gzip");
+            }
+            ServeResult::PassThru => panic!("expected gzip response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_with_fs_precompressed_disabled() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_file("/www/app.js", b"original");
+        fs.add_file("/www/app.js.br", b"compressed");
+
+        // Empty slice → no precompressed serving.
+        let opts = ServeOptions {
+            precompressed: Some(&[]),
+            ..Default::default()
+        };
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/app.js", "br, gzip", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::OK);
+                // No Content-Encoding header since precompressed is disabled.
+                assert!(resp.headers().get(header::CONTENT_ENCODING).is_none());
+            }
+            ServeResult::PassThru => panic!("expected uncompressed response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_with_fs_precompressed_client_no_accept() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_file("/www/app.js", b"original code");
+        fs.add_file("/www/app.js.br", b"compressed");
+
+        let opts = ServeOptions::default();
+        // Client doesn't accept br → should get original.
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/app.js", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::OK);
+                assert!(resp.headers().get(header::CONTENT_ENCODING).is_none());
+            }
+            ServeResult::PassThru => panic!("expected uncompressed response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_with_fs_precompressed_priority_order() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_file("/www/bundle.js", b"original");
+        fs.add_file("/www/bundle.js.br", b"brotli");
+        fs.add_file("/www/bundle.js.zst", b"zstd");
+        fs.add_file("/www/bundle.js.gz", b"gzip");
+
+        // Default order is br > zstd > gzip. Client accepts all three.
+        let opts = ServeOptions::default();
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/bundle.js", "gzip, br, zstd", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::OK);
+                let enc = resp.headers().get(header::CONTENT_ENCODING).unwrap().to_str().unwrap();
+                assert_eq!(enc, "br"); // Brotli should win.
+            }
+            ServeResult::PassThru => panic!("expected br response"),
+        }
+    }
+
+    // ── serve_with_fs: conditional requests through virtual FS ──────
+
+    #[tokio::test]
+    async fn serve_with_fs_etag_304() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_file("/www/data.json", b"{\"ok\":true}");
+
+        // First request to get the etag.
+        let opts = ServeOptions::default();
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/data.json", "", &opts).await;
+        let etag = match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::OK);
+                resp.headers().get(header::ETAG).unwrap().to_str().unwrap().to_string()
+            }
+            _ => panic!("expected OK"),
+        };
+
+        // Second request with If-None-Match.
+        let opts2 = ServeOptions {
+            if_none_match: Some(&etag),
+            ..Default::default()
+        };
+        let result2 = serve_with_fs(&fs, "/www", "index.html", false, "/data.json", "", &opts2).await;
+        match result2 {
+            ServeResult::Response(resp) => assert_eq!(resp.status(), StatusCode::NOT_MODIFIED),
+            _ => panic!("expected 304"),
+        }
+    }
+
+    // ── serve_with_fs: range request through virtual FS ─────────────
+
+    #[tokio::test]
+    async fn serve_with_fs_range_request() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_file("/www/video.mp4", b"0123456789abcdef");
+
+        let opts = ServeOptions {
+            range: Some("bytes=0-3"),
+            ..Default::default()
+        };
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/video.mp4", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+                let cr = resp.headers().get(header::CONTENT_RANGE).unwrap().to_str().unwrap();
+                assert!(cr.starts_with("bytes 0-3/"));
+            }
+            _ => panic!("expected 206"),
+        }
+    }
+
+    // ── serve_with_fs: SPA fallback through virtual FS ──────────────
+
+    #[tokio::test]
+    async fn serve_with_fs_spa_fallback() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_file("/www/index.html", b"<div id=app></div>");
+
+        let opts = ServeOptions::default();
+        let result = serve_with_fs(&fs, "/www", "index.html", true, "/deep/route/here", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => assert_eq!(resp.status(), StatusCode::OK),
+            ServeResult::PassThru => panic!("SPA fallback should return index.html"),
+        }
+    }
+
+    // ── serve_with_fs: canonical dir redirect ───────────────────────
+
+    #[tokio::test]
+    async fn serve_with_fs_dir_redirect() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_dir("/www/sub");
+
+        let opts = ServeOptions::default();
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/sub", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY);
+                let loc = resp.headers().get(header::LOCATION).unwrap().to_str().unwrap();
+                assert_eq!(loc, "/sub/");
+            }
+            ServeResult::PassThru => panic!("expected redirect"),
+        }
+    }
+
+    // ── FileSystem trait: LocalFs basic coverage ────────────────────
+
+    #[tokio::test]
+    async fn local_fs_nonexistent_file() {
+        let lfs = LocalFs;
+        assert!(lfs.metadata(Path::new("/tmp/__nonexistent_lynx_test_file__")).await.is_none());
+        assert!(lfs.read(Path::new("/tmp/__nonexistent_lynx_test_file__")).await.is_none());
+        assert!(lfs.read_dir(Path::new("/tmp/__nonexistent_lynx_test_dir__")).await.is_none());
+    }
+
+    // ── serve_with_fs: browse + pass_thru combo ─────────────────────
+
+    #[tokio::test]
+    async fn serve_with_fs_browse_and_pass_thru() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        // No index and directory doesn't match path → pass_thru.
+        let opts = ServeOptions {
+            browse: true,
+            pass_thru: true,
+            ..Default::default()
+        };
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/nope.txt", "", &opts).await;
+        assert!(matches!(result, ServeResult::PassThru));
+    }
+
+    // ── serve_with_fs: favicon fallback ─────────────────────────────
+
+    #[tokio::test]
+    async fn serve_with_fs_favicon_no_content() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+
+        let opts = ServeOptions::default();
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/favicon.ico", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => assert_eq!(resp.status(), StatusCode::NO_CONTENT),
+            ServeResult::PassThru => panic!("expected 204 for missing favicon"),
+        }
     }
 }

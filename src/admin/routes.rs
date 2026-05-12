@@ -12,8 +12,9 @@ use crate::proxy::loadbalancer::{LbStrategy, LoadBalancerRegistry};
 use crate::proxy::router::SharedRouteTable;
 use crate::quota::QuotaTracker;
 use crate::reload::{ReloadHandle, ReloadResult};
+use axum::body::Body;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{DateTime, Utc};
@@ -82,6 +83,38 @@ async fn publish_event(state: &AdminState, event: ChangeEvent) {
     if let Err(e) = state.bus.publish(event).await {
         tracing::warn!(error = %e, "failed to publish cluster event");
     }
+}
+
+/// Build an ETag from entity id + updated_at.
+fn entity_etag(id: &Uuid, updated_at: &DateTime<Utc>) -> String {
+    format!("\"{}:{}\"", id.simple(), updated_at.timestamp_millis())
+}
+
+/// Return a JSON response with an ETag header.
+fn json_with_etag<T: Serialize>(entity: T, etag: &str) -> Response {
+    let body = serde_json::to_string(&entity).unwrap();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::ETAG, etag)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+/// Check If-Match header against current ETag. Returns Err(412) on mismatch.
+fn check_if_match(
+    headers: &HeaderMap,
+    current_etag: &str,
+) -> Result<(), GatewayError> {
+    if let Some(if_match) = headers.get(header::IF_MATCH) {
+        let val = if_match.to_str().unwrap_or("");
+        if val != "*" && val != current_etag {
+            return Err(GatewayError::PreconditionFailed(
+                "ETag mismatch — the resource was modified since you last fetched it".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub async fn reload_handler(
@@ -292,17 +325,19 @@ pub async fn create_service(
 pub async fn get_service(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<Service>, GatewayError> {
-    state
+) -> Result<Response, GatewayError> {
+    let svc = state
         .route_table
         .get_service(&id)
-        .map(Json)
-        .ok_or_else(|| GatewayError::NotFound(format!("service {id}")))
+        .ok_or_else(|| GatewayError::NotFound(format!("service {id}")))?;
+    let etag = entity_etag(&svc.id, &svc.updated_at);
+    Ok(json_with_etag(svc, &etag))
 }
 
 pub async fn update_service(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
     Extension(actor): Extension<CurrentActor>,
     Json(input): Json<CreateService>,
 ) -> Result<Json<Service>, GatewayError> {
@@ -311,6 +346,7 @@ pub async fn update_service(
         .route_table
         .get_service(&id)
         .ok_or_else(|| GatewayError::NotFound(format!("service {id}")))?;
+    check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
 
     let new_strategy = input
         .lb_strategy
@@ -337,6 +373,11 @@ pub async fn update_service(
         tls_client_cert_path: existing.tls_client_cert_path.clone(),
         tls_client_key_path: existing.tls_client_key_path.clone(),
         tls_ca_path: existing.tls_ca_path.clone(),
+        lb_hash_header: existing.lb_hash_header.clone(),
+        lb_hash_query_param: existing.lb_hash_query_param.clone(),
+        flush_interval_ms: existing.flush_interval_ms,
+        stream_timeout_ms: existing.stream_timeout_ms,
+        stream_close_delay_ms: existing.stream_close_delay_ms,
         created_at: existing.created_at,
         updated_at: now,
     };
@@ -379,8 +420,12 @@ pub async fn update_service(
 pub async fn delete_service(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
     Extension(actor): Extension<CurrentActor>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
+    if let Some(existing) = state.route_table.get_service(&id) {
+        check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
+    }
     let deleted = state.repo.delete_service(&id).await?;
     if deleted {
         state.route_table.remove_service(&id);
@@ -418,12 +463,76 @@ pub async fn list_health(State(state): State<AdminState>) -> Json<Vec<ServiceHea
 pub async fn get_health(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<ServiceHealth>, GatewayError> {
-    state
+) -> Result<Response, GatewayError> {
+    let health = state
         .health
         .get(&id)
-        .map(Json)
-        .ok_or_else(|| GatewayError::NotFound(format!("health for service {id}")))
+        .ok_or_else(|| GatewayError::NotFound(format!("health for service {id}")))?;
+    let ts = health
+        .last_check_at
+        .unwrap_or_else(|| DateTime::<Utc>::UNIX_EPOCH);
+    let etag = entity_etag(&health.service_id, &ts);
+    Ok(json_with_etag(health, &etag))
+}
+
+// ── Upstream status API ──
+
+/// Per-target snapshot returned by `GET /admin/upstreams`.
+#[derive(Serialize)]
+pub struct UpstreamTargetStatus {
+    pub target_id: Uuid,
+    pub service_id: Uuid,
+    pub service_name: String,
+    pub url: String,
+    pub weight: u32,
+    pub enabled: bool,
+    pub healthy: bool,
+    pub in_flight: u64,
+    pub zone: Option<String>,
+}
+
+/// Aggregate response for `GET /admin/upstreams`.
+#[derive(Serialize)]
+pub struct UpstreamStatusResponse {
+    pub total_targets: usize,
+    pub healthy_targets: usize,
+    pub unhealthy_targets: usize,
+    pub targets: Vec<UpstreamTargetStatus>,
+}
+
+/// `GET /admin/upstreams` — live snapshot of all upstream targets across
+/// every service, including health, in-flight count, and weight.
+pub async fn list_upstreams(State(state): State<AdminState>) -> Json<UpstreamStatusResponse> {
+    let services = state.route_table.list_services();
+    let mut targets = Vec::new();
+
+    for svc in &services {
+        let snapshot = state.lb.snapshot(&svc.id);
+        for ts in snapshot {
+            targets.push(UpstreamTargetStatus {
+                target_id: ts.target.id,
+                service_id: svc.id,
+                service_name: svc.name.clone(),
+                url: ts.target.url.clone(),
+                weight: ts.target.weight,
+                enabled: ts.target.enabled,
+                healthy: ts.healthy.load(std::sync::atomic::Ordering::Relaxed),
+                in_flight: ts.in_flight.load(std::sync::atomic::Ordering::Relaxed),
+                zone: ts.target.zone.clone(),
+            });
+        }
+    }
+
+    let healthy = targets.iter().filter(|t| t.healthy && t.enabled).count();
+    let unhealthy = targets.iter().filter(|t| !t.healthy && t.enabled).count();
+    let total = targets.len();
+
+    Json(UpstreamStatusResponse {
+        total_targets: total,
+        healthy_targets: healthy,
+        unhealthy_targets: unhealthy,
+        targets,
+    })
 }
 
 pub async fn list_routes(State(state): State<AdminState>) -> Json<Vec<Route>> {
@@ -476,17 +585,19 @@ pub async fn create_route(
 pub async fn get_route(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<Route>, GatewayError> {
-    state
+) -> Result<Response, GatewayError> {
+    let route = state
         .route_table
         .get_route(&id)
-        .map(Json)
-        .ok_or_else(|| GatewayError::NotFound(format!("route {id}")))
+        .ok_or_else(|| GatewayError::NotFound(format!("route {id}")))?;
+    let etag = entity_etag(&route.id, &route.updated_at);
+    Ok(json_with_etag(route, &etag))
 }
 
 pub async fn update_route(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
     Extension(actor): Extension<CurrentActor>,
     Json(input): Json<CreateRoute>,
 ) -> Result<Json<Route>, GatewayError> {
@@ -495,6 +606,7 @@ pub async fn update_route(
         .route_table
         .get_route(&id)
         .ok_or_else(|| GatewayError::NotFound(format!("route {id}")))?;
+    check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
 
     let updated = Route {
         id,
@@ -513,6 +625,14 @@ pub async fn update_route(
         write_timeout_ms: None,
         idle_timeout_ms: None,
         retry_on_status: Vec::new(),
+        matchers: Vec::new(),
+        matcher_refs: Vec::new(),
+        handle_blocks: Vec::new(),
+        try_files: None,
+        uri_directives: Vec::new(),
+        intercept_rules: Vec::new(),
+        push: None,
+        static_response: None,
         created_at: existing.created_at,
         updated_at: now,
     };
@@ -543,6 +663,7 @@ pub async fn update_route(
 pub async fn patch_route(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
     Extension(actor): Extension<CurrentActor>,
     Json(input): Json<PatchRoute>,
 ) -> Result<Json<Route>, GatewayError> {
@@ -551,6 +672,7 @@ pub async fn patch_route(
         .route_table
         .get_route(&id)
         .ok_or_else(|| GatewayError::NotFound(format!("route {id}")))?;
+    check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
 
     if let Some(ref sid) = input.service_id {
         if state.route_table.get_service(sid).is_none() {
@@ -575,6 +697,14 @@ pub async fn patch_route(
         write_timeout_ms: existing.write_timeout_ms,
         idle_timeout_ms: existing.idle_timeout_ms,
         retry_on_status: existing.retry_on_status.clone(),
+        matchers: existing.matchers.clone(),
+        matcher_refs: existing.matcher_refs.clone(),
+        handle_blocks: existing.handle_blocks.clone(),
+        try_files: existing.try_files.clone(),
+        uri_directives: existing.uri_directives.clone(),
+        intercept_rules: existing.intercept_rules.clone(),
+        push: existing.push.clone(),
+        static_response: existing.static_response.clone(),
         created_at: existing.created_at,
         updated_at: now,
     };
@@ -605,6 +735,7 @@ pub async fn patch_route(
 pub async fn patch_service(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
     Extension(actor): Extension<CurrentActor>,
     Json(input): Json<PatchService>,
 ) -> Result<Json<Service>, GatewayError> {
@@ -613,6 +744,7 @@ pub async fn patch_service(
         .route_table
         .get_service(&id)
         .ok_or_else(|| GatewayError::NotFound(format!("service {id}")))?;
+    check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
 
     let new_strategy = input
         .lb_strategy
@@ -638,6 +770,11 @@ pub async fn patch_service(
         tls_client_cert_path: existing.tls_client_cert_path.clone(),
         tls_client_key_path: existing.tls_client_key_path.clone(),
         tls_ca_path: existing.tls_ca_path.clone(),
+        lb_hash_header: existing.lb_hash_header.clone(),
+        lb_hash_query_param: existing.lb_hash_query_param.clone(),
+        flush_interval_ms: existing.flush_interval_ms,
+        stream_timeout_ms: existing.stream_timeout_ms,
+        stream_close_delay_ms: existing.stream_close_delay_ms,
         created_at: existing.created_at,
         updated_at: now,
     };
@@ -677,8 +814,12 @@ pub async fn patch_service(
 pub async fn delete_route(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
     Extension(actor): Extension<CurrentActor>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
+    if let Some(existing) = state.route_table.get_route(&id) {
+        check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
+    }
     let deleted = state.repo.delete_route(&id).await?;
     if deleted {
         state.route_table.remove_route(&id);
@@ -756,18 +897,20 @@ pub async fn create_plugin(
 pub async fn get_plugin(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<PluginInstance>, GatewayError> {
-    state
+) -> Result<Response, GatewayError> {
+    let plugin = state
         .repo
         .get_plugin(&id)
         .await?
-        .map(Json)
-        .ok_or_else(|| GatewayError::NotFound(format!("plugin {id}")))
+        .ok_or_else(|| GatewayError::NotFound(format!("plugin {id}")))?;
+    let etag = entity_etag(&plugin.id, &plugin.updated_at);
+    Ok(json_with_etag(plugin, &etag))
 }
 
 pub async fn update_plugin(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
     Extension(actor): Extension<CurrentActor>,
     Json(input): Json<CreatePlugin>,
 ) -> Result<Json<PluginInstance>, GatewayError> {
@@ -776,6 +919,7 @@ pub async fn update_plugin(
         .get_plugin(&id)
         .await?
         .ok_or_else(|| GatewayError::NotFound(format!("plugin {id}")))?;
+    check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
 
     validate_plugin_scope(&state, input.service_id, input.route_id).await?;
     let _ = crate::plugins::factory::build(&input.name, &input.config, Some(state.repo.clone()))?;
@@ -815,8 +959,15 @@ pub async fn update_plugin(
 pub async fn delete_plugin(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
     Extension(actor): Extension<CurrentActor>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
+    let existing = state
+        .repo
+        .get_plugin(&id)
+        .await?
+        .ok_or_else(|| GatewayError::NotFound(format!("plugin {id}")))?;
+    check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
     let deleted = state.repo.delete_plugin(&id).await?;
     if deleted {
         state.plugin_exec.rebuild(&state.repo).await?;
@@ -978,6 +1129,7 @@ pub async fn create_service_target(
 pub async fn update_target_handler(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
     Extension(actor): Extension<CurrentActor>,
     Json(input): Json<UpdateTarget>,
 ) -> Result<Json<Target>, GatewayError> {
@@ -986,6 +1138,7 @@ pub async fn update_target_handler(
         .get_target(&id)
         .await?
         .ok_or_else(|| GatewayError::NotFound(format!("target {id}")))?;
+    check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
 
     let updated = Target {
         id: existing.id,
@@ -1024,6 +1177,7 @@ pub async fn update_target_handler(
 pub async fn delete_target_handler(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
+    headers: HeaderMap,
     Extension(actor): Extension<CurrentActor>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     let existing = state
@@ -1031,6 +1185,7 @@ pub async fn delete_target_handler(
         .get_target(&id)
         .await?
         .ok_or_else(|| GatewayError::NotFound(format!("target {id}")))?;
+    check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
     let deleted = state.repo.delete_target(&id).await?;
     if deleted {
         rebuild_lb(&state, existing.service_id).await?;

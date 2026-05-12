@@ -1,4 +1,5 @@
 use crate::error::GatewayError;
+use crate::health::passive::PassiveHealthTracker;
 use crate::health::HealthRegistry;
 use crate::metrics as gw_metrics;
 use crate::plugins::PluginExecutor;
@@ -50,6 +51,7 @@ pub struct ProxyState {
     pub grpc_client: GrpcClient,
     pub health: Arc<HealthRegistry>,
     pub lb: Arc<LoadBalancerRegistry>,
+    pub passive_health: Arc<PassiveHealthTracker>,
     pub quota: Arc<QuotaTracker>,
     /// Live licence state. The proxy hot path checks `is_active()`
     /// before serving — flipped off by the periodic re-verifier when
@@ -304,10 +306,26 @@ pub async fn proxy_handler(
         peer_ip.map(|ip| ip.to_string()).unwrap_or_default()
     };
     let sticky_cookie_owned = extract_cookie(req.headers(), STICKY_COOKIE_NAME);
+    // Extract header/query hash values for hash-based LB strategies.
+    let header_hash_owned = service.lb_hash_header.as_ref().and_then(|hdr| {
+        req.headers()
+            .get(hdr.as_str())
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    });
+    let query_hash_owned = service.lb_hash_query_param.as_ref().and_then(|param| {
+        req.uri().query().and_then(|qs| {
+            url::form_urlencoded::parse(qs.as_bytes())
+                .find(|(k, _)| k == param)
+                .map(|(_, v)| v.to_string())
+        })
+    });
     let lb_ctx = RequestContext {
         client_ip: Some(client_ip_owned.as_str()),
         uri_path: Some(path.as_str()),
         sticky_cookie: sticky_cookie_owned.as_deref(),
+        header_hash_value: header_hash_owned.as_deref(),
+        query_hash_value: query_hash_owned.as_deref(),
     };
 
     // Pick a target via load balancer if one is configured for this service.
@@ -386,6 +404,10 @@ pub async fn proxy_handler(
                 if_none_match: if_none_match.as_deref(),
                 if_modified_since: if_modified_since.as_deref(),
                 range: range_header.as_deref(),
+                browse: false,
+                browse_template: None,
+                pass_thru: false,
+                precompressed: None,
             };
             let mut file_resp = crate::proxy::static_files::serve_with_options(
                 root,
@@ -879,6 +901,31 @@ pub async fn proxy_handler(
             .record_failure(&service.id, &svc_name, format!("upstream {status}"));
     } else {
         state.health.record_success(&service.id, &svc_name);
+    }
+
+    // ── Passive per-target health tracking ──
+    // Record the outcome for the specific target we picked so passive
+    // health can trip individual upstreams without waiting for active polls.
+    if let Some(tid) = picked_target_id {
+        if state.passive_health.is_fail_status(status.as_u16()) {
+            if state.passive_health.record_failure(&service.id, &tid) {
+                tracing::warn!(
+                    service = %svc_name,
+                    target_id = %tid,
+                    "passive health: target tripped unhealthy"
+                );
+                state.lb.mark_target_health(&service.id, &tid, false);
+            }
+        } else {
+            if state.passive_health.record_success(&service.id, &tid) {
+                tracing::info!(
+                    service = %svc_name,
+                    target_id = %tid,
+                    "passive health: target recovered"
+                );
+                state.lb.mark_target_health(&service.id, &tid, true);
+            }
+        }
     }
 
     // Build the plugin-facing response. We reuse the upstream HeaderMap by

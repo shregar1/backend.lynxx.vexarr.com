@@ -127,6 +127,10 @@ pub struct PluginExecutor {
     pub reload_signal: Arc<Notify>,
     /// Licence tier that determines which plugins may be loaded.
     tier: PlanTier,
+    /// Directive execution order. Plugins whose name appears earlier in
+    /// this list run first; unlisted plugins run after all listed ones
+    /// in their natural (creation) order.
+    order: RwLock<Vec<String>>,
 }
 
 impl PluginExecutor {
@@ -149,7 +153,15 @@ impl PluginExecutor {
             wasm_watcher,
             reload_signal,
             tier,
+            order: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Set the directive execution order. Plugins whose name appears in
+    /// `order` run first (in the listed sequence); unlisted plugins run
+    /// after them in their natural (creation) order.
+    pub async fn set_order(&self, order: Vec<String>) {
+        *self.order.write().await = order;
     }
 
     /// Lock-free check used by the proxy hot path to skip plugin dispatch
@@ -208,6 +220,37 @@ impl PluginExecutor {
 
             built.insert(row.id, plugin);
         }
+
+        // Sort plugin chains according to the directive execution order.
+        // Plugins whose name appears in `self.order` come first (in the
+        // specified sequence); unlisted plugins keep their natural order
+        // after the listed ones.
+        let order = self.order.read().await;
+        if !order.is_empty() {
+            let sort_ids = |ids: &mut Vec<Uuid>| {
+                ids.sort_by(|a, b| {
+                    let name_a = built.get(a).map(|p| p.name().to_string());
+                    let name_b = built.get(b).map(|p| p.name().to_string());
+                    let pos_a = name_a.as_ref().and_then(|n| order.iter().position(|o| o == n));
+                    let pos_b = name_b.as_ref().and_then(|n| order.iter().position(|o| o == n));
+                    match (pos_a, pos_b) {
+                        (Some(pa), Some(pb)) => pa.cmp(&pb),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    }
+                });
+            };
+
+            sort_ids(&mut index.global);
+            for ids in index.by_service.values_mut() {
+                sort_ids(ids);
+            }
+            for ids in index.by_route.values_mut() {
+                sort_ids(ids);
+            }
+        }
+        drop(order);
 
         let empty = built.is_empty()
             && index.global.is_empty()
@@ -305,5 +348,81 @@ impl PluginExecutor {
 impl Default for PluginExecutor {
     fn default() -> Self {
         Self::new(PlanTier::Free)
+    }
+}
+
+/// Sort a list of `(Uuid, name)` pairs according to `order`. Items whose
+/// name appears in `order` come first (in the listed sequence); unlisted
+/// items keep their relative (natural) order after the listed ones.
+///
+/// Exposed for testability; the same logic is used inside `rebuild`.
+fn sort_ids_by_order(ids: &mut [Uuid], names: &HashMap<Uuid, String>, order: &[String]) {
+    ids.sort_by(|a, b| {
+        let pos_a = names.get(a).and_then(|n| order.iter().position(|o| o == n));
+        let pos_b = names.get(b).and_then(|n| order.iter().position(|o| o == n));
+        match (pos_a, pos_b) {
+            (Some(pa), Some(pb)) => pa.cmp(&pb),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: create a UUID-to-name map and ID vec from a list of names.
+    fn make_ids(names: &[&str]) -> (Vec<Uuid>, HashMap<Uuid, String>) {
+        let mut ids = Vec::new();
+        let mut map = HashMap::new();
+        for name in names {
+            let id = Uuid::new_v4();
+            ids.push(id);
+            map.insert(id, name.to_string());
+        }
+        (ids, map)
+    }
+
+    #[test]
+    fn order_sorts_plugins() {
+        let (mut ids, names) = make_ids(&["cors", "logging", "rate-limit"]);
+        let order = vec!["rate-limit".to_string(), "cors".to_string(), "logging".to_string()];
+
+        sort_ids_by_order(&mut ids, &names, &order);
+
+        let sorted_names: Vec<&str> = ids.iter().map(|id| names[id].as_str()).collect();
+        assert_eq!(sorted_names, vec!["rate-limit", "cors", "logging"]);
+    }
+
+    #[test]
+    fn order_unlisted_after() {
+        let (mut ids, names) = make_ids(&["cors", "logging", "rate-limit", "jwt"]);
+        // Only cors and jwt are listed; logging and rate-limit are unlisted.
+        let order = vec!["jwt".to_string(), "cors".to_string()];
+
+        sort_ids_by_order(&mut ids, &names, &order);
+
+        let sorted_names: Vec<&str> = ids.iter().map(|id| names[id].as_str()).collect();
+        // jwt and cors come first (in order), then unlisted in original order.
+        assert_eq!(sorted_names[0], "jwt");
+        assert_eq!(sorted_names[1], "cors");
+        // Unlisted plugins appear after the ordered ones.
+        let unlisted: Vec<&str> = sorted_names[2..].to_vec();
+        assert!(unlisted.contains(&"logging"));
+        assert!(unlisted.contains(&"rate-limit"));
+    }
+
+    #[test]
+    fn order_empty_preserves() {
+        let (mut ids, names) = make_ids(&["cors", "logging", "rate-limit"]);
+        let original_names: Vec<String> = ids.iter().map(|id| names[id].clone()).collect();
+        let order: Vec<String> = vec![];
+
+        sort_ids_by_order(&mut ids, &names, &order);
+
+        let sorted_names: Vec<String> = ids.iter().map(|id| names[id].clone()).collect();
+        assert_eq!(sorted_names, original_names);
     }
 }
