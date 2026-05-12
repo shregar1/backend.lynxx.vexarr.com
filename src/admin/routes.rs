@@ -1047,6 +1047,36 @@ pub async fn create_consumer(
     Ok(Json(consumer))
 }
 
+pub async fn delete_consumer(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    let deleted = state.repo.delete_consumer(&id).await?;
+    if deleted {
+        state
+            .audit
+            .record(
+                AuditAction::Delete,
+                ResourceType::Consumer,
+                Some(id.to_string()),
+                None,
+                actor_of(&actor),
+            )
+            .await;
+        publish_event(
+            &state,
+            ChangeEvent::ConsumerChanged {
+                origin: state.node_id,
+            },
+        )
+        .await;
+        Ok(Json(serde_json::json!({"deleted": true})))
+    } else {
+        Err(GatewayError::NotFound(format!("consumer {id}")))
+    }
+}
+
 pub async fn metrics(State(state): State<AdminState>) -> Response {
     let body = state.metrics_handle.render();
     (

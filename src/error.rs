@@ -36,6 +36,9 @@ pub enum GatewayError {
     #[error("bad request: {0}")]
     BadRequest(String),
 
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     #[error("precondition failed: {0}")]
     PreconditionFailed(String),
 
@@ -168,13 +171,21 @@ impl IntoResponse for GatewayError {
             },
             GatewayError::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             GatewayError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            GatewayError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
             GatewayError::PreconditionFailed(_) => {
                 (StatusCode::PRECONDITION_FAILED, self.to_string())
             }
             GatewayError::ConfigError(_)
             | GatewayError::Internal(_)
-            | GatewayError::Sqlx(_)
             | GatewayError::Migrate(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            GatewayError::Sqlx(ref e) => {
+                let msg = e.to_string();
+                if msg.contains("UNIQUE constraint failed") || msg.contains("unique_violation") || msg.contains("23505") {
+                    (StatusCode::CONFLICT, format!("conflict: resource already exists"))
+                } else {
+                    (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+                }
+            }
         };
 
         let body = json!({ "error": message });

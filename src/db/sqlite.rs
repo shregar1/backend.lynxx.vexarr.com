@@ -25,6 +25,14 @@ impl SqliteRepository {
     pub async fn new(database_url: &str) -> Result<Self, GatewayError> {
         let pool = SqlitePoolOptions::new()
             .max_connections(8)
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    sqlx::query("PRAGMA foreign_keys = ON")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
             .connect(database_url)
             .await?;
 

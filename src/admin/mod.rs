@@ -19,7 +19,7 @@ use axum::extract::Request;
 use axum::http::{header, Method, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use chrono::Utc;
 use metrics_exporter_prometheus::PrometheusHandle;
@@ -136,6 +136,7 @@ pub fn admin_router(
             put(routes::update_plugin).delete(routes::delete_plugin),
         )
         .route("/consumers", post(routes::create_consumer))
+        .route("/consumers/:id", delete(routes::delete_consumer))
         .route("/reload", post(routes::reload_handler))
         // audit read access lives here — operator+ may inspect, viewers may not.
         .route("/audit", get(routes::list_audit))
