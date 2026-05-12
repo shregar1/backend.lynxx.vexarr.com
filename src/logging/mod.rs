@@ -63,6 +63,10 @@ pub struct AccessLogEntry {
     /// Custom appended fields (feature 45).
     #[serde(default, flatten)]
     pub extra: HashMap<String, serde_json::Value>,
+    /// Feature 59 — When set, route this entry to the logger with this name
+    /// instead of the default hostname-based matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_name_override: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +93,12 @@ pub enum FieldTransform {
     },
     /// Replace the field value with a fixed string.
     Replace { field: String, value: String },
+    /// Feature 57 — Apply a regex search-and-replace on the field value.
+    Regexp {
+        field: String,
+        pattern: String,
+        replacement: String,
+    },
 }
 
 fn default_ipv4_prefix() -> u8 {
@@ -350,6 +360,10 @@ pub struct LoggerConfig {
     /// Include query parameters in the log entry.
     #[serde(default)]
     pub include_query_params: bool,
+    /// Feature 58 — Request paths to skip (prefix match). Entries whose
+    /// path starts with any of these strings are not logged.
+    #[serde(default)]
+    pub skip_paths: Vec<String>,
 }
 
 fn default_output() -> LogOutput {
@@ -417,6 +431,21 @@ pub fn apply_transforms(entry: &mut serde_json::Value, transforms: &[FieldTransf
             FieldTransform::Replace { field, value } => {
                 if let Some((map, key)) = resolve_parent_mut(entry, field) {
                     map.insert(key, serde_json::Value::String(value.clone()));
+                }
+            }
+            // Feature 57 — regex search-and-replace.
+            FieldTransform::Regexp {
+                field,
+                pattern,
+                replacement,
+            } => {
+                if let Some((map, key)) = resolve_parent_mut(entry, field) {
+                    if let Some(serde_json::Value::String(s)) = map.get(&key) {
+                        if let Ok(re) = regex::Regex::new(pattern) {
+                            let replaced = re.replace_all(s, replacement.as_str()).to_string();
+                            map.insert(key, serde_json::Value::String(replaced));
+                        }
+                    }
                 }
             }
         }
@@ -545,32 +574,52 @@ impl AccessLogger {
 
     /// Log an access entry.
     ///
-    /// Finds the first matching logger by hostname, applies appended fields,
-    /// renames, transforms, serialises to JSON, and writes to the output.
+    /// Finds the first matching logger by hostname (or by explicit
+    /// `log_name_override`), applies appended fields, renames, transforms,
+    /// serialises to JSON, and writes to the output.
     pub async fn log(&self, entry: AccessLogEntry) {
         // 1. Find matching logger.
-        let (cfg, writer) = self
-            .loggers
+        //    Feature 59: if `log_name_override` is set, match by logger name
+        //    instead of hostname.
+        let (cfg, writer) = if let Some(ref override_name) = entry.log_name_override {
+            self.loggers
+                .iter()
+                .find(|(cfg, _)| cfg.name == *override_name)
+                .map(|(cfg, w)| (cfg, w.clone()))
+        } else {
+            self.loggers
+                .iter()
+                .find(|(cfg, _)| {
+                    cfg.hosts.is_empty() || cfg.hosts.iter().any(|h| h == &entry.host)
+                })
+                .map(|(cfg, w)| (cfg, w.clone()))
+        }
+        .unwrap_or_else(|| {
+            // No matching config — use a bare default.
+            static EMPTY: LoggerConfig = LoggerConfig {
+                name: String::new(),
+                hosts: Vec::new(),
+                output: LogOutput::Stdout,
+                transforms: Vec::new(),
+                renames: Vec::new(),
+                append: Vec::new(),
+                include_headers: false,
+                include_cookies: false,
+                include_query_params: false,
+                skip_paths: Vec::new(),
+            };
+            (&EMPTY, self.default_writer.clone())
+        });
+
+        // Feature 58: skip logging if the request path matches any skip_paths
+        // prefix.
+        if cfg
+            .skip_paths
             .iter()
-            .find(|(cfg, _)| {
-                cfg.hosts.is_empty() || cfg.hosts.iter().any(|h| h == &entry.host)
-            })
-            .map(|(cfg, w)| (cfg, w.clone()))
-            .unwrap_or_else(|| {
-                // No matching config — use a bare default.
-                static EMPTY: LoggerConfig = LoggerConfig {
-                    name: String::new(),
-                    hosts: Vec::new(),
-                    output: LogOutput::Stdout,
-                    transforms: Vec::new(),
-                    renames: Vec::new(),
-                    append: Vec::new(),
-                    include_headers: false,
-                    include_cookies: false,
-                    include_query_params: false,
-                };
-                (&EMPTY, self.default_writer.clone())
-            });
+            .any(|prefix| entry.path.starts_with(prefix))
+        {
+            return;
+        }
 
         // 2. Serialize entry to mutable JSON value.
         let mut value = match serde_json::to_value(&entry) {
@@ -647,6 +696,7 @@ mod tests {
                 ("page".into(), "1".into()),
             ]),
             extra: HashMap::new(),
+            log_name_override: None,
         }
     }
 
@@ -960,6 +1010,7 @@ mod tests {
                 include_headers: false,
                 include_cookies: false,
                 include_query_params: false,
+                skip_paths: vec![],
             },
             LoggerConfig {
                 name: "default".into(),
@@ -971,6 +1022,7 @@ mod tests {
                 include_headers: false,
                 include_cookies: false,
                 include_query_params: false,
+                skip_paths: vec![],
             },
         ]);
 
@@ -1002,6 +1054,7 @@ mod tests {
                 include_headers: false,
                 include_cookies: false,
                 include_query_params: false,
+                skip_paths: vec![],
             },
             LoggerConfig {
                 name: "default".into(),
@@ -1013,6 +1066,7 @@ mod tests {
                 include_headers: false,
                 include_cookies: false,
                 include_query_params: false,
+                skip_paths: vec![],
             },
         ]);
 
@@ -1042,6 +1096,7 @@ mod tests {
             include_headers: false,
             include_cookies: false,
             include_query_params: false,
+            skip_paths: vec![],
         }]);
 
         let mut entry = sample_entry();
@@ -1077,5 +1132,292 @@ mod tests {
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json.get("environment").unwrap(), "staging");
         assert_eq!(json.get("build").unwrap(), 42);
+    }
+
+    // ---- Feature 57: Regexp field transform ---------------------------------
+
+    #[test]
+    fn transform_regexp_basic_replacement() {
+        let mut v = json!({ "path": "/api/users/123/profile" });
+        apply_transforms(
+            &mut v,
+            &[FieldTransform::Regexp {
+                field: "path".into(),
+                pattern: r"/\d+/".into(),
+                replacement: "/:id/".into(),
+            }],
+        );
+        assert_eq!(
+            v.get("path").unwrap().as_str().unwrap(),
+            "/api/users/:id/profile"
+        );
+    }
+
+    #[test]
+    fn transform_regexp_capture_groups() {
+        let mut v = json!({ "email": "user@example.com" });
+        apply_transforms(
+            &mut v,
+            &[FieldTransform::Regexp {
+                field: "email".into(),
+                pattern: r"([^@]+)@(.+)".into(),
+                replacement: "***@$2".into(),
+            }],
+        );
+        assert_eq!(v.get("email").unwrap().as_str().unwrap(), "***@example.com");
+    }
+
+    #[test]
+    fn transform_regexp_no_match_unchanged() {
+        let mut v = json!({ "path": "/api/test" });
+        let before = v.clone();
+        apply_transforms(
+            &mut v,
+            &[FieldTransform::Regexp {
+                field: "path".into(),
+                pattern: r"zzz_no_match".into(),
+                replacement: "replaced".into(),
+            }],
+        );
+        assert_eq!(v, before);
+    }
+
+    #[test]
+    fn transform_regexp_nested_field() {
+        let mut v = json!({
+            "headers": { "Authorization": "Bearer tok-abc-123-xyz" }
+        });
+        apply_transforms(
+            &mut v,
+            &[FieldTransform::Regexp {
+                field: "headers.Authorization".into(),
+                pattern: r"Bearer .+".into(),
+                replacement: "Bearer [REDACTED]".into(),
+            }],
+        );
+        let hdrs = v.get("headers").unwrap().as_object().unwrap();
+        assert_eq!(
+            hdrs.get("Authorization").unwrap().as_str().unwrap(),
+            "Bearer [REDACTED]",
+        );
+    }
+
+    #[test]
+    fn transform_regexp_missing_field_noop() {
+        let mut v = json!({ "a": "b" });
+        let before = v.clone();
+        apply_transforms(
+            &mut v,
+            &[FieldTransform::Regexp {
+                field: "nonexistent".into(),
+                pattern: ".".into(),
+                replacement: "x".into(),
+            }],
+        );
+        assert_eq!(v, before);
+    }
+
+    // ---- Feature 58: log_skip directive -------------------------------------
+
+    #[tokio::test]
+    async fn skip_matching_path() {
+        // Use a writer that tracks whether write was called.
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct SpyWriter(Arc<AtomicBool>);
+
+        #[async_trait::async_trait]
+        impl LogWriter for SpyWriter {
+            async fn write(&self, _entry: &[u8]) -> Result<(), String> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let wrote = Arc::new(AtomicBool::new(false));
+        let writer: Arc<dyn LogWriter> = Arc::new(SpyWriter(wrote.clone()));
+
+        let logger = AccessLogger {
+            loggers: vec![(
+                LoggerConfig {
+                    name: "test".into(),
+                    hosts: vec![],
+                    output: LogOutput::Discard,
+                    transforms: vec![],
+                    renames: vec![],
+                    append: vec![],
+                    include_headers: false,
+                    include_cookies: false,
+                    include_query_params: false,
+                    skip_paths: vec!["/health".into(), "/metrics".into()],
+                },
+                writer.clone(),
+            )],
+            default_writer: writer,
+        };
+
+        let mut entry = sample_entry();
+        entry.path = "/healthz".into(); // does NOT match prefix "/health" exactly, but starts with it
+        // Wait — "/healthz".starts_with("/health") is true!
+        logger.log(entry).await;
+        assert!(!wrote.load(Ordering::SeqCst), "should skip /healthz (prefix match)");
+
+        wrote.store(false, Ordering::SeqCst);
+        let mut entry2 = sample_entry();
+        entry2.path = "/metrics/scrape".into();
+        logger.log(entry2).await;
+        assert!(!wrote.load(Ordering::SeqCst), "should skip /metrics/scrape");
+    }
+
+    #[tokio::test]
+    async fn no_skip_non_matching_path() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct SpyWriter(Arc<AtomicBool>);
+
+        #[async_trait::async_trait]
+        impl LogWriter for SpyWriter {
+            async fn write(&self, _entry: &[u8]) -> Result<(), String> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let wrote = Arc::new(AtomicBool::new(false));
+        let writer: Arc<dyn LogWriter> = Arc::new(SpyWriter(wrote.clone()));
+
+        let logger = AccessLogger {
+            loggers: vec![(
+                LoggerConfig {
+                    name: "test".into(),
+                    hosts: vec![],
+                    output: LogOutput::Discard,
+                    transforms: vec![],
+                    renames: vec![],
+                    append: vec![],
+                    include_headers: false,
+                    include_cookies: false,
+                    include_query_params: false,
+                    skip_paths: vec!["/health".into()],
+                },
+                writer.clone(),
+            )],
+            default_writer: writer,
+        };
+
+        let mut entry = sample_entry();
+        entry.path = "/api/users".into();
+        logger.log(entry).await;
+        assert!(wrote.load(Ordering::SeqCst), "should NOT skip /api/users");
+    }
+
+    // ---- Feature 59: log_name override --------------------------------------
+
+    #[tokio::test]
+    async fn log_name_override_routes_to_named_logger() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct SpyWriter(Arc<AtomicBool>);
+
+        #[async_trait::async_trait]
+        impl LogWriter for SpyWriter {
+            async fn write(&self, _entry: &[u8]) -> Result<(), String> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let default_wrote = Arc::new(AtomicBool::new(false));
+        let named_wrote = Arc::new(AtomicBool::new(false));
+        let default_writer: Arc<dyn LogWriter> = Arc::new(SpyWriter(default_wrote.clone()));
+        let named_writer: Arc<dyn LogWriter> = Arc::new(SpyWriter(named_wrote.clone()));
+
+        let logger = AccessLogger {
+            loggers: vec![
+                (
+                    LoggerConfig {
+                        name: "special".into(),
+                        hosts: vec!["other-host.com".into()],
+                        output: LogOutput::Discard,
+                        transforms: vec![],
+                        renames: vec![],
+                        append: vec![],
+                        include_headers: false,
+                        include_cookies: false,
+                        include_query_params: false,
+                        skip_paths: vec![],
+                    },
+                    named_writer,
+                ),
+                (
+                    LoggerConfig {
+                        name: "default".into(),
+                        hosts: vec![],
+                        output: LogOutput::Discard,
+                        transforms: vec![],
+                        renames: vec![],
+                        append: vec![],
+                        include_headers: false,
+                        include_cookies: false,
+                        include_query_params: false,
+                        skip_paths: vec![],
+                    },
+                    default_writer,
+                ),
+            ],
+            default_writer: Arc::new(DiscardWriter),
+        };
+
+        // Without override, entry for api.example.com would NOT match
+        // "special" (wrong host), so it goes to the default catch-all.
+        let mut entry = sample_entry();
+        entry.log_name_override = Some("special".into());
+        logger.log(entry).await;
+
+        assert!(named_wrote.load(Ordering::SeqCst), "should route to 'special' logger");
+        assert!(!default_wrote.load(Ordering::SeqCst), "should NOT route to default");
+    }
+
+    #[tokio::test]
+    async fn log_name_override_none_uses_host_matching() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct SpyWriter(Arc<AtomicBool>);
+
+        #[async_trait::async_trait]
+        impl LogWriter for SpyWriter {
+            async fn write(&self, _entry: &[u8]) -> Result<(), String> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let default_wrote = Arc::new(AtomicBool::new(false));
+        let default_writer: Arc<dyn LogWriter> = Arc::new(SpyWriter(default_wrote.clone()));
+
+        let logger = AccessLogger {
+            loggers: vec![(
+                LoggerConfig {
+                    name: "default".into(),
+                    hosts: vec![],
+                    output: LogOutput::Discard,
+                    transforms: vec![],
+                    renames: vec![],
+                    append: vec![],
+                    include_headers: false,
+                    include_cookies: false,
+                    include_query_params: false,
+                    skip_paths: vec![],
+                },
+                default_writer,
+            )],
+            default_writer: Arc::new(DiscardWriter),
+        };
+
+        // No override — falls back to hostname matching.
+        let entry = sample_entry(); // log_name_override = None
+        logger.log(entry).await;
+
+        assert!(default_wrote.load(Ordering::SeqCst), "should use host-based matching");
     }
 }

@@ -406,8 +406,13 @@ pub async fn proxy_handler(
                 range: range_header.as_deref(),
                 browse: false,
                 browse_template: None,
+                browse_sort: None,
+                browse_file_limit: 10_000,
+                browse_reveal_symlinks: false,
                 pass_thru: false,
                 precompressed: None,
+                disable_canonical_uris: false,
+                status_override: None,
             };
             let mut file_resp = crate::proxy::static_files::serve_with_options(
                 root,

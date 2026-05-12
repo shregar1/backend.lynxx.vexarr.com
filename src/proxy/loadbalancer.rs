@@ -34,6 +34,12 @@ pub enum LbStrategy {
     /// Hash a configurable query parameter to pin sessions. The param name
     /// is stored on the Service model (`lb_hash_query_param`).
     QueryHash,
+    /// Hash the request URI path for consistent routing. Same path always
+    /// goes to the same target.
+    UriHash,
+    /// Hash the X-Forwarded-For client IP (as opposed to IpHash which uses
+    /// the direct remote/socket IP).
+    ClientIpHash,
 }
 
 impl LbStrategy {
@@ -48,6 +54,8 @@ impl LbStrategy {
             "first" | "failover" | "primary" => LbStrategy::First,
             "header-hash" | "header_hash" | "headerhash" => LbStrategy::HeaderHash,
             "query-hash" | "query_hash" | "queryhash" => LbStrategy::QueryHash,
+            "uri-hash" | "uri_hash" | "urihash" => LbStrategy::UriHash,
+            "client-ip-hash" | "client_ip_hash" => LbStrategy::ClientIpHash,
             _ => LbStrategy::RoundRobin,
         }
     }
@@ -219,6 +227,10 @@ impl ServiceLoadBalancer {
             }
             LbStrategy::QueryHash => {
                 self.pick_hrw(ctx.query_hash_value.unwrap_or("__no_query__"))
+            }
+            LbStrategy::UriHash => self.pick_hrw(ctx.uri_path.unwrap_or("/")),
+            LbStrategy::ClientIpHash => {
+                self.pick_hrw(ctx.client_ip.unwrap_or("0.0.0.0"))
             }
         }
     }
@@ -784,5 +796,82 @@ mod tests {
         assert_eq!(snap.len(), 2);
         let t0 = snap.iter().find(|s| s.target.id == tid).unwrap();
         assert!(!t0.healthy.load(Ordering::Relaxed));
+    }
+
+    // ── Feature 86: UriHash ──
+
+    #[test]
+    fn uri_hash_consistent_for_same_path() {
+        let targets = make_targets(5);
+        let lb = ServiceLoadBalancer::new(LbStrategy::UriHash, targets);
+        let ctx = RequestContext {
+            uri_path: Some("/api/v1/users"),
+            ..Default::default()
+        };
+        let first = lb.pick(None, &ctx).unwrap();
+        for _ in 0..20 {
+            let t = lb.pick(None, &ctx).unwrap();
+            assert_eq!(t.target.id, first.target.id, "uri_hash not consistent for same path");
+        }
+    }
+
+    #[test]
+    fn uri_hash_different_paths_spread() {
+        let targets = make_targets(4);
+        let lb = ServiceLoadBalancer::new(LbStrategy::UriHash, targets);
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..20 {
+            let path = format!("/path/{i}");
+            let ctx = RequestContext {
+                uri_path: Some(&path),
+                ..Default::default()
+            };
+            let t = lb.pick(None, &ctx).unwrap();
+            seen.insert(t.target.url.clone());
+        }
+        assert!(seen.len() > 1, "uri_hash didn't spread across targets: {:?}", seen);
+    }
+
+    // ── Feature 87: ClientIpHash ──
+
+    #[test]
+    fn client_ip_hash_consistent() {
+        let targets = make_targets(5);
+        let lb = ServiceLoadBalancer::new(LbStrategy::ClientIpHash, targets);
+        let ctx = RequestContext {
+            client_ip: Some("203.0.113.42"),
+            ..Default::default()
+        };
+        let first = lb.pick(None, &ctx).unwrap();
+        for _ in 0..20 {
+            let t = lb.pick(None, &ctx).unwrap();
+            assert_eq!(t.target.id, first.target.id, "client_ip_hash not consistent");
+        }
+    }
+
+    #[test]
+    fn client_ip_hash_different_ips_spread() {
+        let targets = make_targets(4);
+        let lb = ServiceLoadBalancer::new(LbStrategy::ClientIpHash, targets);
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..20 {
+            let ip = format!("10.0.0.{i}");
+            let ctx = RequestContext {
+                client_ip: Some(&ip),
+                ..Default::default()
+            };
+            let t = lb.pick(None, &ctx).unwrap();
+            seen.insert(t.target.url.clone());
+        }
+        assert!(seen.len() > 1, "client_ip_hash didn't spread: {:?}", seen);
+    }
+
+    #[test]
+    fn strategy_parsing_uri_and_client_ip() {
+        assert_eq!(LbStrategy::from_str("uri-hash"), LbStrategy::UriHash);
+        assert_eq!(LbStrategy::from_str("uri_hash"), LbStrategy::UriHash);
+        assert_eq!(LbStrategy::from_str("urihash"), LbStrategy::UriHash);
+        assert_eq!(LbStrategy::from_str("client-ip-hash"), LbStrategy::ClientIpHash);
+        assert_eq!(LbStrategy::from_str("client_ip_hash"), LbStrategy::ClientIpHash);
     }
 }

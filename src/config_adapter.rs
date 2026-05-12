@@ -461,6 +461,15 @@ fn apply_server(
                     index_file: None,
                     spa_fallback: None,
                     id_tag: None,
+                    stream_timeout_secs: 0,
+                    stream_close_delay_secs: 0,
+                    lb_try_duration_ms: 0,
+                    lb_try_interval_ms: 250,
+                    lb_retry_match: Vec::new(),
+                    request_buffer_size: 0,
+                    response_buffer_size: 0,
+                    flush_interval_ms: -1,
+                    root: String::new(),
                 };
                 config.services.push(svc);
             } else {
@@ -474,6 +483,15 @@ fn apply_server(
                     index_file: None,
                     spa_fallback: None,
                     id_tag: None,
+                    stream_timeout_secs: 0,
+                    stream_close_delay_secs: 0,
+                    lb_try_duration_ms: 0,
+                    lb_try_interval_ms: 250,
+                    lb_retry_match: Vec::new(),
+                    request_buffer_size: 0,
+                    response_buffer_size: 0,
+                    flush_interval_ms: -1,
+                    root: String::new(),
                 };
                 config.services.push(svc);
             }
@@ -489,6 +507,9 @@ fn apply_server(
                 service: service_name,
                 strip_path: false,
                 id_tag: None,
+                vars: std::collections::HashMap::new(),
+                invoke: None,
+                literal_order: false,
             });
         } else if let Some(doc_root) = root_dir {
             let service_name = make_service_name(&loc.path);
@@ -502,6 +523,15 @@ fn apply_server(
                 index_file: None,
                 spa_fallback: None,
                 id_tag: None,
+                stream_timeout_secs: 0,
+                stream_close_delay_secs: 0,
+                lb_try_duration_ms: 0,
+                lb_try_interval_ms: 250,
+                lb_retry_match: Vec::new(),
+                request_buffer_size: 0,
+                response_buffer_size: 0,
+                flush_interval_ms: -1,
+                root: String::new(),
             });
 
             let mut hosts = Vec::new();
@@ -515,6 +545,9 @@ fn apply_server(
                 service: service_name,
                 strip_path: false,
                 id_tag: None,
+                vars: std::collections::HashMap::new(),
+                invoke: None,
+                literal_order: false,
             });
         }
     }

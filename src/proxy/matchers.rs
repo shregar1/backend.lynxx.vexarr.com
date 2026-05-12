@@ -41,6 +41,20 @@ pub enum Matcher {
     All { matchers: Vec<Matcher> },
     /// Logical OR: at least one sub-matcher must pass.
     Any { matchers: Vec<Matcher> },
+    /// File existence matcher. Checks if any of the try_files paths exist
+    /// on disk relative to the given root path.
+    File { path: String, try_files: Vec<String> },
+    /// Protocol matcher. Matches the request scheme (http, https, grpc).
+    Protocol { protocol: String },
+    /// Variable exact-value matcher. Looks up a named variable from the
+    /// route's vars map and checks for an exact match.
+    Var { name: String, value: String },
+    /// Variable regex matcher. Looks up a named variable from the route's
+    /// vars map and matches against a regex pattern.
+    VarRegex { name: String, pattern: String },
+    /// Header regex matcher. Gets a header by name and matches its value
+    /// against a regex pattern.
+    HeaderRegex { name: String, pattern: String },
 }
 
 /// Named matcher block that can be referenced by multiple routes.
@@ -61,6 +75,10 @@ pub struct MatcherContext<'a> {
     pub client_ip: Option<&'a str>,
     pub headers: Option<&'a axum::http::HeaderMap>,
     pub query_string: Option<&'a str>,
+    /// Request scheme (http, https, grpc). Used by the Protocol matcher.
+    pub scheme: Option<&'a str>,
+    /// Route-level variables. Used by Var and VarRegex matchers.
+    pub vars: &'a HashMap<String, String>,
 }
 
 /// Registry of named matchers loaded from config.
@@ -127,6 +145,34 @@ pub fn evaluate(matcher: &Matcher, ctx: &MatcherContext) -> bool {
             .unwrap_or(false),
         Matcher::All { matchers } => matchers.iter().all(|m| evaluate(m, ctx)),
         Matcher::Any { matchers } => matchers.iter().any(|m| evaluate(m, ctx)),
+        Matcher::File { path, try_files } => {
+            let root = std::path::Path::new(path.as_str());
+            try_files.iter().any(|f| root.join(f).exists())
+        }
+        Matcher::Protocol { protocol } => {
+            ctx.scheme
+                .map(|s| s.eq_ignore_ascii_case(protocol))
+                .unwrap_or(false)
+        }
+        Matcher::Var { name, value } => {
+            ctx.vars
+                .get(name.as_str())
+                .map(|v| v == value)
+                .unwrap_or(false)
+        }
+        Matcher::VarRegex { name, pattern } => {
+            ctx.vars
+                .get(name.as_str())
+                .and_then(|v| regex::Regex::new(pattern).ok().map(|re| re.is_match(v)))
+                .unwrap_or(false)
+        }
+        Matcher::HeaderRegex { name, pattern } => {
+            ctx.headers
+                .and_then(|h| h.get(name.as_str()))
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| regex::Regex::new(pattern).ok().map(|re| re.is_match(v)))
+                .unwrap_or(false)
+        }
     }
 }
 
@@ -328,6 +374,9 @@ fn extract_quoted(s: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    static EMPTY_VARS: std::sync::LazyLock<HashMap<String, String>> =
+        std::sync::LazyLock::new(HashMap::new);
+
     fn ctx_with_path(path: &str) -> MatcherContext<'_> {
         MatcherContext {
             path,
@@ -337,6 +386,8 @@ mod tests {
             client_ip: Some("192.168.1.100"),
             headers: None,
             query_string: None,
+            scheme: None,
+            vars: &EMPTY_VARS,
         }
     }
 
@@ -533,6 +584,8 @@ mod tests {
             client_ip: None,
             headers: Some(&headers),
             query_string: None,
+            scheme: None,
+            vars: &EMPTY_VARS,
         };
         assert!(evaluate_expression(r#"header.x-tenant == "acme""#, &ctx));
         assert!(!evaluate_expression(r#"header.x-tenant == "other""#, &ctx));
@@ -548,6 +601,8 @@ mod tests {
             client_ip: None,
             headers: None,
             query_string: Some("version=2&debug=true"),
+            scheme: None,
+            vars: &EMPTY_VARS,
         };
         assert!(evaluate_expression(r#"query.version == "2""#, &ctx));
         assert!(!evaluate_expression(r#"query.version == "3""#, &ctx));
@@ -580,5 +635,169 @@ mod tests {
         let matchers = reg.get("api_only").unwrap();
         assert!(evaluate_all(matchers, &ctx_with_path("/api/users")));
         assert!(!evaluate_all(matchers, &ctx_with_path("/web/page")));
+    }
+
+    // ── Feature 69: File matcher ──
+
+    #[test]
+    fn file_matcher_finds_existing_file() {
+        // Use Cargo.toml which exists at project root
+        let m = Matcher::File {
+            path: env!("CARGO_MANIFEST_DIR").to_string(),
+            try_files: vec!["Cargo.toml".to_string()],
+        };
+        let ctx = ctx_with_path("/");
+        assert!(evaluate(&m, &ctx));
+    }
+
+    #[test]
+    fn file_matcher_no_match_nonexistent() {
+        let m = Matcher::File {
+            path: env!("CARGO_MANIFEST_DIR").to_string(),
+            try_files: vec!["nonexistent_file_xyz.txt".to_string()],
+        };
+        let ctx = ctx_with_path("/");
+        assert!(!evaluate(&m, &ctx));
+    }
+
+    // ── Feature 70: Protocol matcher ──
+
+    #[test]
+    fn protocol_matches_https() {
+        let m = Matcher::Protocol {
+            protocol: "https".to_string(),
+        };
+        let mut ctx = ctx_with_path("/");
+        ctx.scheme = Some("https");
+        assert!(evaluate(&m, &ctx));
+    }
+
+    #[test]
+    fn protocol_no_match() {
+        let m = Matcher::Protocol {
+            protocol: "grpc".to_string(),
+        };
+        let mut ctx = ctx_with_path("/");
+        ctx.scheme = Some("http");
+        assert!(!evaluate(&m, &ctx));
+    }
+
+    #[test]
+    fn protocol_none_scheme() {
+        let m = Matcher::Protocol {
+            protocol: "http".to_string(),
+        };
+        let ctx = ctx_with_path("/");
+        assert!(!evaluate(&m, &ctx)); // scheme is None
+    }
+
+    // ── Feature 71: Var / VarRegex matchers ──
+
+    #[test]
+    fn var_exact_match() {
+        let vars: HashMap<String, String> =
+            [("env".to_string(), "production".to_string())].into();
+        let m = Matcher::Var {
+            name: "env".to_string(),
+            value: "production".to_string(),
+        };
+        let mut ctx = ctx_with_path("/");
+        ctx.vars = &vars;
+        assert!(evaluate(&m, &ctx));
+    }
+
+    #[test]
+    fn var_no_match() {
+        let vars: HashMap<String, String> =
+            [("env".to_string(), "staging".to_string())].into();
+        let m = Matcher::Var {
+            name: "env".to_string(),
+            value: "production".to_string(),
+        };
+        let mut ctx = ctx_with_path("/");
+        ctx.vars = &vars;
+        assert!(!evaluate(&m, &ctx));
+    }
+
+    #[test]
+    fn var_missing_key() {
+        let m = Matcher::Var {
+            name: "missing".to_string(),
+            value: "any".to_string(),
+        };
+        let ctx = ctx_with_path("/");
+        assert!(!evaluate(&m, &ctx));
+    }
+
+    #[test]
+    fn var_regex_match() {
+        let vars: HashMap<String, String> =
+            [("version".to_string(), "v2.3.1".to_string())].into();
+        let m = Matcher::VarRegex {
+            name: "version".to_string(),
+            pattern: r"^v\d+\.\d+\.\d+$".to_string(),
+        };
+        let mut ctx = ctx_with_path("/");
+        ctx.vars = &vars;
+        assert!(evaluate(&m, &ctx));
+    }
+
+    #[test]
+    fn var_regex_no_match() {
+        let vars: HashMap<String, String> =
+            [("version".to_string(), "latest".to_string())].into();
+        let m = Matcher::VarRegex {
+            name: "version".to_string(),
+            pattern: r"^v\d+\.\d+\.\d+$".to_string(),
+        };
+        let mut ctx = ctx_with_path("/");
+        ctx.vars = &vars;
+        assert!(!evaluate(&m, &ctx));
+    }
+
+    // ── Feature 72: HeaderRegex matcher ──
+
+    #[test]
+    fn header_regex_match() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("user-agent", "Mozilla/5.0 (X11; Linux)".parse().unwrap());
+        let m = Matcher::HeaderRegex {
+            name: "user-agent".to_string(),
+            pattern: r"Mozilla/\d+".to_string(),
+        };
+        let ctx = MatcherContext {
+            path: "/",
+            method: "GET",
+            host: None,
+            remote_ip: None,
+            client_ip: None,
+            headers: Some(&headers),
+            query_string: None,
+            scheme: None,
+            vars: &EMPTY_VARS,
+        };
+        assert!(evaluate(&m, &ctx));
+    }
+
+    #[test]
+    fn header_regex_no_match() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("user-agent", "curl/7.68".parse().unwrap());
+        let m = Matcher::HeaderRegex {
+            name: "user-agent".to_string(),
+            pattern: r"^Mozilla".to_string(),
+        };
+        let ctx = MatcherContext {
+            path: "/",
+            method: "GET",
+            host: None,
+            remote_ip: None,
+            client_ip: None,
+            headers: Some(&headers),
+            query_string: None,
+            scheme: None,
+            vars: &EMPTY_VARS,
+        };
+        assert!(!evaluate(&m, &ctx));
     }
 }

@@ -96,6 +96,16 @@ fn empty_response(status: StatusCode) -> Response<Body> {
         .unwrap()
 }
 
+/// Apply a status override to an existing response (if configured).
+fn apply_status_override(mut resp: Response<Body>, status_override: Option<u16>) -> Response<Body> {
+    if let Some(code) = status_override {
+        if let Ok(status) = StatusCode::from_u16(code) {
+            *resp.status_mut() = status;
+        }
+    }
+    resp
+}
+
 /// Generate a strong ETag from file size and modification time.
 fn generate_etag(size: u64, modified: std::time::SystemTime) -> String {
     let epoch_secs = modified
@@ -327,8 +337,26 @@ fn is_hidden_path(request_path: &str, extra_hide: &[String]) -> bool {
     false
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Browse sort configuration
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Field to sort directory listing entries by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowseSortField {
+    Name,
+    Size,
+    Time,
+}
+
+/// Sort direction for directory listings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
 /// Static file serving options, passed from the service config.
-#[derive(Default)]
 pub struct ServeOptions<'a> {
     /// Extra file/directory names to hide (beyond defaults).
     pub hide_patterns: &'a [String],
@@ -345,6 +373,15 @@ pub struct ServeOptions<'a> {
     /// these placeholders: `{{path}}`, `{{entries}}`. When `None` a
     /// built-in minimal HTML page is used.
     pub browse_template: Option<&'a str>,
+    /// Sort order for browse directory listings. When `None`, the default
+    /// is dirs-first then by name ascending.
+    pub browse_sort: Option<(BrowseSortField, SortDirection)>,
+    /// Maximum number of entries to show in a directory listing.
+    /// Defaults to 10000.
+    pub browse_file_limit: usize,
+    /// When true, symlink entries in directory listings include the
+    /// target path they point to via a `symlink_target` field.
+    pub browse_reveal_symlinks: bool,
     /// When true, return `ServeResult::PassThru` instead of 404 when the
     /// requested file doesn't exist. The caller can then fall through to
     /// the next handler (e.g. proxy to an upstream).
@@ -353,6 +390,33 @@ pub struct ServeOptions<'a> {
     /// default set (br, zstd, gzip) is used. Pass an empty vec to
     /// disable precompressed serving entirely.
     pub precompressed: Option<&'a [PrecompressedEncoding]>,
+    /// When true, skip the canonical `/dir` → `/dir/` redirect for
+    /// directories.
+    pub disable_canonical_uris: bool,
+    /// Override the HTTP status code for served files. Useful for custom
+    /// error pages (e.g. serve `404.html` with actual 404 status).
+    pub status_override: Option<u16>,
+}
+
+impl<'a> Default for ServeOptions<'a> {
+    fn default() -> Self {
+        Self {
+            hide_patterns: &[],
+            cache_control: None,
+            if_none_match: None,
+            if_modified_since: None,
+            range: None,
+            browse: false,
+            browse_template: None,
+            browse_sort: None,
+            browse_file_limit: 10_000,
+            browse_reveal_symlinks: false,
+            pass_thru: false,
+            precompressed: None,
+            disable_canonical_uris: false,
+            status_override: None,
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -422,6 +486,9 @@ pub struct FsDirEntry {
     pub is_dir: bool,
     pub size: u64,
     pub modified: Option<std::time::SystemTime>,
+    /// When `browse_reveal_symlinks` is enabled, this contains the
+    /// symlink target path. `None` for regular files/directories.
+    pub symlink_target: Option<String>,
 }
 
 /// Trait for pluggable filesystem backends. The default implementation
@@ -461,11 +528,23 @@ impl FileSystem for LocalFs {
         let mut entries = Vec::new();
         while let Ok(Some(entry)) = dir.next_entry().await {
             let meta = entry.metadata().await.ok();
+            // Check if the entry is a symlink (use symlink_metadata to
+            // avoid following the link).
+            let symlink_target = match fs::symlink_metadata(entry.path()).await {
+                Ok(sm) if sm.file_type().is_symlink() => {
+                    fs::read_link(entry.path())
+                        .await
+                        .ok()
+                        .map(|t| t.to_string_lossy().to_string())
+                }
+                _ => None,
+            };
             entries.push(FsDirEntry {
                 name: entry.file_name().to_string_lossy().to_string(),
                 is_dir: meta.as_ref().map(|m| m.is_dir()).unwrap_or(false),
                 size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
                 modified: meta.and_then(|m| m.modified().ok()),
+                symlink_target,
             });
         }
         entries.sort_by(|a, b| {
@@ -480,19 +559,53 @@ impl FileSystem for LocalFs {
 // Directory browse (directory listing)
 // ─────────────────────────────────────────────────────────────────────────
 
+/// Sort directory entries according to the configured sort order.
+/// Always keeps directories first, then sorts within each group.
+fn sort_entries(entries: &mut [FsDirEntry], sort: Option<(BrowseSortField, SortDirection)>) {
+    let (field, dir) = sort.unwrap_or((BrowseSortField::Name, SortDirection::Ascending));
+    entries.sort_by(|a, b| {
+        // Directories always first.
+        let dir_ord = b.is_dir.cmp(&a.is_dir);
+        if dir_ord != std::cmp::Ordering::Equal {
+            return dir_ord;
+        }
+        let ord = match field {
+            BrowseSortField::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            BrowseSortField::Size => a.size.cmp(&b.size),
+            BrowseSortField::Time => {
+                let ta = a.modified.unwrap_or(std::time::UNIX_EPOCH);
+                let tb = b.modified.unwrap_or(std::time::UNIX_EPOCH);
+                ta.cmp(&tb)
+            }
+        };
+        match dir {
+            SortDirection::Ascending => ord,
+            SortDirection::Descending => ord.reverse(),
+        }
+    });
+}
+
 /// Render a directory listing as an HTML page.
 pub fn render_directory_listing(
     request_path: &str,
     entries: &[FsDirEntry],
     template: Option<&str>,
+    opts: &ServeOptions<'_>,
 ) -> Response<Body> {
+    // Apply sort order.
+    let mut sorted = entries.to_vec();
+    sort_entries(&mut sorted, opts.browse_sort);
+
+    // Apply file limit.
+    sorted.truncate(opts.browse_file_limit);
+
     let mut rows = String::new();
     // Parent directory link.
     if request_path != "/" {
         rows.push_str(r#"<tr><td><a href="../">../</a></td><td>—</td><td>—</td></tr>"#);
         rows.push('\n');
     }
-    for entry in entries {
+    for entry in &sorted {
         let name = &entry.name;
         // Skip hidden entries.
         if name.starts_with('.') {
@@ -517,8 +630,20 @@ pub fn render_directory_listing(
             .modified
             .map(|t| format_http_date(t))
             .unwrap_or_else(|| "—".to_string());
+
+        // Symlink annotation when reveal_symlinks is enabled.
+        let symlink_info = if opts.browse_reveal_symlinks {
+            if let Some(ref target) = entry.symlink_target {
+                format!(" → {target}")
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
         rows.push_str(&format!(
-            r#"<tr><td><a href="{href}">{display}</a></td><td>{size}</td><td>{modified}</td></tr>"#,
+            r#"<tr><td><a href="{href}">{display}{symlink_info}</a></td><td>{size}</td><td>{modified}</td></tr>"#,
         ));
         rows.push('\n');
     }
@@ -618,7 +743,7 @@ pub async fn serve_with_fs(
     };
 
     // Canonical redirect: /dir → /dir/
-    if !request_path.ends_with('/') && request_path != "/" {
+    if !opts.disable_canonical_uris && !request_path.ends_with('/') && request_path != "/" {
         if let Some(meta) = filesystem.metadata(&candidate).await {
             if meta.is_dir {
                 let redirect_to = format!("{request_path}/");
@@ -641,7 +766,7 @@ pub async fn serve_with_fs(
         try_serve_file_with_fs(filesystem, &candidate, request_path, &encodings, opts, precompressed)
             .await
     {
-        return ServeResult::Response(resp);
+        return ServeResult::Response(apply_status_override(resp, opts.status_override));
     }
 
     // Try index file in directory.
@@ -651,7 +776,7 @@ pub async fn serve_with_fs(
             try_serve_file_with_fs(filesystem, &index, request_path, &encodings, opts, precompressed)
                 .await
         {
-            return ServeResult::Response(resp);
+            return ServeResult::Response(apply_status_override(resp, opts.status_override));
         }
 
         // Directory browse: list directory if enabled and dir exists.
@@ -663,6 +788,7 @@ pub async fn serve_with_fs(
                             request_path,
                             &entries,
                             opts.browse_template,
+                            opts,
                         ));
                     }
                 }
@@ -679,7 +805,7 @@ pub async fn serve_with_fs(
         if let Some(resp) =
             try_serve_file_with_fs(filesystem, &index, "/", &encodings, opts, precompressed).await
         {
-            return ServeResult::Response(resp);
+            return ServeResult::Response(apply_status_override(resp, opts.status_override));
         }
     }
 
@@ -843,7 +969,7 @@ pub async fn serve_with_options(
     };
 
     // Canonical path redirect: /dir → /dir/
-    if !request_path.ends_with('/') && request_path != "/" {
+    if !opts.disable_canonical_uris && !request_path.ends_with('/') && request_path != "/" {
         if let Ok(meta) = fs::metadata(&candidate).await {
             if meta.is_dir() {
                 let redirect_to = format!("{request_path}/");
@@ -859,7 +985,7 @@ pub async fn serve_with_options(
     if let Some(resp) =
         try_serve_file(&candidate, request_path, &encodings, opts).await
     {
-        return resp;
+        return apply_status_override(resp, opts.status_override);
     }
 
     if candidate.extension().is_none() || request_path.ends_with('/') {
@@ -867,7 +993,7 @@ pub async fn serve_with_options(
         if let Some(resp) =
             try_serve_file(&index, request_path, &encodings, opts).await
         {
-            return resp;
+            return apply_status_override(resp, opts.status_override);
         }
     }
 
@@ -880,7 +1006,7 @@ pub async fn serve_with_options(
         if let Some(resp) =
             try_serve_file(&index, "/", &encodings, opts).await
         {
-            return resp;
+            return apply_status_override(resp, opts.status_override);
         }
     }
 
@@ -1169,6 +1295,7 @@ mod tests {
                         is_dir: false,
                         size: data.len() as u64,
                         modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000)),
+                        symlink_target: None,
                     });
                 }
             }
@@ -1180,6 +1307,7 @@ mod tests {
                         is_dir: true,
                         size: 0,
                         modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000)),
+                        symlink_target: None,
                     });
                 }
             }
@@ -1198,15 +1326,18 @@ mod tests {
                 is_dir: true,
                 size: 0,
                 modified: None,
+                symlink_target: None,
             },
             FsDirEntry {
                 name: "readme.txt".into(),
                 is_dir: false,
                 size: 1234,
                 modified: None,
+                symlink_target: None,
             },
         ];
-        let resp = render_directory_listing("/files/", &entries, None);
+        let opts = ServeOptions::default();
+        let resp = render_directory_listing("/files/", &entries, None, &opts);
         assert_eq!(resp.status(), StatusCode::OK);
         let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
         assert!(ct.contains("text/html"));
@@ -1219,9 +1350,11 @@ mod tests {
             is_dir: false,
             size: 42,
             modified: None,
+            symlink_target: None,
         }];
         let tpl = "<html><body><h1>{{path}}</h1><table>{{entries}}</table></body></html>";
-        let resp = render_directory_listing("/data/", &entries, Some(tpl));
+        let opts = ServeOptions::default();
+        let resp = render_directory_listing("/data/", &entries, Some(tpl), &opts);
         // We can't read the body easily in sync code, but we can confirm
         // it returned 200 with html content-type.
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1230,19 +1363,21 @@ mod tests {
     #[test]
     fn render_directory_listing_hides_dotfiles() {
         let entries = vec![
-            FsDirEntry { name: ".hidden".into(), is_dir: false, size: 0, modified: None },
-            FsDirEntry { name: "visible.txt".into(), is_dir: false, size: 100, modified: None },
+            FsDirEntry { name: ".hidden".into(), is_dir: false, size: 0, modified: None, symlink_target: None },
+            FsDirEntry { name: "visible.txt".into(), is_dir: false, size: 100, modified: None, symlink_target: None },
         ];
         // The render function skips entries starting with '.'.
         // We verify by checking that the function runs (the skipping is internal).
-        let resp = render_directory_listing("/", &entries, None);
+        let opts = ServeOptions::default();
+        let resp = render_directory_listing("/", &entries, None, &opts);
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[test]
     fn render_directory_listing_root_no_parent_link() {
         let entries = vec![];
-        let resp = render_directory_listing("/", &entries, None);
+        let opts = ServeOptions::default();
+        let resp = render_directory_listing("/", &entries, None, &opts);
         assert_eq!(resp.status(), StatusCode::OK);
         // Root should not have a parent "../" link.
     }
@@ -1250,7 +1385,8 @@ mod tests {
     #[test]
     fn render_directory_listing_subdir_has_parent_link() {
         let entries = vec![];
-        let resp = render_directory_listing("/sub/", &entries, None);
+        let opts = ServeOptions::default();
+        let resp = render_directory_listing("/sub/", &entries, None, &opts);
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -1722,5 +1858,253 @@ mod tests {
             ServeResult::Response(resp) => assert_eq!(resp.status(), StatusCode::NO_CONTENT),
             ServeResult::PassThru => panic!("expected 204 for missing favicon"),
         }
+    }
+
+    // ── Feature 88: browse_sort ─────────────────────────────────────
+
+    #[test]
+    fn sort_entries_name_ascending_default() {
+        let mut entries = vec![
+            FsDirEntry { name: "zebra.txt".into(), is_dir: false, size: 10, modified: None, symlink_target: None },
+            FsDirEntry { name: "alpha.txt".into(), is_dir: false, size: 20, modified: None, symlink_target: None },
+            FsDirEntry { name: "mango.txt".into(), is_dir: false, size: 30, modified: None, symlink_target: None },
+        ];
+        sort_entries(&mut entries, None); // default = Name Ascending
+        assert_eq!(entries[0].name, "alpha.txt");
+        assert_eq!(entries[1].name, "mango.txt");
+        assert_eq!(entries[2].name, "zebra.txt");
+    }
+
+    #[test]
+    fn sort_entries_size_descending() {
+        let mut entries = vec![
+            FsDirEntry { name: "small.txt".into(), is_dir: false, size: 10, modified: None, symlink_target: None },
+            FsDirEntry { name: "big.txt".into(), is_dir: false, size: 9999, modified: None, symlink_target: None },
+            FsDirEntry { name: "medium.txt".into(), is_dir: false, size: 500, modified: None, symlink_target: None },
+        ];
+        sort_entries(&mut entries, Some((BrowseSortField::Size, SortDirection::Descending)));
+        assert_eq!(entries[0].name, "big.txt");
+        assert_eq!(entries[1].name, "medium.txt");
+        assert_eq!(entries[2].name, "small.txt");
+    }
+
+    #[test]
+    fn sort_entries_time() {
+        let t1 = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1000);
+        let t2 = std::time::UNIX_EPOCH + std::time::Duration::from_secs(2000);
+        let t3 = std::time::UNIX_EPOCH + std::time::Duration::from_secs(3000);
+        let mut entries = vec![
+            FsDirEntry { name: "old.txt".into(), is_dir: false, size: 1, modified: Some(t1), symlink_target: None },
+            FsDirEntry { name: "new.txt".into(), is_dir: false, size: 1, modified: Some(t3), symlink_target: None },
+            FsDirEntry { name: "mid.txt".into(), is_dir: false, size: 1, modified: Some(t2), symlink_target: None },
+        ];
+        // Ascending: oldest first.
+        sort_entries(&mut entries, Some((BrowseSortField::Time, SortDirection::Ascending)));
+        assert_eq!(entries[0].name, "old.txt");
+        assert_eq!(entries[1].name, "mid.txt");
+        assert_eq!(entries[2].name, "new.txt");
+    }
+
+    #[test]
+    fn sort_entries_dirs_always_first() {
+        let mut entries = vec![
+            FsDirEntry { name: "file_a.txt".into(), is_dir: false, size: 100, modified: None, symlink_target: None },
+            FsDirEntry { name: "dir_z".into(), is_dir: true, size: 0, modified: None, symlink_target: None },
+            FsDirEntry { name: "file_b.txt".into(), is_dir: false, size: 50, modified: None, symlink_target: None },
+        ];
+        // Even when sorting by size desc, dirs come first.
+        sort_entries(&mut entries, Some((BrowseSortField::Size, SortDirection::Descending)));
+        assert!(entries[0].is_dir);
+        assert_eq!(entries[0].name, "dir_z");
+    }
+
+    // ── Feature 89: browse_file_limit ───────────────────────────────
+
+    #[test]
+    fn browse_file_limit_truncates() {
+        let entries: Vec<FsDirEntry> = (0..20)
+            .map(|i| FsDirEntry {
+                name: format!("file_{i:02}.txt"),
+                is_dir: false,
+                size: i as u64,
+                modified: None,
+                symlink_target: None,
+            })
+            .collect();
+        let opts = ServeOptions {
+            browse_file_limit: 5,
+            ..Default::default()
+        };
+        let resp = render_directory_listing("/test/", &entries, None, &opts);
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn serve_with_fs_browse_file_limit() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_dir("/www/many");
+        for i in 0..10 {
+            fs.add_file(&format!("/www/many/f{i:02}.txt"), b"data");
+        }
+
+        let opts = ServeOptions {
+            browse: true,
+            browse_file_limit: 3,
+            ..Default::default()
+        };
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/many/", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::OK);
+                let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+                assert!(ct.contains("text/html"));
+            }
+            ServeResult::PassThru => panic!("expected browse listing"),
+        }
+    }
+
+    // ── Feature 90: browse_reveal_symlinks ──────────────────────────
+
+    #[test]
+    fn browse_reveal_symlinks_option_parsing() {
+        let opts = ServeOptions {
+            browse_reveal_symlinks: true,
+            ..Default::default()
+        };
+        assert!(opts.browse_reveal_symlinks);
+
+        let default_opts = ServeOptions::default();
+        assert!(!default_opts.browse_reveal_symlinks);
+    }
+
+    #[test]
+    fn browse_reveal_symlinks_renders_target() {
+        let entries = vec![FsDirEntry {
+            name: "link.txt".into(),
+            is_dir: false,
+            size: 42,
+            modified: None,
+            symlink_target: Some("/real/path.txt".into()),
+        }];
+        let opts = ServeOptions {
+            browse_reveal_symlinks: true,
+            ..Default::default()
+        };
+        let resp = render_directory_listing("/dir/", &entries, None, &opts);
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn browse_reveal_symlinks_hidden_when_disabled() {
+        let entries = vec![FsDirEntry {
+            name: "link.txt".into(),
+            is_dir: false,
+            size: 42,
+            modified: None,
+            symlink_target: Some("/real/path.txt".into()),
+        }];
+        let opts = ServeOptions::default();
+        let resp = render_directory_listing("/dir/", &entries, None, &opts);
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ── Feature 91: disable_canonical_uris ──────────────────────────
+
+    #[tokio::test]
+    async fn serve_with_fs_disable_canonical_uris() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_dir("/www/sub");
+        fs.add_file("/www/sub/index.html", b"<h1>Sub</h1>");
+
+        let opts = ServeOptions {
+            disable_canonical_uris: true,
+            ..Default::default()
+        };
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/sub", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_ne!(resp.status(), StatusCode::MOVED_PERMANENTLY);
+            }
+            ServeResult::PassThru => panic!("expected response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_with_fs_canonical_uris_enabled_by_default() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_dir("/www/sub");
+
+        let opts = ServeOptions::default();
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/sub", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY);
+                let loc = resp.headers().get(header::LOCATION).unwrap().to_str().unwrap();
+                assert_eq!(loc, "/sub/");
+            }
+            ServeResult::PassThru => panic!("expected redirect"),
+        }
+    }
+
+    // ── Feature 92: status_override ─────────────────────────────────
+
+    #[tokio::test]
+    async fn serve_with_fs_status_override() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_file("/www/404.html", b"<h1>Not Found</h1>");
+
+        let opts = ServeOptions {
+            status_override: Some(404),
+            ..Default::default()
+        };
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/404.html", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+                let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+                assert!(ct.contains("text/html"));
+            }
+            ServeResult::PassThru => panic!("expected response with 404 status"),
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_with_fs_status_override_none_uses_200() {
+        let mut fs = InMemoryFs::new();
+        fs.add_dir("/www");
+        fs.add_file("/www/page.html", b"<p>ok</p>");
+
+        let opts = ServeOptions::default();
+        let result = serve_with_fs(&fs, "/www", "index.html", false, "/page.html", "", &opts).await;
+        match result {
+            ServeResult::Response(resp) => {
+                assert_eq!(resp.status(), StatusCode::OK);
+            }
+            ServeResult::PassThru => panic!("expected 200 response"),
+        }
+    }
+
+    #[test]
+    fn apply_status_override_changes_status() {
+        let resp = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::empty())
+            .unwrap();
+        let overridden = apply_status_override(resp, Some(503));
+        assert_eq!(overridden.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn apply_status_override_none_preserves() {
+        let resp = Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::empty())
+            .unwrap();
+        let same = apply_status_override(resp, None);
+        assert_eq!(same.status(), StatusCode::OK);
     }
 }

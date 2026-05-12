@@ -170,6 +170,92 @@ pub struct GatewaySettings {
     /// after this grace period are forcibly closed. Default: 30.
     #[serde(default = "default_grace_period")]
     pub grace_period_secs: u64,
+
+    /// Automatic HTTPS behaviour. Controls HTTP→HTTPS redirects and
+    /// automatic certificate management.
+    /// - `"on"` (default): enable both redirects and automatic certs
+    /// - `"off"`: disable automatic HTTPS entirely
+    /// - `"disable_redirects"`: keep auto certs but skip HTTP→HTTPS redirects
+    /// - `"disable_certs"`: keep redirects but skip auto cert management
+    #[serde(default = "default_auto_https")]
+    pub auto_https: String,
+
+    /// Shorthand alias for `cert_store.backend`. When set, overrides the
+    /// cert store backend selection. Accepted values: `"file"` (default),
+    /// `"redis"`, `"postgres"`.
+    #[serde(default = "default_storage_backend")]
+    pub storage_backend: String,
+
+    /// Interval in seconds between automatic cleanup runs for expired
+    /// or stale certificate data in the storage backend. Default: 86400
+    /// (24 hours).
+    #[serde(default = "default_storage_clean_interval")]
+    pub storage_clean_interval_secs: u64,
+
+    /// TCP keepalive idle time in seconds. The connection must be idle
+    /// for this long before keepalive probes start. Default: 60.
+    #[serde(default = "default_keepalive_idle")]
+    pub keepalive_idle_secs: u64,
+
+    /// Interval in seconds between TCP keepalive probes. Default: 15.
+    #[serde(default = "default_keepalive_interval")]
+    pub keepalive_interval_secs: u64,
+
+    /// Number of unacknowledged TCP keepalive probes before the
+    /// connection is dropped. Default: 3.
+    #[serde(default = "default_keepalive_count")]
+    pub keepalive_count: u32,
+
+    /// Network address to bind the proxy listener to. Default: `"0.0.0.0"`.
+    #[serde(default = "default_bind_address")]
+    pub bind_address: String,
+
+    /// Persist the running config to disk on changes. Default: `true`.
+    #[serde(default = "default_true_bool")]
+    pub persist_config: bool,
+
+    /// Health/unhealthy webhook event notifications.
+    #[serde(default)]
+    pub events: EventsConfig,
+
+    /// When true, don't redact auth headers in access logs. Default: false.
+    #[serde(default)]
+    pub log_credentials: bool,
+
+    /// When true, enable full-duplex (simultaneous read/write) on
+    /// proxy connections. Default: false.
+    #[serde(default)]
+    pub enable_full_duplex: bool,
+
+    /// When true, log each invoked handler for debugging. Default: false.
+    #[serde(default)]
+    pub trace_handlers: bool,
+
+    /// When true, parse X-Forwarded-For right-to-left (strict mode).
+    /// Default: false.
+    #[serde(default)]
+    pub trusted_proxies_strict: bool,
+
+    /// Custom headers to read the client IP from. When empty, the
+    /// standard X-Forwarded-For header is used. Default: empty.
+    #[serde(default)]
+    pub client_ip_headers: Vec<String>,
+
+    /// Named filesystem mappings. Maps logical names to root paths.
+    /// Used by the file server and file matcher. Default: empty.
+    #[serde(default)]
+    pub filesystems: HashMap<String, String>,
+}
+
+/// Webhook URLs called on upstream health transitions.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct EventsConfig {
+    /// URLs to POST when an upstream becomes healthy.
+    #[serde(default)]
+    pub on_healthy: Vec<String>,
+    /// URLs to POST when an upstream becomes unhealthy.
+    #[serde(default)]
+    pub on_unhealthy: Vec<String>,
 }
 
 /// Built-in PKI configuration. When `enabled = true` the gateway
@@ -334,6 +420,21 @@ pub struct AcmeConfig {
     #[serde(default = "default_acme_key_type")]
     pub key_type: String,
 
+    /// Fraction of cert lifetime before expiry at which renewal starts.
+    /// For a 90-day cert with ratio 0.3333, renewal starts ~30 days
+    /// before expiry. Default: 0.3333.
+    #[serde(default = "default_renewal_window_ratio")]
+    pub renewal_window_ratio: f64,
+
+    /// Desired certificate lifetime in days. Default: 90.
+    #[serde(default = "default_cert_lifetime_days")]
+    pub cert_lifetime_days: u32,
+
+    /// How often (in seconds) to check whether certificates need
+    /// renewal. Default: 43200 (12 hours).
+    #[serde(default = "default_renew_interval")]
+    pub renew_interval_secs: u64,
+
     /// When `true`, certificate renewals reuse the existing private key
     /// instead of generating a fresh one. Reduces HPKP / pin rotation
     /// churn. Defaults to `false`.
@@ -418,6 +519,19 @@ pub struct Dns01Config {
     /// Seconds to wait for DNS propagation. Default 120.
     #[serde(default = "default_dns_propagation_timeout")]
     pub propagation_timeout_secs: u64,
+
+    /// Override domain for DNS-01 challenge TXT records. When set,
+    /// the `_acme-challenge` TXT record is created under this domain
+    /// instead of the certificate domain. Useful for CNAME delegation
+    /// setups. Empty (default) means use the certificate domain.
+    #[serde(default)]
+    pub dns_challenge_override_domain: String,
+
+    /// Delay in seconds to wait after creating the DNS TXT record
+    /// before asking the ACME server to validate. Gives DNS caches
+    /// time to clear. Default: 0 (no extra delay).
+    #[serde(default)]
+    pub propagation_delay_secs: u64,
 }
 
 impl Default for Dns01Config {
@@ -431,6 +545,8 @@ impl Default for Dns01Config {
             access_key_id: String::new(),
             secret_access_key: String::new(),
             propagation_timeout_secs: default_dns_propagation_timeout(),
+            dns_challenge_override_domain: String::new(),
+            propagation_delay_secs: 0,
         }
     }
 }
@@ -492,6 +608,9 @@ impl Default for AcmeConfig {
             eab_kid: String::new(),
             eab_hmac_key: String::new(),
             key_type: default_acme_key_type(),
+            renewal_window_ratio: default_renewal_window_ratio(),
+            cert_lifetime_days: default_cert_lifetime_days(),
+            renew_interval_secs: default_renew_interval(),
             reuse_private_keys: false,
             preferred_chain: String::new(),
         }
@@ -520,6 +639,18 @@ fn default_acme_key_type() -> String {
 
 fn default_acme_fallback_urls() -> Vec<String> {
     vec!["https://acme.zerossl.com/v2/DV90".to_string()]
+}
+
+fn default_renewal_window_ratio() -> f64 {
+    0.3333
+}
+
+fn default_cert_lifetime_days() -> u32 {
+    90
+}
+
+fn default_renew_interval() -> u64 {
+    43200
 }
 
 /// External service-discovery providers.
@@ -609,6 +740,25 @@ pub struct TlsSettings {
     /// (`x25519mlkem768`). Requires the `aws-lc-rs` cargo feature.
     #[serde(default = "default_crypto_provider")]
     pub crypto_provider: String,
+
+    /// Default SNI value. When a client connects without an SNI
+    /// extension, this hostname is used for certificate selection.
+    /// Empty (default) means no default SNI is assumed.
+    #[serde(default)]
+    pub default_sni: String,
+
+    /// Fallback SNI value. When the SNI presented by the client does
+    /// not match any configured certificate, the gateway falls back
+    /// to this hostname for certificate selection. Empty (default)
+    /// means no fallback.
+    #[serde(default)]
+    pub fallback_sni: String,
+
+    /// When true, the gateway requires that the TLS SNI hostname
+    /// matches the HTTP Host header. Connections where they differ
+    /// are rejected. Default: false.
+    #[serde(default)]
+    pub strict_sni_host: bool,
 }
 
 impl Default for TlsSettings {
@@ -628,6 +778,9 @@ impl Default for TlsSettings {
             ech_config_list: String::new(),
             enable_0rtt: false,
             crypto_provider: default_crypto_provider(),
+            default_sni: String::new(),
+            fallback_sni: String::new(),
+            strict_sni_host: false,
         }
     }
 }
@@ -673,6 +826,45 @@ pub struct ServiceConfig {
     /// instead of navigating array indices.
     #[serde(default, rename = "@id")]
     pub id_tag: Option<String>,
+
+    // -- Feature 82: streaming timeout controls --
+    /// Max duration in seconds for streaming (WebSocket/SSE) connections.
+    /// 0 = no timeout.
+    #[serde(default)]
+    pub stream_timeout_secs: u64,
+    /// Delay in seconds before force-closing after server-side close. 0 = immediate.
+    #[serde(default)]
+    pub stream_close_delay_secs: u64,
+
+    // -- Feature 83: retry resilience controls --
+    /// Maximum duration in ms to keep retrying. 0 = no limit.
+    #[serde(default)]
+    pub lb_try_duration_ms: u64,
+    /// Interval in ms between retry attempts.
+    #[serde(default = "default_lb_try_interval")]
+    pub lb_try_interval_ms: u64,
+    /// Status codes that trigger a retry (e.g. ["502", "503"]).
+    #[serde(default)]
+    pub lb_retry_match: Vec<String>,
+
+    // -- Feature 84: request/response buffer sizes --
+    /// Request body buffer size in bytes. 0 = no buffering.
+    #[serde(default)]
+    pub request_buffer_size: u64,
+    /// Response body buffer size in bytes. 0 = no buffering.
+    #[serde(default)]
+    pub response_buffer_size: u64,
+
+    // -- Feature 85: flush interval --
+    /// Response flush frequency in ms. -1 = auto-detect, 0 = flush after
+    /// every write, >0 = flush every N ms.
+    #[serde(default = "default_flush_interval")]
+    pub flush_interval_ms: i64,
+
+    /// Site root directory for file operations. When set, serves as the
+    /// base path for file serving and file matchers.
+    #[serde(default)]
+    pub root: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -690,6 +882,21 @@ pub struct RouteConfig {
     /// instead of navigating array indices.
     #[serde(default, rename = "@id")]
     pub id_tag: Option<String>,
+
+    /// Arbitrary variables set on this route. Available to matchers and
+    /// templates via the `vars` context.
+    #[serde(default)]
+    pub vars: HashMap<String, String>,
+
+    /// When set, this route delegates to another route by name instead
+    /// of proxying to an upstream.
+    #[serde(default)]
+    pub invoke: Option<String>,
+
+    /// When true, the route's handlers execute in literal definition
+    /// order rather than directive-order.
+    #[serde(default)]
+    pub literal_order: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -750,11 +957,50 @@ fn default_gateway() -> GatewaySettings {
         trusted_proxies: Vec::new(),
         shutdown_delay_secs: 0,
         grace_period_secs: default_grace_period(),
+        auto_https: default_auto_https(),
+        storage_backend: default_storage_backend(),
+        storage_clean_interval_secs: default_storage_clean_interval(),
+        keepalive_idle_secs: default_keepalive_idle(),
+        keepalive_interval_secs: default_keepalive_interval(),
+        keepalive_count: default_keepalive_count(),
+        bind_address: default_bind_address(),
+        persist_config: true,
+        events: EventsConfig::default(),
+        log_credentials: false,
+        enable_full_duplex: false,
+        trace_handlers: false,
+        trusted_proxies_strict: false,
+        client_ip_headers: Vec::new(),
+        filesystems: HashMap::new(),
     }
 }
 
 fn default_grace_period() -> u64 {
     30
+}
+
+fn default_auto_https() -> String {
+    "on".to_string()
+}
+
+fn default_storage_backend() -> String {
+    "file".to_string()
+}
+
+fn default_storage_clean_interval() -> u64 {
+    86400
+}
+
+fn default_keepalive_idle() -> u64 {
+    60
+}
+
+fn default_keepalive_interval() -> u64 {
+    15
+}
+
+fn default_keepalive_count() -> u32 {
+    3
 }
 
 fn default_prewarm_interval() -> u64 {
@@ -815,6 +1061,14 @@ fn default_admin_port() -> u16 {
     8001
 }
 
+fn default_lb_try_interval() -> u64 {
+    250
+}
+
+fn default_flush_interval() -> i64 {
+    -1
+}
+
 fn default_retries() -> u32 {
     3
 }
@@ -824,6 +1078,14 @@ fn default_timeout() -> u64 {
 }
 
 fn default_true() -> bool {
+    true
+}
+
+fn default_bind_address() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_true_bool() -> bool {
     true
 }
 
@@ -1394,5 +1656,578 @@ url = "http://localhost:3000"
         merge_json(&mut base, &overlay);
         assert_eq!(base["a"]["b"], 1);
         assert_eq!(base["a"]["c"], 2);
+    }
+
+    // --- Feature 60: auto_https ---
+
+    #[test]
+    fn auto_https_defaults_on() {
+        let gw = default_gateway();
+        assert_eq!(gw.auto_https, "on");
+    }
+
+    #[test]
+    fn auto_https_deserializes() {
+        let toml_str = r#"
+[gateway]
+auto_https = "disable_redirects"
+"#;
+        let cfg: GatewayConfig = toml::from_str(toml_str).expect("valid TOML");
+        assert_eq!(cfg.gateway.auto_https, "disable_redirects");
+    }
+
+    #[test]
+    fn auto_https_off_deserializes() {
+        let toml_str = r#"
+[gateway]
+auto_https = "off"
+"#;
+        let cfg: GatewayConfig = toml::from_str(toml_str).expect("valid TOML");
+        assert_eq!(cfg.gateway.auto_https, "off");
+    }
+
+    // --- Feature 61: default_sni / fallback_sni ---
+
+    #[test]
+    fn default_sni_defaults_empty() {
+        let tls = TlsSettings::default();
+        assert!(tls.default_sni.is_empty());
+        assert!(tls.fallback_sni.is_empty());
+    }
+
+    #[test]
+    fn default_sni_deserializes() {
+        let json = r#"{"default_sni": "example.com", "fallback_sni": "fallback.example.com"}"#;
+        let tls: TlsSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(tls.default_sni, "example.com");
+        assert_eq!(tls.fallback_sni, "fallback.example.com");
+    }
+
+    // --- Feature 62: strict_sni_host ---
+
+    #[test]
+    fn strict_sni_host_defaults_false() {
+        let tls = TlsSettings::default();
+        assert!(!tls.strict_sni_host);
+    }
+
+    #[test]
+    fn strict_sni_host_deserializes() {
+        let json = r#"{"strict_sni_host": true}"#;
+        let tls: TlsSettings = serde_json::from_str(json).unwrap();
+        assert!(tls.strict_sni_host);
+    }
+
+    // --- Feature 74: dns_challenge_override_domain ---
+
+    #[test]
+    fn dns_challenge_override_domain_defaults_empty() {
+        let dns = Dns01Config::default();
+        assert!(dns.dns_challenge_override_domain.is_empty());
+    }
+
+    #[test]
+    fn dns_challenge_override_domain_deserializes() {
+        let json = r#"{"dns_challenge_override_domain": "acme.example.com"}"#;
+        let dns: Dns01Config = serde_json::from_str(json).unwrap();
+        assert_eq!(dns.dns_challenge_override_domain, "acme.example.com");
+    }
+
+    // --- Feature 75: propagation_delay ---
+
+    #[test]
+    fn propagation_delay_defaults_zero() {
+        let dns = Dns01Config::default();
+        assert_eq!(dns.propagation_delay_secs, 0);
+    }
+
+    #[test]
+    fn propagation_delay_deserializes() {
+        let json = r#"{"propagation_delay_secs": 30}"#;
+        let dns: Dns01Config = serde_json::from_str(json).unwrap();
+        assert_eq!(dns.propagation_delay_secs, 30);
+    }
+
+    // --- Feature 76: renewal_window_ratio, cert_lifetime, renew_interval ---
+
+    #[test]
+    fn acme_renewal_defaults() {
+        let acme = AcmeConfig::default();
+        assert!((acme.renewal_window_ratio - 0.3333).abs() < 0.0001);
+        assert_eq!(acme.cert_lifetime_days, 90);
+        assert_eq!(acme.renew_interval_secs, 43200);
+    }
+
+    #[test]
+    fn acme_renewal_deserializes() {
+        let json = r#"{
+            "renewal_window_ratio": 0.5,
+            "cert_lifetime_days": 30,
+            "renew_interval_secs": 3600
+        }"#;
+        let acme: AcmeConfig = serde_json::from_str(json).unwrap();
+        assert!((acme.renewal_window_ratio - 0.5).abs() < 0.0001);
+        assert_eq!(acme.cert_lifetime_days, 30);
+        assert_eq!(acme.renew_interval_secs, 3600);
+    }
+
+    // --- Feature 77: storage_backend ---
+
+    #[test]
+    fn storage_backend_defaults_file() {
+        let gw = default_gateway();
+        assert_eq!(gw.storage_backend, "file");
+    }
+
+    #[test]
+    fn storage_backend_deserializes() {
+        let toml_str = r#"
+[gateway]
+storage_backend = "redis"
+"#;
+        let cfg: GatewayConfig = toml::from_str(toml_str).expect("valid TOML");
+        assert_eq!(cfg.gateway.storage_backend, "redis");
+    }
+
+    // --- Feature 78: storage_clean_interval ---
+
+    #[test]
+    fn storage_clean_interval_defaults_24h() {
+        let gw = default_gateway();
+        assert_eq!(gw.storage_clean_interval_secs, 86400);
+    }
+
+    #[test]
+    fn storage_clean_interval_deserializes() {
+        let toml_str = r#"
+[gateway]
+storage_clean_interval_secs = 3600
+"#;
+        let cfg: GatewayConfig = toml::from_str(toml_str).expect("valid TOML");
+        assert_eq!(cfg.gateway.storage_clean_interval_secs, 3600);
+    }
+
+    // --- Feature 81: TCP keepalive tuning ---
+
+    #[test]
+    fn keepalive_defaults() {
+        let gw = default_gateway();
+        assert_eq!(gw.keepalive_idle_secs, 60);
+        assert_eq!(gw.keepalive_interval_secs, 15);
+        assert_eq!(gw.keepalive_count, 3);
+    }
+
+    #[test]
+    fn keepalive_deserializes() {
+        let toml_str = r#"
+[gateway]
+keepalive_idle_secs = 120
+keepalive_interval_secs = 30
+keepalive_count = 5
+"#;
+        let cfg: GatewayConfig = toml::from_str(toml_str).expect("valid TOML");
+        assert_eq!(cfg.gateway.keepalive_idle_secs, 120);
+        assert_eq!(cfg.gateway.keepalive_interval_secs, 30);
+        assert_eq!(cfg.gateway.keepalive_count, 5);
+    }
+
+    // --- Feature 82: stream_timeout / stream_close_delay ---
+
+    #[test]
+    fn stream_timeout_defaults_zero() {
+        let json = r#"{ "services": [{ "name": "svc", "url": "http://localhost:3000" }] }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.services[0].stream_timeout_secs, 0);
+        assert_eq!(cfg.services[0].stream_close_delay_secs, 0);
+    }
+
+    #[test]
+    fn stream_timeout_deserializes() {
+        let json = r#"{
+            "services": [{
+                "name": "ws-svc",
+                "url": "http://localhost:3000",
+                "stream_timeout_secs": 300,
+                "stream_close_delay_secs": 5
+            }]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.services[0].stream_timeout_secs, 300);
+        assert_eq!(cfg.services[0].stream_close_delay_secs, 5);
+    }
+
+    // --- Feature 83: lb_try_duration / lb_try_interval / lb_retry_match ---
+
+    #[test]
+    fn lb_retry_defaults() {
+        let json = r#"{ "services": [{ "name": "svc", "url": "http://localhost:3000" }] }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.services[0].lb_try_duration_ms, 0);
+        assert_eq!(cfg.services[0].lb_try_interval_ms, 250);
+        assert!(cfg.services[0].lb_retry_match.is_empty());
+    }
+
+    #[test]
+    fn lb_retry_deserializes() {
+        let json = r#"{
+            "services": [{
+                "name": "retry-svc",
+                "url": "http://localhost:3000",
+                "lb_try_duration_ms": 30000,
+                "lb_try_interval_ms": 500,
+                "lb_retry_match": ["502", "503", "504"]
+            }]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.services[0].lb_try_duration_ms, 30000);
+        assert_eq!(cfg.services[0].lb_try_interval_ms, 500);
+        assert_eq!(cfg.services[0].lb_retry_match, vec!["502", "503", "504"]);
+    }
+
+    // --- Feature 84: request_buffer_size / response_buffer_size ---
+
+    #[test]
+    fn buffer_size_defaults_zero() {
+        let json = r#"{ "services": [{ "name": "svc", "url": "http://localhost:3000" }] }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.services[0].request_buffer_size, 0);
+        assert_eq!(cfg.services[0].response_buffer_size, 0);
+    }
+
+    #[test]
+    fn buffer_size_deserializes() {
+        let json = r#"{
+            "services": [{
+                "name": "buf-svc",
+                "url": "http://localhost:3000",
+                "request_buffer_size": 4096,
+                "response_buffer_size": 8192
+            }]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.services[0].request_buffer_size, 4096);
+        assert_eq!(cfg.services[0].response_buffer_size, 8192);
+    }
+
+    // --- Feature 85: flush_interval ---
+
+    #[test]
+    fn flush_interval_default_auto() {
+        let json = r#"{ "services": [{ "name": "svc", "url": "http://localhost:3000" }] }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.services[0].flush_interval_ms, -1);
+    }
+
+    #[test]
+    fn flush_interval_deserializes() {
+        let json = r#"{
+            "services": [{
+                "name": "flush-svc",
+                "url": "http://localhost:3000",
+                "flush_interval_ms": 100
+            }]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.services[0].flush_interval_ms, 100);
+    }
+
+    #[test]
+    fn flush_interval_zero_means_every_write() {
+        let json = r#"{
+            "services": [{
+                "name": "flush-svc",
+                "url": "http://localhost:3000",
+                "flush_interval_ms": 0
+            }]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.services[0].flush_interval_ms, 0);
+    }
+
+    // --- Feature 63: bind_address ---
+
+    #[test]
+    fn bind_address_defaults_to_all() {
+        let gw = default_gateway();
+        assert_eq!(gw.bind_address, "0.0.0.0");
+    }
+
+    #[test]
+    fn bind_address_deserializes() {
+        let toml_str = r#"
+[gateway]
+bind_address = "127.0.0.1"
+"#;
+        let cfg: GatewayConfig = toml::from_str(toml_str).expect("valid TOML");
+        assert_eq!(cfg.gateway.bind_address, "127.0.0.1");
+    }
+
+    // --- Feature 64: root directive ---
+
+    #[test]
+    fn service_root_defaults_empty() {
+        let json = r#"{
+            "services": [{ "name": "svc", "url": "http://localhost:3000" }]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert!(cfg.services[0].root.is_empty());
+    }
+
+    #[test]
+    fn service_root_deserializes() {
+        let json = r#"{
+            "services": [{ "name": "static-svc", "url": "", "root": "/var/www/html" }]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.services[0].root, "/var/www/html");
+    }
+
+    // --- Feature 65: error directive (handled by error_handler plugin) ---
+
+    #[test]
+    fn error_handler_plugin_config_deserializes() {
+        let json = r#"{
+            "plugins": [{
+                "name": "error-handler",
+                "config": {
+                    "pages": {
+                        "404": { "body": "<h1>Not Found</h1>", "content_type": "text/html" }
+                    }
+                }
+            }]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.plugins[0].name, "error-handler");
+        assert!(cfg.plugins[0].config.get("pages").is_some());
+    }
+
+    // --- Feature 66: vars directive ---
+
+    #[test]
+    fn route_vars_default_empty() {
+        let json = r#"{
+            "routes": [{ "paths": ["/api"], "service": "svc" }]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert!(cfg.routes[0].vars.is_empty());
+    }
+
+    #[test]
+    fn route_vars_deserializes() {
+        let json = r#"{
+            "routes": [{
+                "paths": ["/api"],
+                "service": "svc",
+                "vars": { "env": "production", "version": "v2" }
+            }]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.routes[0].vars.get("env").unwrap(), "production");
+        assert_eq!(cfg.routes[0].vars.get("version").unwrap(), "v2");
+    }
+
+    // --- Feature 67: invoke (named routes) ---
+
+    #[test]
+    fn route_invoke_default_none() {
+        let json = r#"{
+            "routes": [{ "paths": ["/api"], "service": "svc" }]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert!(cfg.routes[0].invoke.is_none());
+    }
+
+    #[test]
+    fn route_invoke_deserializes() {
+        let json = r#"{
+            "routes": [{
+                "paths": ["/api"],
+                "service": "svc",
+                "invoke": "other-route"
+            }]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.routes[0].invoke.as_deref(), Some("other-route"));
+    }
+
+    // --- Feature 68: literal_order ---
+
+    #[test]
+    fn route_literal_order_default_false() {
+        let json = r#"{
+            "routes": [{ "paths": ["/api"], "service": "svc" }]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert!(!cfg.routes[0].literal_order);
+    }
+
+    #[test]
+    fn route_literal_order_deserializes() {
+        let json = r#"{
+            "routes": [{
+                "paths": ["/api"],
+                "service": "svc",
+                "literal_order": true
+            }]
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert!(cfg.routes[0].literal_order);
+    }
+
+    // --- Feature 79: persist_config ---
+
+    #[test]
+    fn persist_config_defaults_true() {
+        let gw = default_gateway();
+        assert!(gw.persist_config);
+    }
+
+    #[test]
+    fn persist_config_deserializes() {
+        let toml_str = r#"
+[gateway]
+persist_config = false
+"#;
+        let cfg: GatewayConfig = toml::from_str(toml_str).expect("valid TOML");
+        assert!(!cfg.gateway.persist_config);
+    }
+
+    // --- Feature 93: events system ---
+
+    #[test]
+    fn events_default_empty() {
+        let gw = default_gateway();
+        assert!(gw.events.on_healthy.is_empty());
+        assert!(gw.events.on_unhealthy.is_empty());
+    }
+
+    #[test]
+    fn events_deserializes() {
+        let json = r#"{
+            "gateway": {
+                "events": {
+                    "on_healthy": ["https://hooks.example.com/healthy"],
+                    "on_unhealthy": ["https://hooks.example.com/down", "https://pager.example.com/alert"]
+                }
+            }
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.gateway.events.on_healthy.len(), 1);
+        assert_eq!(cfg.gateway.events.on_unhealthy.len(), 2);
+    }
+
+    // --- Feature 94: log_credentials ---
+
+    #[test]
+    fn log_credentials_defaults_false() {
+        let gw = default_gateway();
+        assert!(!gw.log_credentials);
+    }
+
+    #[test]
+    fn log_credentials_deserializes() {
+        let toml_str = r#"
+[gateway]
+log_credentials = true
+"#;
+        let cfg: GatewayConfig = toml::from_str(toml_str).expect("valid TOML");
+        assert!(cfg.gateway.log_credentials);
+    }
+
+    // --- Feature 95: enable_full_duplex ---
+
+    #[test]
+    fn enable_full_duplex_defaults_false() {
+        let gw = default_gateway();
+        assert!(!gw.enable_full_duplex);
+    }
+
+    #[test]
+    fn enable_full_duplex_deserializes() {
+        let toml_str = r#"
+[gateway]
+enable_full_duplex = true
+"#;
+        let cfg: GatewayConfig = toml::from_str(toml_str).expect("valid TOML");
+        assert!(cfg.gateway.enable_full_duplex);
+    }
+
+    // --- Feature 96: trace_handlers ---
+
+    #[test]
+    fn trace_handlers_defaults_false() {
+        let gw = default_gateway();
+        assert!(!gw.trace_handlers);
+    }
+
+    #[test]
+    fn trace_handlers_deserializes() {
+        let toml_str = r#"
+[gateway]
+trace_handlers = true
+"#;
+        let cfg: GatewayConfig = toml::from_str(toml_str).expect("valid TOML");
+        assert!(cfg.gateway.trace_handlers);
+    }
+
+    // --- Feature 97: trusted_proxies_strict ---
+
+    #[test]
+    fn trusted_proxies_strict_defaults_false() {
+        let gw = default_gateway();
+        assert!(!gw.trusted_proxies_strict);
+    }
+
+    #[test]
+    fn trusted_proxies_strict_deserializes() {
+        let toml_str = r#"
+[gateway]
+trusted_proxies_strict = true
+"#;
+        let cfg: GatewayConfig = toml::from_str(toml_str).expect("valid TOML");
+        assert!(cfg.gateway.trusted_proxies_strict);
+    }
+
+    // --- Feature 98: client_ip_headers ---
+
+    #[test]
+    fn client_ip_headers_defaults_empty() {
+        let gw = default_gateway();
+        assert!(gw.client_ip_headers.is_empty());
+    }
+
+    #[test]
+    fn client_ip_headers_deserializes() {
+        let json = r#"{
+            "gateway": {
+                "client_ip_headers": ["X-Real-IP", "CF-Connecting-IP"]
+            }
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.gateway.client_ip_headers, vec!["X-Real-IP", "CF-Connecting-IP"]);
+    }
+
+    // --- Feature 99: named filesystems ---
+
+    #[test]
+    fn filesystems_defaults_empty() {
+        let gw = default_gateway();
+        assert!(gw.filesystems.is_empty());
+    }
+
+    #[test]
+    fn filesystems_deserializes() {
+        let json = r#"{
+            "gateway": {
+                "filesystems": {
+                    "static": "/var/www/static",
+                    "uploads": "/var/data/uploads"
+                }
+            }
+        }"#;
+        let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(cfg.gateway.filesystems.len(), 2);
+        assert_eq!(cfg.gateway.filesystems.get("static").unwrap(), "/var/www/static");
+        assert_eq!(cfg.gateway.filesystems.get("uploads").unwrap(), "/var/data/uploads");
     }
 }

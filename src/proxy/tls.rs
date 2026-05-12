@@ -135,6 +135,23 @@ pub fn build_server_config(settings: &TlsSettings) -> Result<ServerConfig, Gatew
         }
     }
 
+    // --- default_sni / fallback_sni (Feature 61) ---
+    // rustls ServerConfig doesn't expose a direct default_sni setter, so
+    // we log the configured values here. A future custom SNI resolver
+    // will consume these.
+    if !settings.default_sni.is_empty() {
+        tracing::info!(
+            default_sni = %settings.default_sni,
+            "default SNI configured (stored for future resolver use)"
+        );
+    }
+    if !settings.fallback_sni.is_empty() {
+        tracing::info!(
+            fallback_sni = %settings.fallback_sni,
+            "fallback SNI configured (stored for future resolver use)"
+        );
+    }
+
     // Match what axum/hyper would advertise. Order matters — h2 first so
     // ALPN-aware clients pick HTTP/2 when both are acceptable.
     config.alpn_protocols = vec![b"h3".to_vec(), b"h2".to_vec(), b"http/1.1".to_vec()];
@@ -293,6 +310,13 @@ fn resolve_crypto_provider(
                 "x25519" => ring_provider::kx_group::X25519,
                 "secp256r1" | "p256" | "prime256v1" => ring_provider::kx_group::SECP256R1,
                 "secp384r1" | "p384" => ring_provider::kx_group::SECP384R1,
+                "secp521r1" | "p521" => {
+                    return Err(GatewayError::Internal(
+                        "tls.curves: secp521r1 (P-521) is not supported by the ring \
+                         crypto provider; use aws-lc-rs instead"
+                            .into(),
+                    ));
+                }
                 other => {
                     return Err(GatewayError::Internal(format!(
                         "tls.curves: unknown curve \"{other}\" \
@@ -575,6 +599,22 @@ mod tests {
     fn resolve_provider_unknown_curve() {
         let err = resolve_crypto_provider(&["x448".to_string()], "ring").unwrap_err();
         assert!(err.to_string().contains("unknown curve"));
+        assert!(err.to_string().contains("aws-lc-rs"));
+    }
+
+    // --- Feature 73: secp521r1 / P-521 ---
+
+    #[test]
+    fn secp521r1_not_supported_by_ring() {
+        let err = resolve_crypto_provider(&["secp521r1".to_string()], "ring").unwrap_err();
+        assert!(err.to_string().contains("secp521r1"));
+        assert!(err.to_string().contains("aws-lc-rs"));
+    }
+
+    #[test]
+    fn p521_alias_not_supported_by_ring() {
+        let err = resolve_crypto_provider(&["p521".to_string()], "ring").unwrap_err();
+        assert!(err.to_string().contains("secp521r1"));
         assert!(err.to_string().contains("aws-lc-rs"));
     }
 

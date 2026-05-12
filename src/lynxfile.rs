@@ -41,6 +41,7 @@
 use crate::config::{
     GatewayConfig, GatewaySettings, PluginConfig, RouteConfig, ServiceConfig,
 };
+use std::collections::HashMap;
 
 /// Parse a Lynxfile DSL string into a `GatewayConfig`.
 pub fn parse_lynxfile(input: &str) -> Result<GatewayConfig, LynxfileError> {
@@ -222,6 +223,15 @@ impl<'a> Parser<'a> {
             index_file: None,
             spa_fallback: None,
             id_tag: None,
+            stream_timeout_secs: 0,
+            stream_close_delay_secs: 0,
+            lb_try_duration_ms: 0,
+            lb_try_interval_ms: 250,
+            lb_retry_match: Vec::new(),
+            request_buffer_size: 0,
+            response_buffer_size: 0,
+            flush_interval_ms: -1,
+            root: String::new(),
         });
 
         Ok(())
@@ -278,6 +288,9 @@ impl<'a> Parser<'a> {
             service: service.to_string(),
             strip_path,
             id_tag: None,
+            vars: HashMap::new(),
+            invoke: None,
+            literal_order: false,
         })
     }
 

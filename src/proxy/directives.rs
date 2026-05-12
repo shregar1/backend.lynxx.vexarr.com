@@ -451,6 +451,8 @@ mod tests {
             client_ip: None,
             headers: None,
             query_string: None,
+            scheme: None,
+            vars: &Default::default(),
         };
         let reg = MatcherRegistry::new();
         let result = evaluate_handles(&blocks, &ctx, &reg);
@@ -479,6 +481,8 @@ mod tests {
             client_ip: None,
             headers: None,
             query_string: None,
+            scheme: None,
+            vars: &Default::default(),
         };
         let reg = MatcherRegistry::new();
         let result = evaluate_handles(&blocks, &ctx, &reg);
@@ -505,6 +509,8 @@ mod tests {
             client_ip: None,
             headers: None,
             query_string: None,
+            scheme: None,
+            vars: &Default::default(),
         };
         let reg = MatcherRegistry::new();
         assert!(evaluate_handles(&blocks, &ctx, &reg).is_none());
@@ -537,6 +543,8 @@ mod tests {
             client_ip: None,
             headers: None,
             query_string: None,
+            scheme: None,
+            vars: &Default::default(),
         };
         assert!(evaluate_handles(&blocks, &ctx, &reg).is_some());
     }
