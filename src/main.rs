@@ -404,17 +404,6 @@ async fn async_main() -> anyhow::Result<()> {
     );
     crate::license::spawn_license_refresher(license_state.clone(), Some(quota.clone()));
 
-    // Register this node with the billing API and start heartbeat.
-    if let Err(e) = crate::license::register_node(&license_api_key, &lynxx_base_url).await {
-        tracing::error!(error = %e, "node registration failed — gateway may not be tracked for billing");
-    }
-    crate::license::spawn_node_heartbeat(license_api_key.clone(), lynxx_base_url.clone());
-    crate::license::spawn_usage_reporter(
-        license_api_key.clone(),
-        lynxx_base_url.clone(),
-        quota.clone(),
-        license_state.clone(),
-    );
 
     let trusted_proxies: Vec<ipnet::IpNet> = config
         .gateway
@@ -938,8 +927,6 @@ async fn async_main() -> anyhow::Result<()> {
         let proxy_serve = axum::serve(proxy_listener, proxy_app);
         run_select!(proxy_serve, None::<axum_server::Handle>);
     }
-
-    crate::license::deregister_node(&license_api_key, &lynxx_base_url).await;
 
     if let Some(h) = acme_http_handle {
         h.abort();

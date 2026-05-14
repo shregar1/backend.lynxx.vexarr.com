@@ -63,7 +63,6 @@ const OFFLINE_GRACE_DAYS: i64 = 7;
 /// check is hard-fail; this background check switches the kill-switch
 /// off when the server says the key is no longer active.
 const REVERIFY_INTERVAL_SECS: u64 = 6 * 60 * 60; // 6 hours
-const HEARTBEAT_INTERVAL_SECS: u64 = 5 * 60; // 5 minutes
 
 /// A verified, ready-to-use licence.
 #[derive(Debug, Clone)]
@@ -342,12 +341,12 @@ pub fn spawn_license_refresher(
 }
 
 // ---------------------------------------------------------------------------
-// Node registration + heartbeat
+// Instance identity (used by admin status endpoint)
 // ---------------------------------------------------------------------------
 
 /// Deterministic instance ID for this gateway installation. Hashes
 /// hostname + data directory + API key so the same physical install
-/// always gets the same ID, avoiding duplicate registrations on restart.
+/// always gets the same ID.
 pub fn compute_instance_id(api_key: &str) -> String {
     use sha2::{Digest, Sha256};
     let hostname = gethostname();
@@ -361,207 +360,6 @@ pub fn compute_instance_id(api_key: &str) -> String {
     h.update(b":");
     h.update(api_key.as_bytes());
     format!("node_{:x}", h.finalize())[..24].to_string()
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum NodeError {
-    #[error("node limit reached ({active}/{max}); upgrade to add more nodes")]
-    LimitReached { active: u32, max: u32 },
-    #[error("node registration failed: {0}")]
-    RegisterFailed(String),
-}
-
-#[derive(Debug, Serialize)]
-struct RegisterReq {
-    instance_id: String,
-    hostname: String,
-    version: Option<String>,
-    ip_address: Option<String>,
-    os: Option<String>,
-    arch: Option<String>,
-    data_dir: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RegisterResp {
-    #[allow(dead_code)]
-    node_id: i64,
-    active_nodes: i64,
-    max_nodes: Option<i32>,
-}
-
-/// Register this gateway node with the billing API. Returns error if
-/// the customer has reached their node limit.
-pub async fn register_node(api_key: &str, lynxx_base_url: &str) -> Result<(), NodeError> {
-    if api_key.starts_with("lnx_dev_") {
-        return Ok(());
-    }
-    let instance_id = compute_instance_id(api_key);
-    let hostname = gethostname();
-    let data_dir = dirs::home_dir()
-        .map(|d| d.join(".lynxx").to_string_lossy().to_string());
-
-    let url = format!(
-        "{}/v1/nodes/register?key={}",
-        lynxx_base_url.trim_end_matches('/'),
-        api_key
-    );
-    let body = RegisterReq {
-        instance_id,
-        hostname,
-        version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        ip_address: None,
-        os: Some(std::env::consts::OS.to_string()),
-        arch: Some(std::env::consts::ARCH.to_string()),
-        data_dir,
-    };
-
-    let client = reqwest::Client::builder()
-        .timeout(StdDuration::from_secs(VERIFY_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| NodeError::RegisterFailed(e.to_string()))?;
-
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| NodeError::RegisterFailed(e.to_string()))?;
-
-    let status = resp.status();
-    if status == reqwest::StatusCode::FORBIDDEN {
-        let text = resp.text().await.unwrap_or_default();
-        if text.contains("node limit") {
-            return Err(NodeError::LimitReached { active: 0, max: 0 });
-        }
-        return Err(NodeError::RegisterFailed(text));
-    }
-    if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(NodeError::RegisterFailed(format!("{status}: {text}")));
-    }
-
-    let reg: RegisterResp = resp
-        .json()
-        .await
-        .map_err(|e| NodeError::RegisterFailed(e.to_string()))?;
-
-    tracing::info!(
-        active_nodes = reg.active_nodes,
-        max_nodes = ?reg.max_nodes,
-        "node registered with billing service"
-    );
-    Ok(())
-}
-
-/// Spawn the background heartbeat loop. Sends a heartbeat to the billing
-/// API every 5 minutes so the system knows which nodes are alive.
-pub fn spawn_node_heartbeat(api_key: String, lynxx_base_url: String) {
-    if api_key.starts_with("lnx_dev_") {
-        return;
-    }
-    let instance_id = compute_instance_id(&api_key);
-    let heartbeat_url = format!("{}/v1/nodes/heartbeat", lynxx_base_url.trim_end_matches('/'));
-
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(StdDuration::from_secs(HEARTBEAT_INTERVAL_SECS));
-        interval.tick().await; // skip immediate tick
-        let client = reqwest::Client::builder()
-            .timeout(StdDuration::from_secs(VERIFY_TIMEOUT_SECS))
-            .build()
-            .unwrap();
-        loop {
-            interval.tick().await;
-            let url = format!("{}?key={}", heartbeat_url, api_key);
-            let body = serde_json::json!({ "instance_id": instance_id });
-            match client.post(&url).json(&body).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    tracing::debug!("node heartbeat sent");
-                }
-                Ok(resp) => {
-                    tracing::warn!(status = %resp.status(), "node heartbeat rejected");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "node heartbeat failed");
-                }
-            }
-        }
-    });
-}
-
-/// Deregister this node on clean shutdown.
-pub async fn deregister_node(api_key: &str, lynxx_base_url: &str) {
-    if api_key.starts_with("lnx_dev_") {
-        return;
-    }
-    let instance_id = compute_instance_id(api_key);
-    let url = format!(
-        "{}/v1/nodes/deregister?key={}",
-        lynxx_base_url.trim_end_matches('/'),
-        api_key
-    );
-    let body = serde_json::json!({ "instance_id": instance_id });
-    let client = reqwest::Client::builder()
-        .timeout(StdDuration::from_secs(5))
-        .build();
-    if let Ok(client) = client {
-        let _ = client.post(&url).json(&body).send().await;
-        tracing::info!("node deregistered");
-    }
-}
-
-const USAGE_REPORT_INTERVAL_SECS: u64 = 60;
-
-/// Spawn the background usage reporter. Pushes this node's call counts
-/// to the billing API every 60 seconds so overage billing can aggregate
-/// across all customer nodes.
-pub fn spawn_usage_reporter(
-    api_key: String,
-    lynxx_base_url: String,
-    quota: std::sync::Arc<crate::quota::QuotaTracker>,
-    license_state: LicenseState,
-) {
-    if api_key.starts_with("lnx_dev_") {
-        return;
-    }
-    let instance_id = compute_instance_id(&api_key);
-    let report_url = format!("{}/v1/usage/report", lynxx_base_url.trim_end_matches('/'));
-
-    tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(StdDuration::from_secs(USAGE_REPORT_INTERVAL_SECS));
-        interval.tick().await;
-        let client = reqwest::Client::builder()
-            .timeout(StdDuration::from_secs(VERIFY_TIMEOUT_SECS))
-            .build()
-            .unwrap();
-        loop {
-            interval.tick().await;
-            let snap = quota.snapshot();
-            let url = format!("{}?key={}", report_url, api_key);
-            let body = serde_json::json!({
-                "instance_id": instance_id,
-                "period": snap.period,
-                "calls_total": snap.calls_total,
-            });
-            match client.post(&url).json(&body).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    if let Ok(json) = resp.json::<serde_json::Value>().await {
-                        if json.get("flagged").and_then(|v| v.as_bool()).unwrap_or(false) {
-                            license_state.flip_inactive("tamper detected — account suspended by billing server");
-                        }
-                    }
-                    tracing::debug!(calls = snap.calls_total, "usage report sent");
-                }
-                Ok(resp) => {
-                    tracing::warn!(status = %resp.status(), "usage report rejected");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "usage report failed");
-                }
-            }
-        }
-    });
 }
 
 fn is_valid_format(key: &str) -> bool {
