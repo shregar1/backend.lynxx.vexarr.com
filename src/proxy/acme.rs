@@ -170,9 +170,8 @@ impl AcmeManager {
     /// Returns `Ok(true)` when a usable cert is available after init.
     pub async fn init(&self) -> Result<bool, GatewayError> {
         if self.config.domains.is_empty() {
-            return Err(GatewayError::ConfigError(
-                "acme.domains must contain at least one domain".into(),
-            ));
+            tracing::warn!("acme.domains is empty — ACME will not provision certificates until routes with hosts are added");
+            return Ok(false);
         }
 
         // Ensure storage directory exists.
@@ -766,9 +765,8 @@ impl AcmeManager {
     pub async fn request_certificate(&self) -> Result<(), GatewayError> {
         let domains = &self.config.domains;
         if domains.is_empty() {
-            return Err(GatewayError::ConfigError(
-                "acme.domains must contain at least one domain".into(),
-            ));
+            tracing::debug!("acme.domains is empty — skipping certificate request");
+            return Ok(());
         }
 
         // DNS-01 proves zone control via TXT records — domains do NOT need

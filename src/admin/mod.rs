@@ -31,7 +31,7 @@ use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
 #[derive(RustEmbed)]
-#[folder = "../node.dashboard.lynxx.dev/dist/"]
+#[folder = "dashboard-dist/"]
 struct DashboardAssets;
 
 #[allow(clippy::too_many_arguments)]

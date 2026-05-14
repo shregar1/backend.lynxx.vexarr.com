@@ -23,3 +23,4 @@ infra/terraform/tfplan
 
 # Lynxx licence cache (local offline-grace cache, never commit)
 .lynxx/license.cache.json
+dashboard-dist/
