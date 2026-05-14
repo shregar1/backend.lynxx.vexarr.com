@@ -442,8 +442,17 @@ async fn index_handler() -> impl IntoResponse {
 }
 
 async fn api_envelope(req: Request, next: Next) -> Response {
-    let txn_urn = format!("urn:lynxx:txn:{}", Uuid::new_v4());
+    use crate::dtos::envelope::{ApiEnvelope, ApiErrorDetail};
+
+    let txn_urn = Uuid::new_v4().to_string();
     let timestamp = Utc::now().to_rfc3339();
+
+    let reference_urn = req
+        .headers()
+        .get("X-Reference-URN")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
 
     let response = next.run(req).await;
     let status_code = response.status();
@@ -455,9 +464,9 @@ async fn api_envelope(req: Request, next: Next) -> Response {
         .map(|ct| ct.contains("application/json"))
         .unwrap_or(false);
 
-    let has_body = status_code != StatusCode::NO_CONTENT;
+    let is_no_content = status_code == StatusCode::NO_CONTENT;
 
-    if !is_json && has_body && status_code.is_success() {
+    if !is_json && !is_no_content && status_code.is_success() {
         return response;
     }
 
@@ -474,18 +483,14 @@ async fn api_envelope(req: Request, next: Next) -> Response {
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
     };
 
-    let envelope = if status_code.is_success() {
-        json!({
-            "transactionUrn": txn_urn,
-            "status": "SUCCESS",
-            "responseMessage": "Request processed successfully",
-            "responseKey": "SUCCESS",
-            "errors": [],
-            "timestamp": timestamp,
-            "metadata": {},
-            "data": data,
-            "reference_urn": ""
-        })
+    let envelope: serde_json::Value = if status_code.is_success() {
+        let env = ApiEnvelope::success(
+            data,
+            txn_urn,
+            timestamp,
+            reference_urn,
+        );
+        serde_json::to_value(env).unwrap_or_default()
     } else {
         let response_key = match status_code.as_u16() {
             400 => "VALIDATION_ERROR",
@@ -495,28 +500,28 @@ async fn api_envelope(req: Request, next: Next) -> Response {
             409 => "CONFLICT",
             412 => "PRECONDITION_FAILED",
             429 => "QUOTA_EXCEEDED",
+            502 => "BAD_GATEWAY",
+            503 => "SERVICE_UNAVAILABLE",
             _ => "INTERNAL_ERROR",
         };
         let msg = data
             .get("error")
             .and_then(|e| e.as_str())
             .unwrap_or("An error occurred");
-        json!({
-            "transactionUrn": txn_urn,
-            "status": "FAILED",
-            "responseMessage": msg,
-            "responseKey": response_key,
-            "errors": [{ "message": msg }],
-            "timestamp": timestamp,
-            "metadata": {},
-            "data": serde_json::Value::Null,
-            "reference_urn": ""
-        })
+        let env = ApiEnvelope::error(
+            response_key,
+            msg,
+            txn_urn,
+            timestamp,
+            reference_urn,
+        );
+        serde_json::to_value(env).unwrap_or_default()
     };
 
     let body_bytes = serde_json::to_vec(&envelope).unwrap_or_default();
     let content_len = body_bytes.len();
     let mut response = Response::from_parts(parts, Body::from(body_bytes));
+    *response.status_mut() = status_code;
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
