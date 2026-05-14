@@ -4,6 +4,7 @@
 // allocator on macOS in particular fragments under bursty alloc/free
 // patterns; switching to mimalloc shaves 20-40% off p99/p99.9 in our
 // bench rig and compiles cleanly on aarch64-apple-darwin.
+#[cfg(not(target_os = "windows"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -351,8 +352,13 @@ async fn async_main() -> anyhow::Result<()> {
     );
 
     // Quota tracker — load persisted monthly counters, start background flush.
+    // The limit comes from the license server's verify response; falls back
+    // to the hardcoded tier limit if the server didn't provide one.
     let plan_tier = crate::quota::PlanTier::from_str(&config.gateway.plan_tier);
-    let quota = crate::quota::QuotaTracker::load(plan_tier, repo.clone()).await?;
+    let quota =
+        crate::quota::QuotaTracker::load(plan_tier, license.monthly_call_limit, repo.clone())
+            .await?;
+    quota.set_allow_overage(license.allow_overage);
     crate::quota::spawn_quota_flusher(quota.clone());
 
     // Live licence state + periodic re-verifier. The startup verify
@@ -367,10 +373,24 @@ async fn async_main() -> anyhow::Result<()> {
         .unwrap_or_else(|| config.license.api_key.clone());
     let license_state = crate::license::LicenseState::new(
         license_api_key.clone(),
-        license_verify_url,
+        license_verify_url.clone(),
         plan_tier,
+        license.active_nodes,
+        license.max_nodes,
     );
-    crate::license::spawn_license_refresher(license_state.clone());
+    crate::license::spawn_license_refresher(license_state.clone(), Some(quota.clone()));
+
+    // Register this node with the billing API and start heartbeat.
+    if let Err(e) = crate::license::register_node(&license_api_key, &license_verify_url).await {
+        tracing::error!(error = %e, "node registration failed — gateway may not be tracked for billing");
+    }
+    crate::license::spawn_node_heartbeat(license_api_key.clone(), license_verify_url.clone());
+    crate::license::spawn_usage_reporter(
+        license_api_key.clone(),
+        license_verify_url.clone(),
+        quota.clone(),
+        license_state.clone(),
+    );
 
     let trusted_proxies: Vec<ipnet::IpNet> = config
         .gateway
@@ -378,6 +398,8 @@ async fn async_main() -> anyhow::Result<()> {
         .iter()
         .filter_map(|cidr| cidr.parse().ok())
         .collect();
+
+    let deploy_registry = crate::admin::deploy::new_deploy_registry();
 
     let proxy_state = ProxyState {
         route_table: route_table.clone(),
@@ -391,6 +413,7 @@ async fn async_main() -> anyhow::Result<()> {
         passive_health: passive_health.clone(),
         quota: quota.clone(),
         license: license_state.clone(),
+        deploy_registry: Some(deploy_registry.clone()),
         local_zone: None,
     };
 
@@ -603,8 +626,10 @@ async fn async_main() -> anyhow::Result<()> {
         config.gateway.proxy_port,
         quota.clone(),
         acme_manager.clone(),
-        license_api_key,
+        license_api_key.clone(),
+        Some(license_state),
         config.clone(),
+        deploy_registry,
     );
 
     let proxy_addr = format!("0.0.0.0:{}", config.gateway.proxy_port);
@@ -830,6 +855,9 @@ async fn async_main() -> anyhow::Result<()> {
             config.gateway.acme.domains
         );
         let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(server_config);
+        // Register the live TLS config handle so cert reloads push
+        // directly into the running listener (hot-reload).
+        mgr.set_tls_reload_handle(rustls_cfg.clone()).await;
         let handle = axum_server::Handle::new();
         let shutdown_handle = handle.clone();
         let serve = axum_server::bind_rustls(proxy_addr_socket, rustls_cfg)
@@ -860,6 +888,8 @@ async fn async_main() -> anyhow::Result<()> {
         let proxy_serve = axum::serve(proxy_listener, proxy_app);
         run_select!(proxy_serve, None::<axum_server::Handle>);
     }
+
+    crate::license::deregister_node(&license_api_key, &license_verify_url).await;
 
     if let Some(h) = acme_http_handle {
         h.abort();

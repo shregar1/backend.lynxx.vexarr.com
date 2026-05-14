@@ -76,6 +76,11 @@ pub struct AcmeManager {
     /// DNS-01 challenge provider (Cloudflare / Route53). `None` when
     /// dns01 is not configured.
     dns_provider: Option<Arc<dyn DnsProvider>>,
+    /// Handle to the live `axum_server` TLS acceptor. When set, cert
+    /// reloads push the new `ServerConfig` directly into the running
+    /// listener via `RustlsConfig::reload_from_config` — no restart
+    /// required.
+    tls_reload_handle: Arc<RwLock<Option<axum_server::tls_rustls::RustlsConfig>>>,
 }
 
 impl AcmeManager {
@@ -104,7 +109,16 @@ impl AcmeManager {
             tls_alpn_challenges: Arc::new(DashMap::new()),
             last_cert_mtime: Arc::new(RwLock::new(None)),
             dns_provider,
+            tls_reload_handle: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Register the live `axum_server` TLS config handle so that cert
+    /// reloads are pushed into the running listener automatically.
+    /// Must be called after the listener is bound.
+    pub async fn set_tls_reload_handle(&self, handle: axum_server::tls_rustls::RustlsConfig) {
+        *self.tls_reload_handle.write().await = Some(handle);
+        tracing::info!("TLS hot-reload handle registered — cert updates will apply without restart");
     }
 
     /// Map the configured `key_type` string to the corresponding rcgen
@@ -322,7 +336,16 @@ impl AcmeManager {
             *self.last_cert_mtime.write().await = Some(mtime);
         }
 
-        *self.current_config.write().await = Some(Arc::new(server_config));
+        let new_config = Arc::new(server_config);
+        *self.current_config.write().await = Some(Arc::clone(&new_config));
+
+        // Push the new config into the live TLS listener so it takes
+        // effect on the next handshake — no gateway restart required.
+        if let Some(ref handle) = *self.tls_reload_handle.read().await {
+            handle.reload_from_config(new_config);
+            tracing::info!("TLS listener hot-reloaded with new certificate");
+        }
+
         Ok(true)
     }
 
