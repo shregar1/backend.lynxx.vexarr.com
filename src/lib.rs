@@ -11,14 +11,18 @@
 
 #![allow(dead_code)]
 
+pub mod abstractions;
 pub mod admin;
 pub mod audit;
 pub mod auth;
 pub mod cluster;
 pub mod config;
 pub mod config_adapter;
+pub mod configurations;
+pub mod controllers;
 pub mod db;
 pub mod discovery;
+pub mod dtos;
 pub mod error;
 pub mod health;
 pub mod license;
@@ -32,3 +36,6 @@ pub mod proxy;
 pub mod quota;
 pub mod recording;
 pub mod reload;
+pub mod repositories;
+pub mod services;
+pub mod utilities;

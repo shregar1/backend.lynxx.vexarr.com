@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::abstractions::IModel;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TargetLifecycle {
@@ -932,4 +934,121 @@ pub struct ConsumerGroupMember {
     pub group_id: Uuid,
     pub consumer_id: Uuid,
     pub joined_at: DateTime<Utc>,
+}
+
+// ── IModel implementations ──
+
+impl IModel for Project {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for Service {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for Route {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for PluginInstance {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for Consumer {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for Target {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for LogEntry {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for Probe {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for Snapshot {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for AlertRule {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for IpRule {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for ErrorPage {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for CacheEntry {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for TransformRule {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for ApiVersion {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for Incident {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for IncidentUpdate {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for Webhook {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for LoadTest {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for MarketplacePlugin {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for RateLimitSimulation {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for Certificate {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
+}
+
+impl IModel for ConsumerGroup {
+    fn id(&self) -> Uuid { self.id }
+    fn created_at(&self) -> DateTime<Utc> { self.created_at }
 }

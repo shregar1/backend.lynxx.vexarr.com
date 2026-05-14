@@ -8,13 +8,17 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod abstractions;
 mod admin;
 mod audit;
 mod auth;
 mod cluster;
 mod config;
+mod configurations;
+mod controllers;
 mod db;
 mod discovery;
+mod dtos;
 mod error;
 mod health;
 mod license;
@@ -28,6 +32,9 @@ mod proxy;
 mod quota;
 mod recording;
 mod reload;
+mod repositories;
+mod services;
+mod utilities;
 
 use crate::cluster::ChangeEvent;
 use crate::config::{apply_env_overrides, load_config, GatewayConfig};
