@@ -160,7 +160,7 @@ impl Repository for PostgresRepository {
 
     async fn list_targets(&self) -> Result<Vec<Target>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at FROM targets WHERE is_deleted = FALSE",
+            "SELECT id, service_id, url, weight, enabled, zone, state, created_at, updated_at FROM targets WHERE is_deleted = FALSE",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -172,7 +172,7 @@ impl Repository for PostgresRepository {
         service_id: &Uuid,
     ) -> Result<Vec<Target>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at \
+            "SELECT id, service_id, url, weight, enabled, zone, state, created_at, updated_at \
              FROM targets WHERE service_id = $1 AND is_deleted = FALSE",
         )
         .bind(service_id)
@@ -183,7 +183,7 @@ impl Repository for PostgresRepository {
 
     async fn get_target(&self, id: &Uuid) -> Result<Option<Target>, GatewayError> {
         let row = sqlx::query(
-            "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at \
+            "SELECT id, service_id, url, weight, enabled, zone, state, created_at, updated_at \
              FROM targets WHERE id = $1 AND is_deleted = FALSE",
         )
         .bind(id)
@@ -194,8 +194,8 @@ impl Repository for PostgresRepository {
 
     async fn create_target(&self, target: &Target) -> Result<(), GatewayError> {
         sqlx::query(
-            "INSERT INTO targets (id, service_id, url, weight, enabled, zone, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            "INSERT INTO targets (id, service_id, url, weight, enabled, zone, state, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(target.id)
         .bind(target.service_id)
@@ -203,6 +203,7 @@ impl Repository for PostgresRepository {
         .bind(target.weight as i64)
         .bind(target.enabled)
         .bind(&target.zone)
+        .bind(target.state.as_str())
         .bind(target.created_at)
         .bind(target.updated_at)
         .execute(&self.pool)
@@ -212,12 +213,13 @@ impl Repository for PostgresRepository {
 
     async fn update_target(&self, id: &Uuid, target: &Target) -> Result<(), GatewayError> {
         sqlx::query(
-            "UPDATE targets SET url = $1, weight = $2, enabled = $3, zone = $4, updated_at = $5 WHERE id = $6 AND is_deleted = FALSE",
+            "UPDATE targets SET url = $1, weight = $2, enabled = $3, zone = $4, state = $5, updated_at = $6 WHERE id = $7 AND is_deleted = FALSE",
         )
         .bind(&target.url)
         .bind(target.weight as i64)
         .bind(target.enabled)
         .bind(&target.zone)
+        .bind(target.state.as_str())
         .bind(target.updated_at)
         .bind(id)
         .execute(&self.pool)
@@ -230,6 +232,17 @@ impl Repository for PostgresRepository {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn update_target_state(&self, id: &Uuid, state: &str) -> Result<bool, GatewayError> {
+        let result = sqlx::query(
+            "UPDATE targets SET state = $1, updated_at = now() WHERE id = $2 AND is_deleted = FALSE",
+        )
+        .bind(state)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -1056,6 +1069,7 @@ fn row_to_service(row: sqlx::postgres::PgRow) -> Result<Service, GatewayError> {
         stream_timeout_ms: row.try_get::<Option<i64>, _>("stream_timeout_ms").ok().flatten().map(|v| v as u64),
         stream_close_delay_ms: row.try_get::<Option<i64>, _>("stream_close_delay_ms").ok().flatten().map(|v| v as u64),
         pass_host_header: row.try_get::<Option<bool>, _>("pass_host_header").ok().flatten(),
+        drain_timeout_ms: row.try_get::<Option<i64>, _>("drain_timeout_ms").ok().flatten().map(|v| v as u64),
         created_at,
         updated_at,
     })
@@ -1067,6 +1081,7 @@ fn row_to_target(row: sqlx::postgres::PgRow) -> Result<Target, GatewayError> {
     let weight: i64 = row.try_get("weight")?;
     let enabled: bool = row.try_get("enabled")?;
     let zone: Option<String> = row.try_get("zone").ok();
+    let state_str: String = row.try_get("state").unwrap_or_else(|_| "active".to_string());
     let created_at: DateTime<Utc> = row.try_get("created_at")?;
     let updated_at: DateTime<Utc> = row.try_get("updated_at")?;
 
@@ -1077,6 +1092,7 @@ fn row_to_target(row: sqlx::postgres::PgRow) -> Result<Target, GatewayError> {
         weight: weight as u32,
         enabled,
         zone,
+        state: crate::models::TargetLifecycle::from_str(&state_str),
         created_at,
         updated_at,
     })
@@ -1121,6 +1137,7 @@ fn row_to_route(row: sqlx::postgres::PgRow) -> Result<Route, GatewayError> {
         intercept_rules: Vec::new(),
         push: None,
         static_response: None,
+        health_gate: false,
         created_at,
         updated_at,
     })

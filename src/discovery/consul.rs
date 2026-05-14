@@ -456,6 +456,7 @@ async fn reconcile(discovered: &[DiscoveredService], repo: &Arc<dyn Repository>,
             stream_timeout_ms: None,
             stream_close_delay_ms: None,
             pass_host_header: None,
+            drain_timeout_ms: None,
             created_at: now,
             updated_at: now,
         };

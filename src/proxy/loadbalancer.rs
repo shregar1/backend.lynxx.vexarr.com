@@ -2,11 +2,11 @@
 //! IP hash, cookie sticky-session, and consistent-hash (rendezvous / HRW)
 //! strategies. Targets are runtime-tracked for in-flight count and health.
 
-use crate::models::Target;
+use crate::models::{Target, TargetLifecycle};
 use dashmap::DashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
@@ -96,6 +96,26 @@ fn hrw_hash(key: &str, target_id: &Uuid) -> u64 {
     hasher.finish()
 }
 
+const LIFECYCLE_ACTIVE: u8 = 0;
+const LIFECYCLE_DRAINING: u8 = 1;
+const LIFECYCLE_INACTIVE: u8 = 2;
+
+fn lifecycle_to_u8(lc: TargetLifecycle) -> u8 {
+    match lc {
+        TargetLifecycle::Active => LIFECYCLE_ACTIVE,
+        TargetLifecycle::Draining => LIFECYCLE_DRAINING,
+        TargetLifecycle::Inactive => LIFECYCLE_INACTIVE,
+    }
+}
+
+fn u8_to_lifecycle(v: u8) -> TargetLifecycle {
+    match v {
+        LIFECYCLE_DRAINING => TargetLifecycle::Draining,
+        LIFECYCLE_INACTIVE => TargetLifecycle::Inactive,
+        _ => TargetLifecycle::Active,
+    }
+}
+
 /// Runtime state for a single target.
 #[derive(Debug)]
 pub struct TargetState {
@@ -104,16 +124,33 @@ pub struct TargetState {
     pub healthy: AtomicBool,
     /// Exponentially weighted moving average of response time in microseconds.
     pub avg_response_us: AtomicU64,
+    lifecycle: AtomicU8,
 }
 
 impl TargetState {
     fn new(target: Target) -> Self {
+        let lc = lifecycle_to_u8(target.state);
         Self {
             target,
             in_flight: AtomicU64::new(0),
             healthy: AtomicBool::new(true),
             avg_response_us: AtomicU64::new(0),
+            lifecycle: AtomicU8::new(lc),
         }
+    }
+
+    pub fn lifecycle(&self) -> TargetLifecycle {
+        u8_to_lifecycle(self.lifecycle.load(Ordering::Relaxed))
+    }
+
+    pub fn set_lifecycle(&self, lc: TargetLifecycle) {
+        self.lifecycle.store(lifecycle_to_u8(lc), Ordering::Relaxed);
+    }
+
+    pub fn is_routable(&self) -> bool {
+        self.target.enabled
+            && self.healthy.load(Ordering::Relaxed)
+            && self.lifecycle() == TargetLifecycle::Active
     }
 
     /// Update the EWMA response time with a new sample.
@@ -213,8 +250,7 @@ impl ServiceLoadBalancer {
                     .targets
                     .iter()
                     .filter(|s| {
-                        s.target.enabled
-                            && s.healthy.load(Ordering::Relaxed)
+                        s.is_routable()
                             && s.target.zone.as_deref() == Some(zone)
                     })
                     .collect();
@@ -285,12 +321,11 @@ impl ServiceLoadBalancer {
             return None;
         }
         let len = self.rr_ring.len();
-        // Try up to ring length to skip unhealthy/disabled.
         for _ in 0..len {
             let i = self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize;
             let idx = self.rr_ring[i % len];
             let state = &self.targets[idx];
-            if state.target.enabled && state.healthy.load(Ordering::Relaxed) {
+            if state.is_routable() {
                 return Some(state.clone());
             }
         }
@@ -301,7 +336,7 @@ impl ServiceLoadBalancer {
         let mut best: Option<&Arc<TargetState>> = None;
         let mut best_count = u64::MAX;
         for s in &self.targets {
-            if !s.target.enabled || !s.healthy.load(Ordering::Relaxed) {
+            if !s.is_routable() {
                 continue;
             }
             let c = s.in_flight.load(Ordering::Relaxed);
@@ -320,7 +355,7 @@ impl ServiceLoadBalancer {
         let mut best: Option<&Arc<TargetState>> = None;
         let mut best_hash: u64 = 0;
         for s in &self.targets {
-            if !s.target.enabled || !s.healthy.load(Ordering::Relaxed) {
+            if !s.is_routable() {
                 continue;
             }
             let h = hrw_hash(key, &s.target.id);
@@ -338,10 +373,7 @@ impl ServiceLoadBalancer {
         if let Some(val) = cookie {
             if let Ok(target_id) = Uuid::parse_str(val) {
                 for s in &self.targets {
-                    if s.target.id == target_id
-                        && s.target.enabled
-                        && s.healthy.load(Ordering::Relaxed)
-                    {
+                    if s.target.id == target_id && s.is_routable() {
                         return Some(s.clone());
                     }
                 }
@@ -355,7 +387,7 @@ impl ServiceLoadBalancer {
         let healthy: Vec<_> = self
             .targets
             .iter()
-            .filter(|s| s.target.enabled && s.healthy.load(Ordering::Relaxed))
+            .filter(|s| s.is_routable())
             .collect();
         if healthy.is_empty() {
             return None;
@@ -374,7 +406,7 @@ impl ServiceLoadBalancer {
         let healthy: Vec<_> = self
             .targets
             .iter()
-            .filter(|s| s.target.enabled && s.healthy.load(Ordering::Relaxed))
+            .filter(|s| s.is_routable())
             .collect();
         self.p2c_from(&healthy)
     }
@@ -415,7 +447,7 @@ impl ServiceLoadBalancer {
         let mut best: Option<&Arc<TargetState>> = None;
         let mut best_score = u64::MAX;
         for s in &self.targets {
-            if !s.target.enabled || !s.healthy.load(Ordering::Relaxed) {
+            if !s.is_routable() {
                 continue;
             }
             let avg = s.avg_response_us.load(Ordering::Relaxed);
@@ -455,7 +487,7 @@ impl ServiceLoadBalancer {
     fn pick_first(&self) -> Option<Arc<TargetState>> {
         self.targets
             .iter()
-            .find(|s| s.target.enabled && s.healthy.load(Ordering::Relaxed))
+            .find(|s| s.is_routable())
             .cloned()
     }
 }
@@ -493,6 +525,25 @@ impl LoadBalancerRegistry {
         guard.pick(local_zone, ctx)
     }
 
+    /// Pick any routable target not in `exclude`, using least-connections as
+    /// the tie-breaker. Used by deploy-aware retry to failover to a different
+    /// upstream after a connection error or 502 during a blue-green deploy.
+    pub fn pick_excluding(
+        &self,
+        service_id: &Uuid,
+        exclude: &[Uuid],
+        _local_zone: Option<&str>,
+    ) -> Option<Arc<TargetState>> {
+        let entry = self.inner.get(service_id)?;
+        let guard = entry.read().ok()?;
+        guard
+            .targets()
+            .iter()
+            .filter(|s| s.is_routable() && !exclude.contains(&s.target.id))
+            .min_by_key(|s| s.in_flight.load(Ordering::Relaxed))
+            .cloned()
+    }
+
     pub fn strategy_for(&self, service_id: &Uuid) -> Option<LbStrategy> {
         let entry = self.inner.get(service_id)?;
         let guard = entry.read().ok()?;
@@ -513,6 +564,83 @@ impl LoadBalancerRegistry {
                     }
                 }
             }
+        }
+    }
+
+    pub fn set_target_lifecycle(
+        &self,
+        service_id: &Uuid,
+        target_id: &Uuid,
+        lc: TargetLifecycle,
+    ) {
+        if let Some(entry) = self.inner.get(service_id) {
+            if let Ok(guard) = entry.read() {
+                for s in guard.targets() {
+                    if s.target.id == *target_id {
+                        s.set_lifecycle(lc);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Initiate a graceful drain of a target. Sets lifecycle to `Draining`,
+    /// then spawns a background task that waits until in-flight hits 0 or
+    /// the timeout expires. On completion, sets lifecycle to `Inactive`.
+    /// Returns the `Arc<TargetState>` if the target was found (for callers
+    /// that want to track it), or `None` if the target wasn't in the LB.
+    pub fn drain_target(
+        &self,
+        service_id: &Uuid,
+        target_id: &Uuid,
+        timeout_ms: u64,
+    ) -> Option<Arc<TargetState>> {
+        let ts = {
+            let entry = self.inner.get(service_id)?;
+            let guard = entry.read().ok()?;
+            guard
+                .targets()
+                .iter()
+                .find(|s| s.target.id == *target_id)
+                .cloned()
+        };
+        let ts = ts?;
+        ts.set_lifecycle(TargetLifecycle::Draining);
+        let target_arc = ts.clone();
+        tokio::spawn(async move {
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+            loop {
+                if target_arc.in_flight.load(Ordering::Relaxed) == 0 {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        target_id = %target_arc.target.id,
+                        "drain timeout expired with {} in-flight requests",
+                        target_arc.in_flight.load(Ordering::Relaxed)
+                    );
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            target_arc.set_lifecycle(TargetLifecycle::Inactive);
+            tracing::info!(
+                target_id = %target_arc.target.id,
+                "target drain complete"
+            );
+        });
+        Some(ts)
+    }
+
+    pub fn has_healthy_active_target(&self, service_id: &Uuid) -> bool {
+        match self.inner.get(service_id) {
+            Some(entry) => match entry.read() {
+                Ok(g) => g.targets().iter().any(|s| s.is_routable()),
+                Err(_) => false,
+            },
+            None => false,
         }
     }
 
@@ -553,6 +681,7 @@ mod tests {
                 weight: 1,
                 enabled: true,
                 zone: None,
+                state: TargetLifecycle::Active,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             })
@@ -570,6 +699,7 @@ mod tests {
                 weight: w,
                 enabled: true,
                 zone: None,
+                state: TargetLifecycle::Active,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             })
@@ -1032,5 +1162,101 @@ mod tests {
         assert_eq!(LbStrategy::from_str("urihash"), LbStrategy::UriHash);
         assert_eq!(LbStrategy::from_str("client-ip-hash"), LbStrategy::ClientIpHash);
         assert_eq!(LbStrategy::from_str("client_ip_hash"), LbStrategy::ClientIpHash);
+    }
+
+    // ── Drain lifecycle ──
+
+    #[test]
+    fn draining_target_not_routable() {
+        let targets = make_targets(2);
+        let lb = ServiceLoadBalancer::new(LbStrategy::RoundRobin, targets);
+        lb.targets[0].set_lifecycle(TargetLifecycle::Draining);
+        let ctx = default_ctx();
+        for _ in 0..10 {
+            let t = lb.pick(None, &ctx).unwrap();
+            assert_eq!(t.target.url, "http://host-1:8080");
+        }
+    }
+
+    #[test]
+    fn inactive_target_not_routable() {
+        let targets = make_targets(2);
+        let lb = ServiceLoadBalancer::new(LbStrategy::RoundRobin, targets);
+        lb.targets[1].set_lifecycle(TargetLifecycle::Inactive);
+        let ctx = default_ctx();
+        for _ in 0..10 {
+            let t = lb.pick(None, &ctx).unwrap();
+            assert_eq!(t.target.url, "http://host-0:8080");
+        }
+    }
+
+    #[test]
+    fn lifecycle_transitions() {
+        let targets = make_targets(1);
+        let lb = ServiceLoadBalancer::new(LbStrategy::RoundRobin, targets);
+        let ts = &lb.targets[0];
+        assert_eq!(ts.lifecycle(), TargetLifecycle::Active);
+        assert!(ts.is_routable());
+
+        ts.set_lifecycle(TargetLifecycle::Draining);
+        assert_eq!(ts.lifecycle(), TargetLifecycle::Draining);
+        assert!(!ts.is_routable());
+
+        ts.set_lifecycle(TargetLifecycle::Inactive);
+        assert_eq!(ts.lifecycle(), TargetLifecycle::Inactive);
+        assert!(!ts.is_routable());
+    }
+
+    #[test]
+    fn all_draining_returns_none() {
+        let targets = make_targets(3);
+        let lb = ServiceLoadBalancer::new(LbStrategy::RoundRobin, targets);
+        for ts in &lb.targets {
+            ts.set_lifecycle(TargetLifecycle::Draining);
+        }
+        assert!(lb.pick(None, &default_ctx()).is_none());
+    }
+
+    // ── pick_excluding ──
+
+    #[test]
+    fn pick_excluding_skips_excluded() {
+        let targets = make_targets(3);
+        let ids: Vec<Uuid> = targets.iter().map(|t| t.id).collect();
+        let svc_id = Uuid::new_v4();
+        let reg = LoadBalancerRegistry::new();
+        reg.rebuild_for_service(svc_id, LbStrategy::RoundRobin, targets);
+
+        let exclude = vec![ids[0], ids[1]];
+        let picked = reg.pick_excluding(&svc_id, &exclude, None).unwrap();
+        assert_eq!(picked.target.id, ids[2]);
+    }
+
+    #[test]
+    fn pick_excluding_all_returns_none() {
+        let targets = make_targets(2);
+        let ids: Vec<Uuid> = targets.iter().map(|t| t.id).collect();
+        let svc_id = Uuid::new_v4();
+        let reg = LoadBalancerRegistry::new();
+        reg.rebuild_for_service(svc_id, LbStrategy::RoundRobin, targets);
+
+        let picked = reg.pick_excluding(&svc_id, &ids, None);
+        assert!(picked.is_none());
+    }
+
+    #[test]
+    fn pick_excluding_prefers_least_inflight() {
+        let targets = make_targets(3);
+        let ids: Vec<Uuid> = targets.iter().map(|t| t.id).collect();
+        let svc_id = Uuid::new_v4();
+        let reg = LoadBalancerRegistry::new();
+        reg.rebuild_for_service(svc_id, LbStrategy::RoundRobin, targets);
+
+        let snap = reg.snapshot(&svc_id);
+        snap[1].in_flight.store(100, Ordering::Relaxed);
+        snap[2].in_flight.store(1, Ordering::Relaxed);
+
+        let picked = reg.pick_excluding(&svc_id, &[ids[0]], None).unwrap();
+        assert_eq!(picked.target.id, ids[2]);
     }
 }

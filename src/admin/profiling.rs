@@ -290,7 +290,8 @@ fn memory_usage() -> (u64, u64) {
     }
 }
 
-/// Resident set size via `getrusage`.
+/// Resident set size via `getrusage` (Unix) or 0 on other platforms.
+#[cfg(unix)]
 fn resident_memory_bytes() -> u64 {
     unsafe {
         let mut usage: libc::rusage = std::mem::zeroed();
@@ -308,6 +309,11 @@ fn resident_memory_bytes() -> u64 {
             0
         }
     }
+}
+
+#[cfg(not(unix))]
+fn resident_memory_bytes() -> u64 {
+    0
 }
 
 #[cfg(target_os = "linux")]

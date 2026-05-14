@@ -69,6 +69,8 @@ pub struct AdminState {
     /// master admin credential so customers can use the key they already
     /// have from their account dashboard without creating a separate token.
     pub license_api_key: String,
+    pub license_state: Option<crate::license::LicenseState>,
+    pub deploy_registry: Option<crate::admin::deploy::DeployRegistry>,
 }
 
 /// Convenience: extract the optional actor from request extensions.
@@ -260,6 +262,10 @@ pub struct StatusResponse {
     pub routes_count: usize,
     pub plugins_count: usize,
     pub consumers_count: usize,
+    pub tier: String,
+    pub active_nodes: u32,
+    pub max_nodes: Option<u32>,
+    pub instance_id: String,
 }
 
 pub async fn list_services(State(state): State<AdminState>) -> Json<Vec<Service>> {
@@ -379,6 +385,7 @@ pub async fn update_service(
         stream_timeout_ms: existing.stream_timeout_ms,
         stream_close_delay_ms: existing.stream_close_delay_ms,
         pass_host_header: existing.pass_host_header,
+        drain_timeout_ms: existing.drain_timeout_ms,
         created_at: existing.created_at,
         updated_at: now,
     };
@@ -634,6 +641,7 @@ pub async fn update_route(
         intercept_rules: Vec::new(),
         push: None,
         static_response: None,
+        health_gate: existing.health_gate,
         created_at: existing.created_at,
         updated_at: now,
     };
@@ -706,6 +714,7 @@ pub async fn patch_route(
         intercept_rules: existing.intercept_rules.clone(),
         push: existing.push.clone(),
         static_response: existing.static_response.clone(),
+        health_gate: existing.health_gate,
         created_at: existing.created_at,
         updated_at: now,
     };
@@ -777,6 +786,7 @@ pub async fn patch_service(
         stream_timeout_ms: existing.stream_timeout_ms,
         stream_close_delay_ms: existing.stream_close_delay_ms,
         pass_host_header: existing.pass_host_header,
+        drain_timeout_ms: existing.drain_timeout_ms,
         created_at: existing.created_at,
         updated_at: now,
     };
@@ -1178,6 +1188,7 @@ pub async fn update_target_handler(
         weight: input.weight.unwrap_or(existing.weight).max(1),
         enabled: input.enabled.unwrap_or(existing.enabled),
         zone: input.zone.or(existing.zone.clone()),
+        state: existing.state,
         created_at: existing.created_at,
         updated_at: Utc::now(),
     };
@@ -1205,10 +1216,47 @@ pub async fn update_target_handler(
     Ok(Json(updated))
 }
 
+#[derive(Deserialize)]
+pub struct DrainQuery {
+    pub drain: Option<bool>,
+    pub timeout: Option<u64>,
+}
+
+pub async fn get_target_handler(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, GatewayError> {
+    let target = state
+        .repo
+        .get_target(&id)
+        .await?
+        .ok_or_else(|| GatewayError::NotFound(format!("target {id}")))?;
+    let in_flight = state
+        .lb
+        .snapshot(&target.service_id)
+        .iter()
+        .find(|ts| ts.target.id == id)
+        .map(|ts| ts.in_flight.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0);
+    let lifecycle = state
+        .lb
+        .snapshot(&target.service_id)
+        .iter()
+        .find(|ts| ts.target.id == id)
+        .map(|ts| ts.lifecycle().as_str())
+        .unwrap_or(target.state.as_str());
+    let mut val = serde_json::to_value(&target).unwrap();
+    val.as_object_mut().unwrap().insert("in_flight".to_string(), serde_json::json!(in_flight));
+    val.as_object_mut().unwrap().insert("state".to_string(), serde_json::json!(lifecycle));
+    let etag = entity_etag(&target.id, &target.updated_at);
+    Ok(json_with_etag(val, &etag))
+}
+
 pub async fn delete_target_handler(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
+    Query(drain_q): Query<DrainQuery>,
     Extension(actor): Extension<CurrentActor>,
 ) -> Result<Json<serde_json::Value>, GatewayError> {
     let existing = state
@@ -1217,6 +1265,69 @@ pub async fn delete_target_handler(
         .await?
         .ok_or_else(|| GatewayError::NotFound(format!("target {id}")))?;
     check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
+
+    if drain_q.drain.unwrap_or(false) {
+        let timeout_ms = drain_q.timeout.unwrap_or(30).saturating_mul(1000);
+        state.repo.update_target_state(&id, "draining").await?;
+        state.lb.set_target_lifecycle(
+            &existing.service_id,
+            &id,
+            crate::models::TargetLifecycle::Draining,
+        );
+        let repo = state.repo.clone();
+        let lb = state.lb.clone();
+        let service_id = existing.service_id;
+        let target_id = id;
+        state.lb.drain_target(&existing.service_id, &id, timeout_ms);
+        let bus = state.bus.clone();
+        let node_id = state.node_id;
+        tokio::spawn(async move {
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms + 500);
+            loop {
+                let snap = lb.snapshot(&service_id);
+                let ts = snap.iter().find(|s| s.target.id == target_id);
+                let done = match ts {
+                    Some(t) => t.lifecycle() == crate::models::TargetLifecycle::Inactive,
+                    None => true,
+                };
+                if done || tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            let _ = repo.update_target_state(&target_id, "inactive").await;
+            let _ = repo.delete_target(&target_id).await;
+            let svc = lb.snapshot(&service_id);
+            drop(svc);
+            if let Err(e) = bus
+                .publish(ChangeEvent::TargetChanged {
+                    service_id,
+                    origin: node_id,
+                })
+                .await
+            {
+                tracing::warn!(error = %e, "failed to publish drain-complete event");
+            }
+        });
+        tracing::info!(target_id = %id, timeout_ms, "target drain initiated");
+        state
+            .audit
+            .record(
+                AuditAction::Update,
+                ResourceType::Target,
+                Some(id.to_string()),
+                Some(serde_json::json!({"action": "drain", "timeout_ms": timeout_ms})),
+                actor_of(&actor),
+            )
+            .await;
+        return Ok(Json(serde_json::json!({
+            "draining": true,
+            "target_id": id,
+            "timeout_ms": timeout_ms,
+        })));
+    }
+
     let deleted = state.repo.delete_target(&id).await?;
     if deleted {
         rebuild_lb(&state, existing.service_id).await?;
@@ -1527,6 +1638,15 @@ pub async fn gateway_status(
     let plugins_count = state.repo.list_plugins().await?.len();
     let consumers_count = state.repo.list_consumers().await?.len();
 
+    let (tier, active_nodes, max_nodes) = match &state.license_state {
+        Some(ls) => {
+            let t = ls.tier();
+            (t.as_str().to_string(), ls.active_nodes(), ls.max_nodes())
+        }
+        None => ("unknown".into(), 0, None),
+    };
+    let instance_id = crate::license::compute_instance_id(&state.license_api_key);
+
     Ok(Json(StatusResponse {
         status: "running".into(),
         version: env!("CARGO_PKG_VERSION").into(),
@@ -1536,6 +1656,10 @@ pub async fn gateway_status(
         routes_count: state.route_table.list_routes().len(),
         plugins_count,
         consumers_count,
+        tier,
+        active_nodes,
+        max_nodes,
+        instance_id,
     }))
 }
 

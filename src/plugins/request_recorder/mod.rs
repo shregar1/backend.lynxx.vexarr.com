@@ -373,6 +373,7 @@ mod tests {
         async fn create_target(&self, _t: &crate::models::Target) -> Result<(), GatewayError> { Ok(()) }
         async fn update_target(&self, _id: &uuid::Uuid, _t: &crate::models::Target) -> Result<(), GatewayError> { Ok(()) }
         async fn delete_target(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn update_target_state(&self, _id: &uuid::Uuid, _state: &str) -> Result<bool, GatewayError> { Ok(false) }
         async fn is_empty(&self) -> Result<bool, GatewayError> { Ok(true) }
         async fn seed_from_config(&self, _config: &crate::config::GatewayConfig) -> Result<(), GatewayError> { Ok(()) }
         async fn clear_config_seed(&self) -> Result<(), GatewayError> { Ok(()) }

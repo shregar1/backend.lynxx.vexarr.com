@@ -36,6 +36,9 @@ pub enum GatewayError {
     #[error("bad request: {0}")]
     BadRequest(String),
 
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
+
     #[error("conflict: {0}")]
     Conflict(String),
 
@@ -171,6 +174,9 @@ impl IntoResponse for GatewayError {
             },
             GatewayError::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             GatewayError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            GatewayError::ServiceUnavailable(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
+            }
             GatewayError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
             GatewayError::PreconditionFailed(_) => {
                 (StatusCode::PRECONDITION_FAILED, self.to_string())

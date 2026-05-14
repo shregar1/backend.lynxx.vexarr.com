@@ -1,21 +1,17 @@
-//! Monthly API call quota enforcement.
+//! Monthly API call quota enforcement with overage support.
 //!
 //! Each Lynxx licence tier carries a monthly call limit:
 //!
-//!   free       →  1 000 000 calls / month
-//!   pro        → 10 000 000 calls / month
-//!   business   →  unlimited
+//!   free       →  1 000 000 calls / month  (hard block)
+//!   pro        → 10 000 000 calls / month  (soft limit, overage billed)
+//!   business   → 100 000 000 calls / month (soft limit, overage billed)
 //!   enterprise →  unlimited
 //!
-//! The tracker keeps an in-memory `AtomicU64` counter that is loaded from the
-//! DB on startup and flushed back every `FLUSH_INTERVAL_SECS` seconds. This
-//! means quota checks cost a single atomic increment with no DB round-trip per
-//! request, while usage survives a restart to within one flush window.
-//!
-//! Month rollover is detected on each flush: if the current calendar month
-//! differs from the stored period the counters reset to zero.
+//! Paid tiers allow overages: requests above the limit are still proxied
+//! but flagged with `X-Lynxx-Overage: true`. The billing API charges per
+//! million overage calls at the tier's rate.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,7 +23,6 @@ use tracing::{info, warn};
 use crate::db::Repository;
 use crate::error::GatewayError;
 
-/// Seconds between DB flushes.
 const FLUSH_INTERVAL_SECS: u64 = 30;
 
 // ---------------------------------------------------------------------------
@@ -53,12 +48,11 @@ impl PlanTier {
         }
     }
 
-    /// Monthly call limit, or `None` for unlimited plans.
     pub fn monthly_limit(self) -> Option<u64> {
         match self {
             PlanTier::Free => Some(1_000_000),
             PlanTier::Pro => Some(10_000_000),
-            PlanTier::Business => None,
+            PlanTier::Business => Some(100_000_000),
             PlanTier::Enterprise => None,
         }
     }
@@ -74,28 +68,37 @@ impl PlanTier {
 }
 
 // ---------------------------------------------------------------------------
+// Quota result
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaResult {
+    Allowed,
+    Overage,
+    Rejected,
+}
+
+// ---------------------------------------------------------------------------
 // QuotaTracker
 // ---------------------------------------------------------------------------
 
-/// Thread-safe, lock-free quota tracker. Wire one instance into the gateway
-/// at startup, share it as `Arc<QuotaTracker>` across the proxy handler and
-/// the admin API.
 pub struct QuotaTracker {
     plan: PlanTier,
-    /// Current billing period ('YYYY-MM'). Updated atomically on rollover.
+    /// 0 = unlimited. Updated dynamically from the license verify response.
+    limit: AtomicU64,
     period: std::sync::Mutex<String>,
-    /// Calls allowed through this period.
     calls: AtomicU64,
-    /// Calls rejected due to over-quota this period.
     rejected: AtomicU64,
+    overage: AtomicU64,
+    allow_overage: AtomicBool,
     repo: Arc<dyn Repository>,
 }
 
 impl QuotaTracker {
-    /// Load the current period's counters from the DB and return a ready
-    /// tracker. Call this once during gateway startup.
+    /// `server_limit` overrides the hardcoded tier limit when present.
     pub async fn load(
         plan: PlanTier,
+        server_limit: Option<u64>,
         repo: Arc<dyn Repository>,
     ) -> Result<Arc<Self>, GatewayError> {
         let period = current_period();
@@ -105,11 +108,17 @@ impl QuotaTracker {
             .map(|(c, r)| (c, r))
             .unwrap_or((0, 0));
 
+        let allow_overage = matches!(plan, PlanTier::Pro | PlanTier::Business);
+        let effective_limit = server_limit.or_else(|| plan.monthly_limit()).unwrap_or(0);
+
         let tracker = Arc::new(Self {
             plan,
+            limit: AtomicU64::new(effective_limit),
             period: std::sync::Mutex::new(period.clone()),
             calls: AtomicU64::new(calls),
             rejected: AtomicU64::new(rejected),
+            overage: AtomicU64::new(0),
+            allow_overage: AtomicBool::new(allow_overage),
             repo,
         });
 
@@ -117,63 +126,69 @@ impl QuotaTracker {
             plan = plan.as_str(),
             period = %period,
             calls,
-            limit = ?plan.monthly_limit(),
+            limit = effective_limit,
+            source = if server_limit.is_some() { "server" } else { "hardcoded" },
+            allow_overage,
             "quota tracker initialised"
         );
 
         Ok(tracker)
     }
 
-    /// Check whether this request should be allowed.
-    ///
-    /// * If the plan is unlimited → always `true`.
-    /// * If `calls < limit` → increment calls, return `true`.
-    /// * Otherwise → increment rejected, return `false`.
-    ///
-    /// The check-then-increment is non-atomic: a brief burst of requests
-    /// arriving simultaneously may allow a few extra calls past the cap.
-    /// This is acceptable; the alternative (a mutex on every request) would
-    /// destroy throughput.
-    pub fn check_and_count(&self) -> bool {
-        self.maybe_rollover();
+    pub fn set_allow_overage(&self, allow: bool) {
+        self.allow_overage.store(allow, Ordering::Relaxed);
+    }
 
-        let Some(limit) = self.plan.monthly_limit() else {
-            // Unlimited plan — count but never reject.
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            return true;
-        };
-
-        // Optimistic increment: fetch the value BEFORE adding so we can
-        // check against the limit without a separate read.
-        let prev = self.calls.fetch_add(1, Ordering::Relaxed);
-        if prev < limit {
-            true
-        } else {
-            // Undo the increment and count as rejected.
-            self.calls.fetch_sub(1, Ordering::Relaxed);
-            self.rejected.fetch_add(1, Ordering::Relaxed);
-            false
+    pub fn set_limit(&self, new_limit: Option<u64>) {
+        let val = new_limit.unwrap_or(0);
+        let old = self.limit.swap(val, Ordering::Relaxed);
+        if old != val {
+            info!(old_limit = old, new_limit = val, "quota limit updated from server");
         }
     }
 
-    /// Snapshot of current usage for the admin API / dashboard.
+    pub fn check_and_count(&self) -> QuotaResult {
+        self.maybe_rollover();
+
+        let limit = self.limit.load(Ordering::Relaxed);
+        if limit == 0 {
+            // Unlimited (enterprise)
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            return QuotaResult::Allowed;
+        }
+
+        let prev = self.calls.fetch_add(1, Ordering::Relaxed);
+        if prev < limit {
+            QuotaResult::Allowed
+        } else if self.allow_overage.load(Ordering::Relaxed) {
+            self.overage.fetch_add(1, Ordering::Relaxed);
+            QuotaResult::Overage
+        } else {
+            self.calls.fetch_sub(1, Ordering::Relaxed);
+            self.rejected.fetch_add(1, Ordering::Relaxed);
+            QuotaResult::Rejected
+        }
+    }
+
     pub fn snapshot(&self) -> QuotaSnapshot {
         let period = self.period.lock().expect("period mutex").clone();
         let calls = self.calls.load(Ordering::Relaxed);
         let rejected = self.rejected.load(Ordering::Relaxed);
-        let limit = self.plan.monthly_limit();
+        let overage = self.overage.load(Ordering::Relaxed);
+        let raw_limit = self.limit.load(Ordering::Relaxed);
+        let limit = if raw_limit == 0 { None } else { Some(raw_limit) };
         QuotaSnapshot {
             plan: self.plan,
             period,
             calls_total: calls,
             calls_rejected: rejected,
+            calls_overage: overage,
             calls_limit: limit,
             calls_remaining: limit.map(|l| l.saturating_sub(calls)),
+            allow_overage: self.allow_overage.load(Ordering::Relaxed),
         }
     }
 
-    /// Persist counters to the DB. Called by the background flush task and
-    /// on clean shutdown.
     pub async fn flush(&self) {
         let period = self.period.lock().expect("period mutex").clone();
         let calls = self.calls.load(Ordering::Relaxed);
@@ -183,9 +198,6 @@ impl QuotaTracker {
         }
     }
 
-    // -----------------------------------------------------------------------
-
-    /// If the calendar month has changed, reset counters and update the period.
     fn maybe_rollover(&self) {
         let now = current_period();
         let mut period = self.period.lock().expect("period mutex");
@@ -194,6 +206,7 @@ impl QuotaTracker {
             *period = now;
             self.calls.store(0, Ordering::Relaxed);
             self.rejected.store(0, Ordering::Relaxed);
+            self.overage.store(0, Ordering::Relaxed);
         }
     }
 }
@@ -202,14 +215,10 @@ impl QuotaTracker {
 // Background flush task
 // ---------------------------------------------------------------------------
 
-/// Spawn a background task that flushes quota counters to the DB every
-/// `FLUSH_INTERVAL_SECS` seconds.  The handle is fire-and-forget; dropping
-/// it does not cancel the task (the `Arc<QuotaTracker>` keeps the tracker
-/// alive).
 pub fn spawn_quota_flusher(tracker: Arc<QuotaTracker>) {
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(FLUSH_INTERVAL_SECS));
-        ticker.tick().await; // skip the immediate first tick
+        ticker.tick().await;
         loop {
             ticker.tick().await;
             tracker.flush().await;
@@ -218,7 +227,7 @@ pub fn spawn_quota_flusher(tracker: Arc<QuotaTracker>) {
 }
 
 // ---------------------------------------------------------------------------
-// Snapshot (used by admin API)
+// Snapshot
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize)]
@@ -227,13 +236,11 @@ pub struct QuotaSnapshot {
     pub period: String,
     pub calls_total: u64,
     pub calls_rejected: u64,
+    pub calls_overage: u64,
     pub calls_limit: Option<u64>,
     pub calls_remaining: Option<u64>,
+    pub allow_overage: bool,
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 fn current_period() -> String {
     Utc::now().format("%Y-%m").to_string()

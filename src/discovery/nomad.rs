@@ -340,6 +340,7 @@ async fn reconcile(discovered: &[DiscoveredService], repo: &Arc<dyn Repository>)
             stream_timeout_ms: None,
             stream_close_delay_ms: None,
             pass_host_header: None,
+            drain_timeout_ms: None,
             created_at: now,
             updated_at: now,
         };
@@ -369,6 +370,7 @@ async fn reconcile(discovered: &[DiscoveredService], repo: &Arc<dyn Repository>)
             intercept_rules: Vec::new(),
             push: None,
             static_response: None,
+            health_gate: false,
             created_at: now,
             updated_at: now,
         };

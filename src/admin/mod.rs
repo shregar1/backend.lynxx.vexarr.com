@@ -1,4 +1,5 @@
 pub mod config_api;
+pub mod deploy;
 pub mod profiling;
 pub mod routes;
 
@@ -52,7 +53,9 @@ pub fn admin_router(
     quota: Arc<QuotaTracker>,
     acme: Option<Arc<crate::proxy::acme::AcmeManager>>,
     license_api_key: String,
+    license_state: Option<crate::license::LicenseState>,
     gateway_config: GatewayConfig,
+    deploy_registry: deploy::DeployRegistry,
 ) -> Router {
     let audit = AuditLog::new(repo.clone());
     let state = AdminState {
@@ -75,6 +78,8 @@ pub fn admin_router(
         quota,
         acme,
         license_api_key,
+        license_state,
+        deploy_registry: Some(deploy_registry),
     };
 
     // Routes that mutate live state require Operator or higher; token
@@ -89,6 +94,7 @@ pub fn admin_router(
         .route("/services/:id", get(routes::get_service))
         .route("/services/:id/targets", get(routes::list_service_targets))
         .route("/targets", get(routes::list_all_targets))
+        .route("/targets/:id", get(routes::get_target_handler))
         .route("/routes", get(routes::list_routes))
         .route("/routes/:id", get(routes::get_route))
         .route("/plugins", get(routes::list_plugins))
@@ -174,6 +180,14 @@ pub fn admin_router(
         .route(
             "/circuit-breakers/:service_id/reset",
             post(routes::reset_circuit_breaker),
+        )
+        .route(
+            "/services/:id/deploy",
+            post(deploy::start_deploy),
+        )
+        .route(
+            "/services/:id/deploy/status",
+            get(deploy::deploy_status),
         )
         .route_layer(middleware::from_fn(operator));
 

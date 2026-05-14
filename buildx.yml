@@ -1,0 +1,122 @@
+name: lynxx-backend-deploy
+repository: https://github.com/shregar1/backend.lynxx.dev.git
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - name: version-tag
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          GIT_HASH=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")
+          BUILD_TAG="v${VERSION}-${GIT_HASH}"
+          echo "Build tag: ${BUILD_TAG}"
+          echo "${BUILD_TAG}" > .buildx-tag
+
+      - name: build-dashboard
+        run: |
+          rm -rf ../node.dashboard.lynxx.dev 2>/dev/null || true
+          if [ -n "${GITHUB_TOKEN}" ]; then
+            git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/shregar1/node.dashboard.lynxx.dev.git ../node.dashboard.lynxx.dev
+          else
+            git clone --depth 1 https://github.com/shregar1/node.dashboard.lynxx.dev.git ../node.dashboard.lynxx.dev
+          fi
+          cd ../node.dashboard.lynxx.dev
+          npm install
+          npx vite build
+          ls -la dist/
+
+      - name: build-binary
+        run: |
+          echo "PWD: $(pwd)"
+          echo "CARGO_MANIFEST_DIR would be: $(pwd)"
+          echo "Checking embed path: ../node.dashboard.lynxx.dev/dist/"
+          ls -la ../node.dashboard.lynxx.dev/dist/ || echo "DIST NOT FOUND"
+          echo "---"
+          CARGO_BUILD_JOBS=1 cargo build --release --bin lynxx-gateway 2>&1 | tee /tmp/lynxx-build.log
+          ls -lh target/release/lynxx-gateway
+
+      - name: upload-to-gcs
+        run: |
+          BUILD_TAG=$(cat .buildx-tag)
+          gsutil cp target/release/lynxx-gateway gs://lynxx-public/linux/amd64/lynxx-gateway-${BUILD_TAG}
+          gsutil cp target/release/lynxx-gateway gs://lynxx-public/linux/amd64/lynxx-gateway-latest
+          echo "Uploaded lynxx-gateway-${BUILD_TAG} to GCS"
+
+      - name: start-staging
+        run: |
+          sudo cp /etc/lynxx/config.toml /tmp/lynxx-staging.toml
+          sudo sed -i "s/^admin_port.*/admin_port = 18443/" /tmp/lynxx-staging.toml
+          sudo sed -i "s/^proxy_port.*/proxy_port = 18080/" /tmp/lynxx-staging.toml
+
+          LYNXX_API_KEY=$(grep "LYNXX_API_KEY=" /etc/systemd/system/lynxx-gateway.service | sed "s/.*LYNXX_API_KEY=//")
+          LYNXX_LICENSE_VERIFY_URL=$(grep "LYNXX_LICENSE_VERIFY_URL=" /etc/systemd/system/lynxx-gateway.service | sed "s/.*LYNXX_LICENSE_VERIFY_URL=//" || true)
+
+          sudo bash -c "LYNXX_API_KEY='${LYNXX_API_KEY}' \
+               LYNXX_LICENSE_VERIFY_URL='${LYNXX_LICENSE_VERIFY_URL}' \
+               HOME=/var/lib/lynxx \
+               nohup $(pwd)/target/release/lynxx-gateway --config /tmp/lynxx-staging.toml \
+               > /tmp/lynxx-staging.log 2>&1 &
+               echo \$! > /tmp/lynxx-staging.pid"
+          sleep 3
+          echo "Staging PID: $(cat /tmp/lynxx-staging.pid)"
+
+      - name: health-check-staging
+        run: |
+          if curl -sf http://localhost:18443/healthz > /dev/null 2>&1; then
+            echo "Staging healthy: $(curl -s http://localhost:18443/healthz)"
+          else
+            echo "FATAL: staging failed health check"
+            cat /tmp/lynxx-staging.log 2>/dev/null | tail -20
+            sudo kill $(cat /tmp/lynxx-staging.pid) 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: redirect-traffic
+        run: |
+          sudo iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 18080
+          sudo iptables -t nat -A OUTPUT -p tcp --dport 443 -o lo -j REDIRECT --to-port 18080
+          sudo iptables -t nat -A PREROUTING -p tcp --dport 9001 -j REDIRECT --to-port 18443
+          sudo iptables -t nat -A OUTPUT -p tcp --dport 9001 -o lo -j REDIRECT --to-port 18443
+          sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 18080 2>/dev/null || true
+          sudo iptables -t nat -A OUTPUT -p tcp --dport 80 -o lo -j REDIRECT --to-port 18080 2>/dev/null || true
+          echo "Traffic redirected to staging"
+
+      - name: swap-binary
+        run: |
+          sudo systemctl stop lynxx-gateway.service
+          sudo cp /usr/local/bin/lynxx-gateway /usr/local/bin/lynxx-gateway.bak
+          sudo cp target/release/lynxx-gateway /usr/local/bin/lynxx-gateway
+          sudo systemctl start lynxx-gateway.service
+          for i in $(seq 1 20); do
+            NEW_PID=$(sudo systemctl show lynxx-gateway.service --property=MainPID --value)
+            if [ "${NEW_PID}" != "0" ] && [ -d "/proc/${NEW_PID}" ]; then
+              echo "New process running: PID ${NEW_PID}"
+              break
+            fi
+            sleep 0.5
+          done
+
+      - name: cutover
+        run: |
+          sudo iptables -t nat -D PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 18080 2>/dev/null || true
+          sudo iptables -t nat -D OUTPUT -p tcp --dport 443 -o lo -j REDIRECT --to-port 18080 2>/dev/null || true
+          sudo iptables -t nat -D PREROUTING -p tcp --dport 9001 -j REDIRECT --to-port 18443 2>/dev/null || true
+          sudo iptables -t nat -D OUTPUT -p tcp --dport 9001 -o lo -j REDIRECT --to-port 18443 2>/dev/null || true
+          sudo iptables -t nat -D PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 18080 2>/dev/null || true
+          sudo iptables -t nat -D OUTPUT -p tcp --dport 80 -o lo -j REDIRECT --to-port 18080 2>/dev/null || true
+          sudo kill $(cat /tmp/lynxx-staging.pid) 2>/dev/null || true
+          echo "Cutover complete"
+
+      - name: verify
+        run: |
+          sleep 1
+          echo "--- Health ---"
+          curl -s http://localhost:9001/healthz
+          echo ""
+          echo "--- Service ---"
+          sudo systemctl is-active lynxx-gateway.service

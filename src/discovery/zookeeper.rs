@@ -273,6 +273,7 @@ impl ZooKeeperProvider {
                 weight: entry.data.weight,
                 enabled: true,
                 zone: entry.data.zone.clone(),
+                state: crate::models::TargetLifecycle::Active,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             };

@@ -2,6 +2,38 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetLifecycle {
+    Active,
+    Draining,
+    Inactive,
+}
+
+impl TargetLifecycle {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Draining => "draining",
+            Self::Inactive => "inactive",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "draining" => Self::Draining,
+            "inactive" => Self::Inactive,
+            _ => Self::Active,
+        }
+    }
+}
+
+impl Default for TargetLifecycle {
+    fn default() -> Self {
+        Self::Active
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Service {
     pub id: Uuid,
@@ -68,6 +100,8 @@ pub struct Service {
     /// upstream URI. Useful for upstreams that perform virtual-host routing.
     #[serde(default)]
     pub pass_host_header: Option<bool>,
+    #[serde(default)]
+    pub drain_timeout_ms: Option<u64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -192,6 +226,8 @@ pub struct Route {
     /// Caddy's `respond` directive.
     #[serde(default)]
     pub static_response: Option<StaticResponse>,
+    #[serde(default)]
+    pub health_gate: bool,
 
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -244,6 +280,8 @@ pub struct Target {
     pub enabled: bool,
     #[serde(default)]
     pub zone: Option<String>,
+    #[serde(default)]
+    pub state: TargetLifecycle,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -290,6 +328,7 @@ impl Target {
             weight: weight.max(1),
             enabled: true,
             zone: None,
+            state: TargetLifecycle::Active,
             created_at: now,
             updated_at: now,
         }
@@ -320,6 +359,7 @@ impl Service {
             stream_timeout_ms: None,
             stream_close_delay_ms: None,
             pass_host_header: None,
+            drain_timeout_ms: None,
             created_at: now,
             updated_at: now,
         }
@@ -360,6 +400,7 @@ impl Route {
             intercept_rules: Vec::new(),
             push: None,
             static_response: None,
+            health_gate: false,
             created_at: now,
             updated_at: now,
         }

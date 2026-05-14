@@ -291,6 +291,7 @@ impl EcsProvider {
                     weight: mapping.weight,
                     enabled: true,
                     zone: None,
+                    state: crate::models::TargetLifecycle::Active,
                     created_at: Utc::now(),
                     updated_at: Utc::now(),
                 };

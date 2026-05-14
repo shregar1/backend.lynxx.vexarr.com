@@ -70,6 +70,7 @@ pub trait Repository: Send + Sync {
     async fn create_target(&self, target: &Target) -> Result<(), GatewayError>;
     async fn update_target(&self, id: &Uuid, target: &Target) -> Result<(), GatewayError>;
     async fn delete_target(&self, id: &Uuid) -> Result<bool, GatewayError>;
+    async fn update_target_state(&self, id: &Uuid, state: &str) -> Result<bool, GatewayError>;
 
     async fn get_service_by_name(&self, name: &str) -> Result<Option<Service>, GatewayError>;
 

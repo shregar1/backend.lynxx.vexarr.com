@@ -1,7 +1,9 @@
+use crate::admin::deploy::DeployRegistry;
 use crate::error::GatewayError;
 use crate::health::passive::PassiveHealthTracker;
 use crate::health::HealthRegistry;
 use crate::metrics as gw_metrics;
+use crate::models::TargetLifecycle;
 use crate::plugins::PluginExecutor;
 use crate::proxy::grpc::{handle_grpc, GrpcClient};
 use crate::proxy::http_client::{HttpProxyClient, ProxyClientPool};
@@ -57,6 +59,7 @@ pub struct ProxyState {
     /// before serving — flipped off by the periodic re-verifier when
     /// the licence server reports the key is no longer active.
     pub license: crate::license::LicenseState,
+    pub deploy_registry: Option<DeployRegistry>,
     pub local_zone: Option<String>,
 }
 
@@ -145,6 +148,7 @@ fn parse_unix_url(url: &str) -> Option<(String, String)> {
 }
 
 /// Proxy a request over a Unix domain socket using raw hyper HTTP/1.1.
+#[cfg(unix)]
 async fn proxy_via_unix(
     socket_path: &str,
     mut req: Request<Body>,
@@ -229,6 +233,22 @@ pub async fn proxy_handler(
     let svc_name = service.name.clone();
     let route_id = route.id.to_string();
 
+    if route.health_gate && !state.lb.has_healthy_active_target(&service.id) {
+        metrics::counter!(
+            "lynxx_requests_total",
+            "service" => svc_name.clone(),
+            "route" => route_id.clone(),
+            "method" => method.clone(),
+            "status" => "health_gated",
+            "target" => "-",
+        )
+        .increment(1);
+        return Err(GatewayError::ServiceUnavailable(format!(
+            "service {} has no healthy targets",
+            service.name
+        )));
+    }
+
     let open_duration_ms = state.health.config().open_duration_ms;
     if !state
         .health
@@ -266,9 +286,8 @@ pub async fn proxy_handler(
         return Err(GatewayError::LicenseRevoked);
     }
 
-    // Quota check — counts the call and rejects with 429 if the monthly limit
-    // is exhausted. Unlimited plans (Business, Enterprise) always pass.
-    if !state.quota.check_and_count() {
+    let quota_result = state.quota.check_and_count();
+    if quota_result == crate::quota::QuotaResult::Rejected {
         metrics::counter!(
             "lynxx_requests_total",
             "service" => svc_name.clone(),
@@ -280,6 +299,7 @@ pub async fn proxy_handler(
         .increment(1);
         return Err(GatewayError::QuotaExceeded);
     }
+    let is_overage = quota_result == crate::quota::QuotaResult::Overage;
 
     // Extract client IP, respecting trusted_proxies CIDR allowlist.
     // When trusted_proxies is configured, only honour X-Forwarded-For
@@ -331,8 +351,8 @@ pub async fn proxy_handler(
     // Pick a target via load balancer if one is configured for this service.
     // Falls back to `service.url` if no targets exist.
     let picked = state.lb.pick(&service.id, state.local_zone.as_deref(), &lb_ctx);
-    let picked_target_id = picked.as_ref().map(|ts| ts.target.id);
-    let (upstream_base, target_label, _in_flight) = match &picked {
+    let mut picked_target_id = picked.as_ref().map(|ts| ts.target.id);
+    let (upstream_base, mut target_label, _in_flight) = match &picked {
         Some(ts) => {
             let guard = InFlightGuard::new(ts.clone());
             (ts.target.url.clone(), ts.target.url.clone(), Some(guard))
@@ -558,6 +578,7 @@ pub async fn proxy_handler(
     }
 
     // ---- Unix socket upstream: bypass hyper-util, use raw HTTP/1.1. -------
+    #[cfg(unix)]
     if upstream_url.starts_with("unix://") {
         if let Some((sock_path, http_path)) = parse_unix_url(&upstream_url) {
             let cache_key = req
@@ -664,6 +685,11 @@ pub async fn proxy_handler(
             let mut final_resp = Response::new(Body::from(resp_body));
             *final_resp.status_mut() = final_parts.status;
             *final_resp.headers_mut() = final_parts.headers;
+            if is_overage {
+                if let Ok(v) = "true".parse() {
+                    final_resp.headers_mut().insert("x-lynxx-overage", v);
+                }
+            }
 
             let bucket = gw_metrics::status_bucket(status.as_u16());
             metrics::counter!(
@@ -774,13 +800,25 @@ pub async fn proxy_handler(
         }
     };
 
+    let deploy_active = state
+        .deploy_registry
+        .as_ref()
+        .map(|r| crate::admin::deploy::has_active_deploy(r, &service.id))
+        .unwrap_or(false);
+    let target_is_draining = picked
+        .as_ref()
+        .map(|ts| ts.lifecycle() == TargetLifecycle::Draining)
+        .unwrap_or(false);
+
     let max_attempts = (service.retries + 1).max(1) as usize;
     let retry_on_status = &route.retry_on_status;
-    // Force buffering when route.buffer_request is set, or when retries > 0,
-    // or when retry_on_status is configured (need to re-read body on retry).
-    let force_buffer = route.buffer_request || !retry_on_status.is_empty();
+    let force_buffer = route.buffer_request
+        || !retry_on_status.is_empty()
+        || deploy_active
+        || target_is_draining;
     let mut last_err = String::new();
     let mut upstream_resp = None;
+    let mut deploy_retried = false;
 
     if max_attempts <= 1 && !force_buffer {
         let upstream_req = Request::from_parts(parts, body);
@@ -844,6 +882,88 @@ pub async fn proxy_handler(
                     last_err = e.to_string();
                     if !e.is_connect() {
                         break;
+                    }
+                }
+            }
+        }
+
+        // Deploy-aware retry: on connection error or 502, try a different
+        // healthy target when the service has an active deploy or the
+        // originally picked target started draining mid-request.
+        if deploy_active || target_is_draining {
+            let is_retryable = match &upstream_resp {
+                Some(r) => r.status().as_u16() == 502,
+                None => true,
+            };
+            if is_retryable {
+                let mut exclude: Vec<uuid::Uuid> = Vec::new();
+                if let Some(tid) = picked_target_id {
+                    exclude.push(tid);
+                }
+                for _ in 0..2u8 {
+                    let retry_ts = match state.lb.pick_excluding(
+                        &service.id,
+                        &exclude,
+                        state.local_zone.as_deref(),
+                    ) {
+                        Some(ts) => ts,
+                        None => break,
+                    };
+                    exclude.push(retry_ts.target.id);
+                    let _guard = InFlightGuard::new(retry_ts.clone());
+
+                    let retry_base = retry_ts.target.url.trim_end_matches('/');
+                    let mut retry_url = String::with_capacity(
+                        retry_base.len()
+                            + upstream_path.len()
+                            + query.as_ref().map(|q| q.len() + 1).unwrap_or(0),
+                    );
+                    retry_url.push_str(retry_base);
+                    retry_url.push_str(&upstream_path);
+                    if let Some(q) = &query {
+                        retry_url.push('?');
+                        retry_url.push_str(q);
+                    }
+
+                    let retry_uri: Uri = match retry_url.parse() {
+                        Ok(u) => u,
+                        Err(_) => break,
+                    };
+
+                    let mut retry_parts = parts.clone();
+                    retry_parts.uri = retry_uri;
+                    let retry_body = Body::from(body_bytes.clone());
+                    let retry_req = Request::from_parts(retry_parts, retry_body);
+
+                    metrics::counter!(
+                        "lynxx_deploy_retries_total",
+                        "service" => svc_name.clone(),
+                    )
+                    .increment(1);
+
+                    tracing::debug!(
+                        service = %svc_name,
+                        target_id = %retry_ts.target.id,
+                        target_url = %retry_ts.target.url,
+                        "deploy-aware retry"
+                    );
+
+                    match client.request(retry_req).await {
+                        Ok(r) => {
+                            if r.status().as_u16() == 502 {
+                                last_err = "deploy retry: upstream 502".to_string();
+                                continue;
+                            }
+                            upstream_resp = Some(r);
+                            picked_target_id = Some(retry_ts.target.id);
+                            target_label = retry_ts.target.url.clone();
+                            deploy_retried = true;
+                            break;
+                        }
+                        Err(e) => {
+                            last_err = e.to_string();
+                            continue;
+                        }
                     }
                 }
             }
@@ -1002,6 +1122,19 @@ pub async fn proxy_handler(
                     .headers_mut()
                     .append(axum::http::header::SET_COOKIE, val);
             }
+        }
+    }
+
+    if is_overage {
+        if let Ok(v) = "true".parse() {
+            final_resp.headers_mut().insert("x-lynxx-overage", v);
+        }
+    }
+    if deploy_retried {
+        if let Ok(v) = "true".parse() {
+            final_resp
+                .headers_mut()
+                .insert("x-lynxx-deploy-retry", v);
         }
     }
 

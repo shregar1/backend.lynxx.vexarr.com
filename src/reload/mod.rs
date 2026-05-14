@@ -209,6 +209,7 @@ async fn diff_services(
                         stream_timeout_ms: cur.stream_timeout_ms,
                         stream_close_delay_ms: cur.stream_close_delay_ms,
                         pass_host_header: cur.pass_host_header,
+                        drain_timeout_ms: None,
                         created_at: cur.created_at,
                         updated_at: Utc::now(),
                     };
@@ -343,6 +344,7 @@ async fn diff_routes(
                         intercept_rules: Vec::new(),
                         push: None,
                         static_response: None,
+                        health_gate: false,
                         created_at: cur.created_at,
                         updated_at: Utc::now(),
                     };

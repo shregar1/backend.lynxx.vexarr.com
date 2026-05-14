@@ -166,7 +166,7 @@ impl Repository for SqliteRepository {
 
     async fn list_targets(&self) -> Result<Vec<Target>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at FROM targets WHERE is_deleted = 0",
+            "SELECT id, service_id, url, weight, enabled, zone, state, created_at, updated_at FROM targets WHERE is_deleted = 0",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -178,7 +178,7 @@ impl Repository for SqliteRepository {
         service_id: &Uuid,
     ) -> Result<Vec<Target>, GatewayError> {
         let rows = sqlx::query(
-            "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at \
+            "SELECT id, service_id, url, weight, enabled, zone, state, created_at, updated_at \
              FROM targets WHERE service_id = ? AND is_deleted = 0",
         )
         .bind(service_id.to_string())
@@ -189,7 +189,7 @@ impl Repository for SqliteRepository {
 
     async fn get_target(&self, id: &Uuid) -> Result<Option<Target>, GatewayError> {
         let row = sqlx::query(
-            "SELECT id, service_id, url, weight, enabled, zone, created_at, updated_at \
+            "SELECT id, service_id, url, weight, enabled, zone, state, created_at, updated_at \
              FROM targets WHERE id = ? AND is_deleted = 0",
         )
         .bind(id.to_string())
@@ -200,8 +200,8 @@ impl Repository for SqliteRepository {
 
     async fn create_target(&self, target: &Target) -> Result<(), GatewayError> {
         sqlx::query(
-            "INSERT INTO targets (id, service_id, url, weight, enabled, zone, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO targets (id, service_id, url, weight, enabled, zone, state, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(target.id.to_string())
         .bind(target.service_id.to_string())
@@ -209,6 +209,7 @@ impl Repository for SqliteRepository {
         .bind(target.weight as i64)
         .bind(target.enabled as i64)
         .bind(target.zone.as_deref())
+        .bind(target.state.as_str())
         .bind(target.created_at.to_rfc3339())
         .bind(target.updated_at.to_rfc3339())
         .execute(&self.pool)
@@ -218,12 +219,13 @@ impl Repository for SqliteRepository {
 
     async fn update_target(&self, id: &Uuid, target: &Target) -> Result<(), GatewayError> {
         sqlx::query(
-            "UPDATE targets SET url = ?, weight = ?, enabled = ?, zone = ?, updated_at = ? WHERE id = ? AND is_deleted = 0",
+            "UPDATE targets SET url = ?, weight = ?, enabled = ?, zone = ?, state = ?, updated_at = ? WHERE id = ? AND is_deleted = 0",
         )
         .bind(&target.url)
         .bind(target.weight as i64)
         .bind(target.enabled as i64)
         .bind(target.zone.as_deref())
+        .bind(target.state.as_str())
         .bind(target.updated_at.to_rfc3339())
         .bind(id.to_string())
         .execute(&self.pool)
@@ -236,6 +238,18 @@ impl Repository for SqliteRepository {
             .bind(id.to_string())
             .execute(&self.pool)
             .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn update_target_state(&self, id: &Uuid, state: &str) -> Result<bool, GatewayError> {
+        let result = sqlx::query(
+            "UPDATE targets SET state = ?, updated_at = ? WHERE id = ? AND is_deleted = 0",
+        )
+        .bind(state)
+        .bind(Utc::now().to_rfc3339())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -975,6 +989,7 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
                 stream_timeout_ms: existing.stream_timeout_ms,
                 stream_close_delay_ms: existing.stream_close_delay_ms,
                 pass_host_header: existing.pass_host_header,
+                drain_timeout_ms: None,
                 created_at: existing.created_at,
                 updated_at: Utc::now(),
             };
@@ -1053,6 +1068,7 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
                 intercept_rules: Vec::new(),
                 push: None,
                 static_response: None,
+                health_gate: false,
                 created_at: existing.created_at,
                 updated_at: Utc::now(),
             };
@@ -1202,6 +1218,7 @@ fn row_to_service(row: sqlx::sqlite::SqliteRow) -> Result<Service, GatewayError>
         stream_timeout_ms: row.try_get::<Option<i64>, _>("stream_timeout_ms").ok().flatten().map(|v| v as u64),
         stream_close_delay_ms: row.try_get::<Option<i64>, _>("stream_close_delay_ms").ok().flatten().map(|v| v as u64),
         pass_host_header: row.try_get::<Option<bool>, _>("pass_host_header").ok().flatten(),
+        drain_timeout_ms: row.try_get::<Option<i64>, _>("drain_timeout_ms").ok().flatten().map(|v| v as u64),
         created_at: parse_dt(&created_at)?,
         updated_at: parse_dt(&updated_at)?,
     })
@@ -1213,6 +1230,7 @@ fn row_to_target(row: sqlx::sqlite::SqliteRow) -> Result<Target, GatewayError> {
     let weight: i64 = row.try_get("weight")?;
     let enabled: i64 = row.try_get("enabled")?;
     let zone: Option<String> = row.try_get("zone").ok();
+    let state_str: String = row.try_get("state").unwrap_or_else(|_| "active".to_string());
     let created_at: String = row.try_get("created_at")?;
     let updated_at: String = row.try_get("updated_at")?;
 
@@ -1223,6 +1241,7 @@ fn row_to_target(row: sqlx::sqlite::SqliteRow) -> Result<Target, GatewayError> {
         weight: weight as u32,
         enabled: enabled != 0,
         zone,
+        state: crate::models::TargetLifecycle::from_str(&state_str),
         created_at: parse_dt(&created_at)?,
         updated_at: parse_dt(&updated_at)?,
     })
@@ -1265,6 +1284,7 @@ fn row_to_route(row: sqlx::sqlite::SqliteRow) -> Result<Route, GatewayError> {
         intercept_rules: Vec::new(),
         push: None,
         static_response: None,
+        health_gate: false,
         created_at: parse_dt(&created_at)?,
         updated_at: parse_dt(&updated_at)?,
     })

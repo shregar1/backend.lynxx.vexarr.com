@@ -231,21 +231,23 @@ pub async fn send_fastcgi(
     // Connect to FastCGI backend and exchange records
     let payload = build_payload(request_id, &params, &body_bytes);
 
+    #[cfg(unix)]
     if upstream_url.starts_with("unix://") {
         let path = &upstream_url[7..];
         let mut s = tokio::net::UnixStream::connect(path)
             .await
             .map_err(FastcgiError::Io)?;
-        fcgi_exchange(&mut s, &payload).await
-    } else {
-        let addr = upstream_url
-            .strip_prefix("tcp://")
-            .unwrap_or(upstream_url);
-        let mut s = tokio::net::TcpStream::connect(addr)
-            .await
-            .map_err(FastcgiError::Io)?;
-        fcgi_exchange(&mut s, &payload).await
+        return fcgi_exchange(&mut s, &payload).await;
     }
+
+    let addr = upstream_url
+        .strip_prefix("tcp://")
+        .or_else(|| upstream_url.strip_prefix("unix://"))
+        .unwrap_or(upstream_url);
+    let mut s = tokio::net::TcpStream::connect(addr)
+        .await
+        .map_err(FastcgiError::Io)?;
+    fcgi_exchange(&mut s, &payload).await
 }
 
 /// Build the full outbound FastCGI payload (BEGIN + PARAMS + STDIN).
