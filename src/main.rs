@@ -458,6 +458,28 @@ async fn async_main() -> anyhow::Result<()> {
     );
 
     // ---------- ACME / cert manager ----------
+    // Derive wildcard domains from route hosts so the ACME config doesn't
+    // need a static `domains` list — the DB is the source of truth.
+    if config.gateway.acme.enabled {
+        let db_domains = derive_acme_domains_from_routes(&route_table);
+        if !db_domains.is_empty() {
+            let before = config.gateway.acme.domains.len();
+            for d in db_domains {
+                if !config.gateway.acme.domains.contains(&d) {
+                    config.gateway.acme.domains.push(d);
+                }
+            }
+            let added = config.gateway.acme.domains.len() - before;
+            if added > 0 {
+                tracing::info!(
+                    added,
+                    total = config.gateway.acme.domains.len(),
+                    "derived ACME domains from route hosts"
+                );
+            }
+        }
+    }
+
     // Initialise before building the proxy app so we can inject the
     // challenge handler route and have a ServerConfig ready for bind.
     let acme_manager: Option<Arc<crate::proxy::acme::AcmeManager>> = if config.gateway.acme.enabled
@@ -1066,3 +1088,60 @@ async fn apply_remote_event(
     Ok(())
 }
 
+/// Derive ACME wildcard domains from route hosts in the DB.
+///
+/// Scans every route's `hosts` list and produces wildcard entries:
+///   `api.hostx.vexarr.com`  → `*.hostx.vexarr.com`, `*.vexarr.com`
+///   `*.hostx.vexarr.com`    → kept as-is, plus `*.vexarr.com`
+///   `vexarr.com`            → `*.vexarr.com`, `vexarr.com`
+///   `*`                     → skipped (catchall)
+fn derive_acme_domains_from_routes(route_table: &crate::proxy::router::RouteTable) -> Vec<String> {
+    use std::collections::BTreeSet;
+
+    let mut domains = BTreeSet::new();
+
+    for route in route_table.list_routes() {
+        for host in &route.hosts {
+            let host = host.trim().to_lowercase();
+            if host.is_empty() || host == "*" {
+                continue;
+            }
+
+            // Already a wildcard — keep it and derive the parent wildcard.
+            if let Some(rest) = host.strip_prefix("*.") {
+                domains.insert(host.clone());
+                if let Some(parent) = parent_wildcard(rest) {
+                    domains.insert(parent);
+                }
+                continue;
+            }
+
+            // Bare domain (vexarr.com) — add itself and *.vexarr.com.
+            let parts: Vec<&str> = host.split('.').collect();
+            if parts.len() == 2 {
+                domains.insert(host.clone());
+                domains.insert(format!("*.{host}"));
+            } else if parts.len() > 2 {
+                // Sub-domain — derive wildcard for the parent.
+                let parent = &host[host.find('.').unwrap() + 1..];
+                domains.insert(format!("*.{parent}"));
+                // Also add a higher-level wildcard if there's enough depth.
+                if let Some(grandparent) = parent_wildcard(parent) {
+                    domains.insert(grandparent);
+                }
+            }
+        }
+    }
+
+    domains.into_iter().collect()
+}
+
+fn parent_wildcard(domain: &str) -> Option<String> {
+    let parts: Vec<&str> = domain.split('.').collect();
+    if parts.len() >= 3 {
+        let parent = &domain[domain.find('.').unwrap() + 1..];
+        Some(format!("*.{parent}"))
+    } else {
+        None
+    }
+}

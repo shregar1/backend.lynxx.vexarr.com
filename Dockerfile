@@ -28,9 +28,12 @@ COPY scripts ./scripts
 # `cache-from`/`cache-to` in deploy-gcp.yml, repeat builds drop from
 # ~12 min cold to ~2-3 min warm. Move the binaries off the cache mount
 # before the layer ends or they'd be discarded.
+ARG LYNXX_NODE_DASHBOARD_URL
+RUN apt-get update && apt-get install -y --no-install-recommends curl unzip && \
+    rm -rf /var/lib/apt/lists/*
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
-    cargo build --release --bin lynxx-gateway --bin lynxx-ingress --bin lynxx --bin lynxx-billing && \
+    ./scripts/build.sh --bin lynxx-gateway --bin lynxx-ingress --bin lynxx --bin lynxx-billing && \
     mkdir -p /out && \
     cp target/release/lynxx-gateway target/release/lynxx-ingress target/release/lynxx target/release/lynxx-billing /out/
 
