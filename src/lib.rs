@@ -23,6 +23,7 @@ pub mod error;
 pub mod health;
 pub mod license;
 pub mod logging;
+pub mod logs;
 pub mod lynxfile;
 pub mod metrics;
 pub mod models;

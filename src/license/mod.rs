@@ -7,8 +7,8 @@
 //!
 //! ## Verify request
 //!
-//! `GET ${verify_url}?key=<api_key>`  (default `verify_url`:
-//! `https://api.lynxx.vexarr.com/v1/license/verify`)
+//! `GET ${LYNXX_BASE_URL}/v1/license/verify?key=<api_key>`
+//! (default base: `https://api.lynxx.vexarr.com`)
 //!
 //! ## Verify response (200)
 //!
@@ -37,7 +37,21 @@ use std::time::Duration as StdDuration;
 
 use crate::quota::PlanTier;
 
-const DEFAULT_VERIFY_URL: &str = "https://api.lynxx.vexarr.com/v1/license/verify";
+const DEFAULT_LYNXX_BASE_URL: &str = "https://api.lynxx.vexarr.com";
+
+fn resolve_lynxx_base_url() -> String {
+    env::var("LYNXX_BASE_URL")
+        .or_else(|_| env::var("LYNXX_LICENSE_VERIFY_URL").map(|u| {
+            u.trim_end_matches("/v1/license/verify").to_string()
+        }))
+        .unwrap_or_else(|_| DEFAULT_LYNXX_BASE_URL.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn verify_url() -> String {
+    format!("{}/v1/license/verify", resolve_lynxx_base_url())
+}
 
 /// Ed25519 public key for verifying signed `/v1/license/verify`
 /// responses. Compiled into the binary — a MITM cannot forge a
@@ -138,10 +152,9 @@ impl License {
             return Err(LicenseError::BadFormat);
         }
 
-        let verify_url =
-            env::var("LYNXX_LICENSE_VERIFY_URL").unwrap_or_else(|_| DEFAULT_VERIFY_URL.to_string());
+        let vurl = verify_url();
 
-        match verify_online(&api_key, &verify_url).await {
+        match verify_online(&api_key, &vurl).await {
             Ok(resp) => {
                 let lic = License {
                     customer_id: resp.customer_urn.clone(),
@@ -379,7 +392,7 @@ struct RegisterResp {
 
 /// Register this gateway node with the billing API. Returns error if
 /// the customer has reached their node limit.
-pub async fn register_node(api_key: &str, base_url: &str) -> Result<(), NodeError> {
+pub async fn register_node(api_key: &str, lynxx_base_url: &str) -> Result<(), NodeError> {
     if api_key.starts_with("lnx_dev_") {
         return Ok(());
     }
@@ -389,8 +402,8 @@ pub async fn register_node(api_key: &str, base_url: &str) -> Result<(), NodeErro
         .map(|d| d.join(".lynxx").to_string_lossy().to_string());
 
     let url = format!(
-        "{}?key={}",
-        base_url.replace("/v1/license/verify", "/v1/nodes/register"),
+        "{}/v1/nodes/register?key={}",
+        lynxx_base_url.trim_end_matches('/'),
         api_key
     );
     let body = RegisterReq {
@@ -443,12 +456,12 @@ pub async fn register_node(api_key: &str, base_url: &str) -> Result<(), NodeErro
 
 /// Spawn the background heartbeat loop. Sends a heartbeat to the billing
 /// API every 5 minutes so the system knows which nodes are alive.
-pub fn spawn_node_heartbeat(api_key: String, verify_url: String) {
+pub fn spawn_node_heartbeat(api_key: String, lynxx_base_url: String) {
     if api_key.starts_with("lnx_dev_") {
         return;
     }
     let instance_id = compute_instance_id(&api_key);
-    let heartbeat_url = verify_url.replace("/v1/license/verify", "/v1/nodes/heartbeat");
+    let heartbeat_url = format!("{}/v1/nodes/heartbeat", lynxx_base_url.trim_end_matches('/'));
 
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(StdDuration::from_secs(HEARTBEAT_INTERVAL_SECS));
@@ -477,14 +490,14 @@ pub fn spawn_node_heartbeat(api_key: String, verify_url: String) {
 }
 
 /// Deregister this node on clean shutdown.
-pub async fn deregister_node(api_key: &str, verify_url: &str) {
+pub async fn deregister_node(api_key: &str, lynxx_base_url: &str) {
     if api_key.starts_with("lnx_dev_") {
         return;
     }
     let instance_id = compute_instance_id(api_key);
     let url = format!(
-        "{}?key={}",
-        verify_url.replace("/v1/license/verify", "/v1/nodes/deregister"),
+        "{}/v1/nodes/deregister?key={}",
+        lynxx_base_url.trim_end_matches('/'),
         api_key
     );
     let body = serde_json::json!({ "instance_id": instance_id });
@@ -504,7 +517,7 @@ const USAGE_REPORT_INTERVAL_SECS: u64 = 60;
 /// across all customer nodes.
 pub fn spawn_usage_reporter(
     api_key: String,
-    verify_url: String,
+    lynxx_base_url: String,
     quota: std::sync::Arc<crate::quota::QuotaTracker>,
     license_state: LicenseState,
 ) {
@@ -512,7 +525,7 @@ pub fn spawn_usage_reporter(
         return;
     }
     let instance_id = compute_instance_id(&api_key);
-    let report_url = verify_url.replace("/v1/license/verify", "/v1/usage/report");
+    let report_url = format!("{}/v1/usage/report", lynxx_base_url.trim_end_matches('/'));
 
     tokio::spawn(async move {
         let mut interval =

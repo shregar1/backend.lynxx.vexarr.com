@@ -158,7 +158,8 @@ async fn time_travel_capture_list_replay_delete() {
         .json()
         .await
         .unwrap();
-    let svc_id = svc["id"].as_str().unwrap().to_string();
+    let svc_data = svc.get("data").unwrap_or(&svc);
+    let svc_id = svc_data["id"].as_str().unwrap().to_string();
 
     let _: Value = http
         .post(format!("{admin_base}/routes"))
@@ -212,7 +213,7 @@ async fn time_travel_capture_list_replay_delete() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // 7. List recordings.
-    let rows: Vec<Value> = http
+    let list_body: Value = http
         .get(format!("{admin_base}/recordings"))
         .send()
         .await
@@ -220,6 +221,8 @@ async fn time_travel_capture_list_replay_delete() {
         .json()
         .await
         .unwrap();
+    let rows_val = list_body.get("data").unwrap_or(&list_body);
+    let rows: Vec<Value> = serde_json::from_value(rows_val.clone()).unwrap();
     assert!(rows.len() >= 3, "expected ≥3 captures, got {}", rows.len());
 
     // The recorder should have plumbed service_id + upstream-bound paths.
@@ -237,7 +240,7 @@ async fn time_travel_capture_list_replay_delete() {
 
     // 8. Fetch the full recording — request body is empty (GET), response
     //    body decodes back to the wiremock payload.
-    let rec: Value = http
+    let rec_body: Value = http
         .get(format!("{admin_base}/recordings/{id}"))
         .send()
         .await
@@ -245,6 +248,7 @@ async fn time_travel_capture_list_replay_delete() {
         .json()
         .await
         .unwrap();
+    let rec = rec_body.get("data").unwrap_or(&rec_body);
     assert_eq!(rec["id"].as_str(), Some(id.as_str()));
     let resp_b64 = rec["response"]["body_b64"].as_str().unwrap();
     use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -256,7 +260,7 @@ async fn time_travel_capture_list_replay_delete() {
 
     // 9. Replay against the gateway itself; wiremock is deterministic so
     //    the body should be identical.
-    let replay: Value = http
+    let replay_body: Value = http
         .post(format!("{admin_base}/recordings/{id}/replay"))
         .json(&json!({ "target_url": null }))
         .send()
@@ -265,6 +269,7 @@ async fn time_travel_capture_list_replay_delete() {
         .json()
         .await
         .unwrap();
+    let replay = replay_body.get("data").unwrap_or(&replay_body);
     assert_eq!(
         replay["diff"]["body_diff"]["kind"].as_str(),
         Some("identical"),
@@ -280,7 +285,7 @@ async fn time_travel_capture_list_replay_delete() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 204, "delete should be 204");
 
-    let after: Vec<Value> = http
+    let after_body: Value = http
         .get(format!("{admin_base}/recordings"))
         .send()
         .await
@@ -288,6 +293,8 @@ async fn time_travel_capture_list_replay_delete() {
         .json()
         .await
         .unwrap();
+    let after_val = after_body.get("data").unwrap_or(&after_body);
+    let after: Vec<Value> = serde_json::from_value(after_val.clone()).unwrap();
     // Replaying through the gateway itself is also captured (sample_rate=1.0),
     // so we don't compare absolute counts. We just verify the deleted id is
     // no longer listed.

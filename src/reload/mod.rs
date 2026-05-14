@@ -210,6 +210,9 @@ async fn diff_services(
                         stream_close_delay_ms: cur.stream_close_delay_ms,
                         pass_host_header: cur.pass_host_header,
                         drain_timeout_ms: None,
+                        project_id: cur.project_id,
+                        domain: cur.domain.clone(),
+                        subdomain: cur.subdomain.clone(),
                         created_at: cur.created_at,
                         updated_at: Utc::now(),
                     };

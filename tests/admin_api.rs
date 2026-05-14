@@ -101,7 +101,8 @@ async fn run_admin_cycle(admin_port: u16) {
         resp.status()
     );
     let body: serde_json::Value = resp.json().await.expect("json");
-    let id = body
+    let data = body.get("data").unwrap_or(&body);
+    let id = data
         .get("id")
         .and_then(|v| v.as_str())
         .expect("service id in response")
@@ -119,8 +120,9 @@ async fn run_admin_cycle(admin_port: u16) {
         resp.status()
     );
     let body: serde_json::Value = resp.json().await.expect("json");
+    let data = body.get("data").unwrap_or(&body);
     assert_eq!(
-        body.get("name").and_then(|v| v.as_str()),
+        data.get("name").and_then(|v| v.as_str()),
         Some("it-test-svc")
     );
 

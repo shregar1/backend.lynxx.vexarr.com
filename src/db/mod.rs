@@ -6,7 +6,14 @@ use crate::auth::{AdminToken, Role};
 use crate::cluster::ClusterBus;
 use crate::config::GatewayConfig;
 use crate::error::GatewayError;
-use crate::models::{Consumer, PluginInstance, Route, Service, Target};
+use crate::models::{
+    AlertEvent, AlertRule, ApiVersion, CacheEntry, CacheStats, Certificate,
+    ClusterNode, Consumer, ConsumerGroup, ConsumerGroupMember, CostRecord, ErrorPage,
+    GeoBucket, Incident, IncidentUpdate, IpRule, LoadTest, LogEntry, MarketplacePlugin,
+    MetricBucket, PluginInstance, Probe, ProbeResult, Project, RateLimitBucket,
+    RateLimitSimulation, Route, Service, Snapshot, SpanRecord, Target, TraceRecord,
+    TransformRule, Webhook, WebhookDelivery,
+};
 use crate::recording::{RecordingFilter, RecordingIndexRow};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -39,6 +46,20 @@ pub struct AdminTokenPatch {
 /// storage-agnostic.
 #[async_trait]
 pub trait Repository: Send + Sync {
+    // ---------- projects ----------
+
+    async fn list_projects(&self) -> Result<Vec<Project>, GatewayError>;
+    async fn get_project(&self, id: &Uuid) -> Result<Option<Project>, GatewayError>;
+    async fn create_project(&self, project: &Project) -> Result<(), GatewayError>;
+    async fn update_project(&self, id: &Uuid, project: &Project) -> Result<(), GatewayError>;
+    async fn delete_project(&self, id: &Uuid) -> Result<bool, GatewayError>;
+    async fn list_services_for_project(
+        &self,
+        project_id: &Uuid,
+    ) -> Result<Vec<Service>, GatewayError>;
+
+    // ---------- services ----------
+
     async fn list_services(&self) -> Result<Vec<Service>, GatewayError>;
     async fn get_service(&self, id: &Uuid) -> Result<Option<Service>, GatewayError>;
     async fn create_service(&self, svc: &Service) -> Result<(), GatewayError>;
@@ -73,6 +94,19 @@ pub trait Repository: Send + Sync {
     async fn update_target_state(&self, id: &Uuid, state: &str) -> Result<bool, GatewayError>;
 
     async fn get_service_by_name(&self, name: &str) -> Result<Option<Service>, GatewayError>;
+
+    // ---------- cascade soft-delete ----------
+
+    async fn soft_delete_plugins_for_route(&self, route_id: &Uuid)
+        -> Result<u64, GatewayError>;
+    async fn soft_delete_plugins_for_service(&self, service_id: &Uuid)
+        -> Result<u64, GatewayError>;
+    async fn soft_delete_routes_for_service(&self, service_id: &Uuid)
+        -> Result<Vec<Uuid>, GatewayError>;
+    async fn soft_delete_targets_for_service(&self, service_id: &Uuid)
+        -> Result<u64, GatewayError>;
+    async fn soft_delete_services_for_project(&self, project_id: &Uuid)
+        -> Result<Vec<Uuid>, GatewayError>;
 
     async fn is_empty(&self) -> Result<bool, GatewayError>;
     async fn seed_from_config(&self, config: &GatewayConfig) -> Result<(), GatewayError>;
@@ -203,6 +237,230 @@ pub trait Repository: Send + Sync {
         &self,
         prefix: &str,
     ) -> Result<Option<crate::models::ApiKeyRow>, GatewayError>;
+
+    // ── Logs ──
+
+    async fn insert_logs(&self, entries: &[LogEntry]) -> Result<(), GatewayError>;
+
+    async fn list_logs(&self, filter: &LogFilter) -> Result<Vec<LogEntry>, GatewayError>;
+
+    async fn prune_logs(&self, retention_days: u32) -> Result<u64, GatewayError>;
+
+    // ── Analytics (metric buckets) ──
+
+    async fn upsert_metric_bucket(&self, bucket: &MetricBucket) -> Result<(), GatewayError>;
+    async fn list_metric_buckets(
+        &self,
+        service_id: &Uuid,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        granularity: &str,
+    ) -> Result<Vec<MetricBucket>, GatewayError>;
+
+    async fn upsert_geo_bucket(&self, bucket: &GeoBucket) -> Result<(), GatewayError>;
+    async fn list_geo_buckets(
+        &self,
+        service_id: &Uuid,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<GeoBucket>, GatewayError>;
+
+    async fn upsert_rate_limit_bucket(&self, bucket: &RateLimitBucket) -> Result<(), GatewayError>;
+    async fn list_rate_limit_buckets(
+        &self,
+        service_id: &Uuid,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<RateLimitBucket>, GatewayError>;
+
+    // ── Probes ──
+
+    async fn list_probes(&self, service_id: &Uuid) -> Result<Vec<Probe>, GatewayError>;
+    async fn get_probe(&self, id: &Uuid) -> Result<Option<Probe>, GatewayError>;
+    async fn create_probe(&self, probe: &Probe) -> Result<(), GatewayError>;
+    async fn update_probe(&self, id: &Uuid, probe: &Probe) -> Result<(), GatewayError>;
+    async fn delete_probe(&self, id: &Uuid) -> Result<bool, GatewayError>;
+    async fn append_probe_result(&self, result: &ProbeResult) -> Result<(), GatewayError>;
+    async fn list_probe_results(
+        &self,
+        probe_id: &Uuid,
+        limit: u32,
+    ) -> Result<Vec<ProbeResult>, GatewayError>;
+
+    // ── Snapshots ──
+
+    async fn list_snapshots(&self, service_id: &Uuid) -> Result<Vec<Snapshot>, GatewayError>;
+    async fn get_snapshot(&self, id: &Uuid) -> Result<Option<Snapshot>, GatewayError>;
+    async fn create_snapshot(&self, snap: &Snapshot) -> Result<(), GatewayError>;
+    async fn delete_snapshot(&self, id: &Uuid) -> Result<bool, GatewayError>;
+
+    // ── Alerts ──
+
+    async fn list_alert_rules(&self, service_id: &Uuid) -> Result<Vec<AlertRule>, GatewayError>;
+    async fn get_alert_rule(&self, id: &Uuid) -> Result<Option<AlertRule>, GatewayError>;
+    async fn create_alert_rule(&self, rule: &AlertRule) -> Result<(), GatewayError>;
+    async fn update_alert_rule(&self, id: &Uuid, rule: &AlertRule) -> Result<(), GatewayError>;
+    async fn delete_alert_rule(&self, id: &Uuid) -> Result<bool, GatewayError>;
+    async fn list_alert_events(
+        &self,
+        service_id: &Uuid,
+        limit: u32,
+    ) -> Result<Vec<AlertEvent>, GatewayError>;
+    async fn create_alert_event(&self, event: &AlertEvent) -> Result<(), GatewayError>;
+    async fn resolve_alert_event(&self, id: &Uuid) -> Result<bool, GatewayError>;
+
+    // ── IP Rules ──
+
+    async fn list_ip_rules(&self, service_id: &Uuid) -> Result<Vec<IpRule>, GatewayError>;
+    async fn get_ip_rule(&self, id: &Uuid) -> Result<Option<IpRule>, GatewayError>;
+    async fn create_ip_rule(&self, rule: &IpRule) -> Result<(), GatewayError>;
+    async fn update_ip_rule(&self, id: &Uuid, rule: &IpRule) -> Result<(), GatewayError>;
+    async fn delete_ip_rule(&self, id: &Uuid) -> Result<bool, GatewayError>;
+
+    // ── Error Pages ──
+
+    async fn list_error_pages(&self, service_id: &Uuid) -> Result<Vec<ErrorPage>, GatewayError>;
+    async fn get_error_page(&self, id: &Uuid) -> Result<Option<ErrorPage>, GatewayError>;
+    async fn create_error_page(&self, page: &ErrorPage) -> Result<(), GatewayError>;
+    async fn update_error_page(&self, id: &Uuid, page: &ErrorPage) -> Result<(), GatewayError>;
+    async fn delete_error_page(&self, id: &Uuid) -> Result<bool, GatewayError>;
+
+    // ── Consumer Groups ──
+
+    async fn list_consumer_groups(
+        &self,
+        service_id: &Uuid,
+    ) -> Result<Vec<ConsumerGroup>, GatewayError>;
+    async fn get_consumer_group(&self, id: &Uuid) -> Result<Option<ConsumerGroup>, GatewayError>;
+    async fn create_consumer_group(&self, group: &ConsumerGroup) -> Result<(), GatewayError>;
+    async fn update_consumer_group(
+        &self,
+        id: &Uuid,
+        group: &ConsumerGroup,
+    ) -> Result<(), GatewayError>;
+    async fn delete_consumer_group(&self, id: &Uuid) -> Result<bool, GatewayError>;
+    async fn list_consumer_group_members(
+        &self,
+        group_id: &Uuid,
+    ) -> Result<Vec<ConsumerGroupMember>, GatewayError>;
+    async fn add_consumer_group_member(
+        &self,
+        member: &ConsumerGroupMember,
+    ) -> Result<(), GatewayError>;
+    async fn remove_consumer_group_member(
+        &self,
+        group_id: &Uuid,
+        consumer_id: &Uuid,
+    ) -> Result<bool, GatewayError>;
+
+    // ── Cache ──
+
+    async fn list_cache_entries(&self, service_id: &Uuid) -> Result<Vec<CacheEntry>, GatewayError>;
+    async fn get_cache_entry(&self, id: &Uuid) -> Result<Option<CacheEntry>, GatewayError>;
+    async fn upsert_cache_entry(&self, entry: &CacheEntry) -> Result<(), GatewayError>;
+    async fn delete_cache_entry(&self, id: &Uuid) -> Result<bool, GatewayError>;
+    async fn purge_cache(&self, service_id: &Uuid) -> Result<u64, GatewayError>;
+    async fn cache_stats(&self, service_id: &Uuid) -> Result<CacheStats, GatewayError>;
+
+    // ── Tracing ──
+
+    async fn list_traces(&self, service_id: &Uuid, limit: u32) -> Result<Vec<TraceRecord>, GatewayError>;
+    async fn get_trace(&self, id: &Uuid) -> Result<Option<TraceRecord>, GatewayError>;
+    async fn create_trace(&self, trace: &TraceRecord) -> Result<(), GatewayError>;
+    async fn list_spans(&self, trace_id: &str) -> Result<Vec<SpanRecord>, GatewayError>;
+    async fn create_span(&self, span: &SpanRecord) -> Result<(), GatewayError>;
+
+    // ── Transforms ──
+
+    async fn list_transform_rules(&self, service_id: &Uuid) -> Result<Vec<TransformRule>, GatewayError>;
+    async fn get_transform_rule(&self, id: &Uuid) -> Result<Option<TransformRule>, GatewayError>;
+    async fn create_transform_rule(&self, rule: &TransformRule) -> Result<(), GatewayError>;
+    async fn update_transform_rule(&self, id: &Uuid, rule: &TransformRule) -> Result<(), GatewayError>;
+    async fn delete_transform_rule(&self, id: &Uuid) -> Result<bool, GatewayError>;
+
+    // ── API Versions ──
+
+    async fn list_api_versions(&self, service_id: &Uuid) -> Result<Vec<ApiVersion>, GatewayError>;
+    async fn get_api_version(&self, id: &Uuid) -> Result<Option<ApiVersion>, GatewayError>;
+    async fn create_api_version(&self, version: &ApiVersion) -> Result<(), GatewayError>;
+    async fn update_api_version(&self, id: &Uuid, version: &ApiVersion) -> Result<(), GatewayError>;
+    async fn delete_api_version(&self, id: &Uuid) -> Result<bool, GatewayError>;
+
+    // ── Incidents ──
+
+    async fn list_incidents(&self, service_id: &Uuid) -> Result<Vec<Incident>, GatewayError>;
+    async fn get_incident(&self, id: &Uuid) -> Result<Option<Incident>, GatewayError>;
+    async fn create_incident(&self, incident: &Incident) -> Result<(), GatewayError>;
+    async fn update_incident(&self, id: &Uuid, incident: &Incident) -> Result<(), GatewayError>;
+    async fn delete_incident(&self, id: &Uuid) -> Result<bool, GatewayError>;
+    async fn list_incident_updates(&self, incident_id: &Uuid) -> Result<Vec<IncidentUpdate>, GatewayError>;
+    async fn create_incident_update(&self, update: &IncidentUpdate) -> Result<(), GatewayError>;
+
+    // ── Webhooks ──
+
+    async fn list_webhooks(&self, service_id: &Uuid) -> Result<Vec<Webhook>, GatewayError>;
+    async fn get_webhook(&self, id: &Uuid) -> Result<Option<Webhook>, GatewayError>;
+    async fn create_webhook(&self, webhook: &Webhook) -> Result<(), GatewayError>;
+    async fn update_webhook(&self, id: &Uuid, webhook: &Webhook) -> Result<(), GatewayError>;
+    async fn delete_webhook(&self, id: &Uuid) -> Result<bool, GatewayError>;
+    async fn list_webhook_deliveries(&self, webhook_id: &Uuid, limit: u32) -> Result<Vec<WebhookDelivery>, GatewayError>;
+    async fn create_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<(), GatewayError>;
+
+    // ── Load Tests ──
+
+    async fn list_load_tests(&self, service_id: &Uuid) -> Result<Vec<LoadTest>, GatewayError>;
+    async fn get_load_test(&self, id: &Uuid) -> Result<Option<LoadTest>, GatewayError>;
+    async fn create_load_test(&self, test: &LoadTest) -> Result<(), GatewayError>;
+    async fn update_load_test(&self, id: &Uuid, test: &LoadTest) -> Result<(), GatewayError>;
+    async fn delete_load_test(&self, id: &Uuid) -> Result<bool, GatewayError>;
+
+    // ── Marketplace ──
+
+    async fn list_marketplace_plugins(&self) -> Result<Vec<MarketplacePlugin>, GatewayError>;
+    async fn get_marketplace_plugin(&self, id: &Uuid) -> Result<Option<MarketplacePlugin>, GatewayError>;
+    async fn create_marketplace_plugin(&self, plugin: &MarketplacePlugin) -> Result<(), GatewayError>;
+    async fn update_marketplace_plugin(&self, id: &Uuid, plugin: &MarketplacePlugin) -> Result<(), GatewayError>;
+    async fn delete_marketplace_plugin(&self, id: &Uuid) -> Result<bool, GatewayError>;
+
+    // ── Cost Analytics ──
+
+    async fn list_cost_records(&self, service_id: &Uuid, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<CostRecord>, GatewayError>;
+    async fn upsert_cost_record(&self, record: &CostRecord) -> Result<(), GatewayError>;
+
+    // ── Cluster ──
+
+    async fn list_cluster_nodes(&self) -> Result<Vec<ClusterNode>, GatewayError>;
+    async fn get_cluster_node(&self, id: &Uuid) -> Result<Option<ClusterNode>, GatewayError>;
+    async fn upsert_cluster_node(&self, node: &ClusterNode) -> Result<(), GatewayError>;
+    async fn delete_cluster_node(&self, id: &Uuid) -> Result<bool, GatewayError>;
+
+    // ── Rate Limit Simulator ──
+
+    async fn list_rate_limit_simulations(&self, service_id: &Uuid) -> Result<Vec<RateLimitSimulation>, GatewayError>;
+    async fn create_rate_limit_simulation(&self, sim: &RateLimitSimulation) -> Result<(), GatewayError>;
+    async fn get_rate_limit_simulation(&self, id: &Uuid) -> Result<Option<RateLimitSimulation>, GatewayError>;
+
+    // ── PKI / Certificates ──
+
+    async fn list_certificates(&self, service_id: Option<&Uuid>) -> Result<Vec<Certificate>, GatewayError>;
+    async fn get_certificate(&self, id: &Uuid) -> Result<Option<Certificate>, GatewayError>;
+    async fn create_certificate(&self, cert: &Certificate) -> Result<(), GatewayError>;
+    async fn update_certificate(&self, id: &Uuid, cert: &Certificate) -> Result<(), GatewayError>;
+    async fn delete_certificate(&self, id: &Uuid) -> Result<bool, GatewayError>;
+
+    // ── Consumer key regeneration ──
+
+    async fn update_consumer(&self, id: &Uuid, consumer: &Consumer) -> Result<(), GatewayError>;
+}
+
+#[derive(Debug, Default)]
+pub struct LogFilter {
+    pub service_id: Option<Uuid>,
+    pub route_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub level: Option<String>,
+    pub search: Option<String>,
+    pub limit: Option<u32>,
 }
 
 /// Build the appropriate repository implementation from the configured URL.

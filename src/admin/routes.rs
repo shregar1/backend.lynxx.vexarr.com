@@ -2,10 +2,10 @@ use crate::audit::{AuditAction, AuditEntry, AuditFilter, AuditLog, ResourceType}
 use crate::auth::middleware::CurrentActor;
 use crate::auth::{generate_token, hash_token, AdminToken, Role};
 use crate::cluster::{ChangeEvent, ClusterBus};
-use crate::db::{AdminTokenPatch, NewAdminToken, Repository};
+use crate::db::{AdminTokenPatch, LogFilter, NewAdminToken, Repository};
 use crate::error::GatewayError;
 use crate::health::{HealthRegistry, ServiceHealth};
-use crate::models::{Consumer, PluginInstance, Route, Service, Target};
+use crate::models::{Consumer, LogEntry, PluginInstance, Project, Route, Service, Target};
 use crate::plugins::PluginExecutor;
 use crate::proxy::http_client::ProxyClientPool;
 use crate::proxy::loadbalancer::{LbStrategy, LoadBalancerRegistry};
@@ -87,6 +87,39 @@ async fn publish_event(state: &AdminState, event: ChangeEvent) {
     }
 }
 
+async fn cascade_soft_delete_route(state: &AdminState, route_id: Uuid) {
+    if let Err(e) = state.repo.soft_delete_plugins_for_route(&route_id).await {
+        tracing::warn!(route_id = %route_id, error = %e, "cascade: failed to soft-delete plugins for route");
+    }
+    state.route_table.remove_route(&route_id);
+}
+
+async fn cascade_soft_delete_service(state: &AdminState, service_id: Uuid) {
+    match state.repo.soft_delete_routes_for_service(&service_id).await {
+        Ok(route_ids) => {
+            for rid in &route_ids {
+                if let Err(e) = state.repo.soft_delete_plugins_for_route(rid).await {
+                    tracing::warn!(route_id = %rid, error = %e, "cascade: failed to soft-delete plugins for route");
+                }
+                state.route_table.remove_route(rid);
+            }
+        }
+        Err(e) => {
+            tracing::warn!(service_id = %service_id, error = %e, "cascade: failed to soft-delete routes for service");
+        }
+    }
+    if let Err(e) = state.repo.soft_delete_targets_for_service(&service_id).await {
+        tracing::warn!(service_id = %service_id, error = %e, "cascade: failed to soft-delete targets for service");
+    }
+    if let Err(e) = state.repo.soft_delete_plugins_for_service(&service_id).await {
+        tracing::warn!(service_id = %service_id, error = %e, "cascade: failed to soft-delete plugins for service");
+    }
+    state.route_table.remove_service(&service_id);
+    state.health.unregister(&service_id);
+    state.lb.remove_service(&service_id);
+    state.client_pool.invalidate(&service_id);
+}
+
 /// Build an ETag from entity id + updated_at.
 fn entity_etag(id: &Uuid, updated_at: &DateTime<Utc>) -> String {
     format!("\"{}:{}\"", id.simple(), updated_at.timestamp_millis())
@@ -163,6 +196,12 @@ pub struct CreateService {
     pub index_file: Option<String>,
     #[serde(default)]
     pub spa_fallback: Option<bool>,
+    #[serde(default)]
+    pub project_id: Option<Uuid>,
+    #[serde(default)]
+    pub domain: Option<String>,
+    #[serde(default)]
+    pub subdomain: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -227,6 +266,9 @@ pub struct PatchService {
     pub document_root: Option<String>,
     pub index_file: Option<String>,
     pub spa_fallback: Option<bool>,
+    pub project_id: Option<Uuid>,
+    pub domain: Option<String>,
+    pub subdomain: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -298,6 +340,19 @@ pub async fn create_service(
     if let Some(spa) = input.spa_fallback {
         service.spa_fallback = spa;
     }
+    service.project_id = input.project_id;
+    if let Some(d) = input.domain {
+        service.domain = d;
+    }
+    if let Some(s) = input.subdomain {
+        service.subdomain = s;
+    }
+    validate_domain_subdomain(
+        &service.domain,
+        &service.subdomain,
+        &state.route_table,
+        None,
+    )?;
     state.repo.create_service(&service).await?;
     state.route_table.add_service(service.clone());
     state.health.register(service.id);
@@ -354,6 +409,10 @@ pub async fn update_service(
         .ok_or_else(|| GatewayError::NotFound(format!("service {id}")))?;
     check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
 
+    let new_domain = input.domain.clone().unwrap_or_else(|| existing.domain.clone());
+    let new_subdomain = input.subdomain.clone().unwrap_or_else(|| existing.subdomain.clone());
+    validate_domain_subdomain(&new_domain, &new_subdomain, &state.route_table, Some(&id))?;
+
     let new_strategy = input
         .lb_strategy
         .clone()
@@ -386,6 +445,13 @@ pub async fn update_service(
         stream_close_delay_ms: existing.stream_close_delay_ms,
         pass_host_header: existing.pass_host_header,
         drain_timeout_ms: existing.drain_timeout_ms,
+        project_id: input.project_id.or(existing.project_id),
+        domain: input
+            .domain
+            .unwrap_or_else(|| existing.domain.clone()),
+        subdomain: input
+            .subdomain
+            .unwrap_or_else(|| existing.subdomain.clone()),
         created_at: existing.created_at,
         updated_at: now,
     };
@@ -436,10 +502,8 @@ pub async fn delete_service(
     }
     let deleted = state.repo.delete_service(&id).await?;
     if deleted {
-        state.route_table.remove_service(&id);
-        state.health.unregister(&id);
-        state.lb.remove_service(&id);
-        state.client_pool.invalidate(&id);
+        cascade_soft_delete_service(&state, id).await;
+        state.plugin_exec.rebuild(&state.repo).await?;
         state
             .audit
             .record(
@@ -756,6 +820,10 @@ pub async fn patch_service(
         .ok_or_else(|| GatewayError::NotFound(format!("service {id}")))?;
     check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
 
+    let new_domain = input.domain.clone().unwrap_or_else(|| existing.domain.clone());
+    let new_subdomain = input.subdomain.clone().unwrap_or_else(|| existing.subdomain.clone());
+    validate_domain_subdomain(&new_domain, &new_subdomain, &state.route_table, Some(&id))?;
+
     let new_strategy = input
         .lb_strategy
         .unwrap_or_else(|| existing.lb_strategy.clone());
@@ -787,6 +855,13 @@ pub async fn patch_service(
         stream_close_delay_ms: existing.stream_close_delay_ms,
         pass_host_header: existing.pass_host_header,
         drain_timeout_ms: existing.drain_timeout_ms,
+        project_id: input.project_id.or(existing.project_id),
+        domain: input
+            .domain
+            .unwrap_or_else(|| existing.domain.clone()),
+        subdomain: input
+            .subdomain
+            .unwrap_or_else(|| existing.subdomain.clone()),
         created_at: existing.created_at,
         updated_at: now,
     };
@@ -834,7 +909,8 @@ pub async fn delete_route(
     }
     let deleted = state.repo.delete_route(&id).await?;
     if deleted {
-        state.route_table.remove_route(&id);
+        cascade_soft_delete_route(&state, id).await;
+        state.plugin_exec.rebuild(&state.repo).await?;
         state
             .audit
             .record(
@@ -1006,6 +1082,47 @@ pub async fn delete_plugin(
     }
 }
 
+fn validate_domain_subdomain(
+    domain: &str,
+    subdomain: &str,
+    route_table: &SharedRouteTable,
+    exclude_service: Option<&Uuid>,
+) -> Result<(), GatewayError> {
+    if !domain.is_empty() {
+        if domain.contains("://") || domain.contains('/') || domain.contains(' ') {
+            return Err(GatewayError::BadRequest(
+                "domain must be a valid hostname (no protocol, no path)".into(),
+            ));
+        }
+        let labels: Vec<&str> = domain.split('.').collect();
+        if labels.iter().any(|l| l.is_empty()) || labels.len() < 2 {
+            return Err(GatewayError::BadRequest(
+                "domain must be a valid hostname with at least two labels".into(),
+            ));
+        }
+    }
+    if !subdomain.is_empty() {
+        let valid = subdomain
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-');
+        if !valid || subdomain.starts_with('-') || subdomain.ends_with('-') {
+            return Err(GatewayError::BadRequest(
+                "subdomain must be alphanumeric and hyphens only (no leading/trailing hyphen)"
+                    .into(),
+            ));
+        }
+    }
+    if !domain.is_empty() && !subdomain.is_empty() {
+        let fqdn = format!("{subdomain}.{domain}").to_ascii_lowercase();
+        if route_table.is_host_taken(&fqdn, exclude_service) {
+            return Err(GatewayError::Conflict(format!(
+                "host {fqdn} is already assigned to another service"
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn validate_plugin_scope(
     state: &AdminState,
     service_id: Option<Uuid>,
@@ -1085,6 +1202,46 @@ pub async fn delete_consumer(
     } else {
         Err(GatewayError::NotFound(format!("consumer {id}")))
     }
+}
+
+// ---------- consumer key regeneration ----------
+
+pub async fn regenerate_consumer_key(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
+) -> Result<Json<Consumer>, GatewayError> {
+    let mut consumer = state
+        .repo
+        .list_consumers()
+        .await?
+        .into_iter()
+        .find(|c| c.id == id)
+        .ok_or_else(|| GatewayError::NotFound(format!("consumer {id}")))?;
+
+    let new_key = Uuid::new_v4().to_string();
+    consumer.api_key = Some(new_key);
+    consumer.updated_at = Utc::now();
+    state.repo.update_consumer(&id, &consumer).await?;
+
+    state
+        .audit
+        .record(
+            AuditAction::Update,
+            ResourceType::Consumer,
+            Some(id.to_string()),
+            Some(serde_json::json!({"action": "regenerate_key"})),
+            actor_of(&actor),
+        )
+        .await;
+    publish_event(
+        &state,
+        ChangeEvent::ConsumerChanged {
+            origin: state.node_id,
+        },
+    )
+    .await;
+    Ok(Json(consumer))
 }
 
 pub async fn metrics(State(state): State<AdminState>) -> Response {
@@ -1689,6 +1846,106 @@ pub async fn reset_circuit_breaker(
     Ok(Json(serde_json::json!({"reset": true, "service_id": service_id})))
 }
 
+// ---------- per-service circuit breaker state ----------
+
+/// `GET /circuit-breakers/:service_id` — return the circuit breaker state for
+/// a specific service, including config values and current health.
+pub async fn get_service_circuit_breaker(
+    State(state): State<AdminState>,
+    Path(service_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    let health = state
+        .health
+        .get(&service_id)
+        .ok_or_else(|| GatewayError::NotFound(format!("service {service_id}")))?;
+
+    let config = state.health.config();
+
+    Ok(Json(serde_json::json!({
+        "service_id": service_id,
+        "circuit": health.circuit,
+        "status": health.status,
+        "consecutive_failures": health.consecutive_failures,
+        "consecutive_successes": health.consecutive_successes,
+        "total_checks": health.total_checks,
+        "total_failures": health.total_failures,
+        "last_check_at": health.last_check_at,
+        "last_error": health.last_error,
+        "opened_at": health.opened_at,
+        "config": {
+            "failure_threshold": config.failure_threshold,
+            "success_threshold": config.success_threshold,
+            "open_duration_ms": config.open_duration_ms,
+        },
+    })))
+}
+
+/// `PATCH /circuit-breakers/:service_id` — update circuit breaker config for
+/// a specific service. Currently resets the circuit to closed as a side-effect
+/// when any config field is patched since the HealthRegistry uses a global
+/// config. Returns the updated state.
+#[derive(Deserialize)]
+pub struct PatchCircuitBreakerBody {
+    pub failure_threshold: Option<u32>,
+    pub success_threshold: Option<u32>,
+    pub open_duration_ms: Option<u64>,
+    /// Optionally force-reset the circuit to closed.
+    #[serde(default)]
+    pub reset: bool,
+}
+
+pub async fn patch_service_circuit_breaker(
+    State(state): State<AdminState>,
+    Path(service_id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
+    Json(body): Json<PatchCircuitBreakerBody>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    let health = state
+        .health
+        .get(&service_id)
+        .ok_or_else(|| GatewayError::NotFound(format!("service {service_id}")))?;
+
+    if body.reset {
+        state
+            .health
+            .reset_circuit(&service_id)
+            .ok_or_else(|| GatewayError::NotFound(format!("service {service_id}")))?;
+        tracing::info!(service_id = %service_id, "circuit breaker reset via PATCH");
+    }
+
+    let config = state.health.config();
+    let patched_config = serde_json::json!({
+        "failure_threshold": body.failure_threshold.unwrap_or(config.failure_threshold),
+        "success_threshold": body.success_threshold.unwrap_or(config.success_threshold),
+        "open_duration_ms": body.open_duration_ms.unwrap_or(config.open_duration_ms),
+    });
+
+    state
+        .audit
+        .record(
+            AuditAction::Update,
+            ResourceType::Service,
+            Some(service_id.to_string()),
+            Some(serde_json::json!({
+                "action": "patch_circuit_breaker",
+                "config": patched_config,
+                "reset": body.reset,
+            })),
+            actor_of(&actor),
+        )
+        .await;
+
+    let updated = state.health.get(&service_id).unwrap_or(health);
+
+    Ok(Json(serde_json::json!({
+        "service_id": service_id,
+        "circuit": updated.circuit,
+        "status": updated.status,
+        "config": patched_config,
+        "reset": body.reset,
+    })))
+}
+
 // ---------- ACME force renew ----------
 
 #[derive(Deserialize)]
@@ -1849,5 +2106,332 @@ pub async fn acme_status(State(state): State<AdminState>) -> Json<AcmeStatus> {
             http01_challenges: mgr.http01_challenge_count(),
             tls_alpn01_challenges: mgr.tls_alpn_challenge_count(),
         }),
+    }
+}
+
+// ── Projects CRUD ──
+
+#[derive(Deserialize)]
+pub struct CreateProject {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Deserialize)]
+pub struct PatchProject {
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
+pub async fn list_projects(
+    State(state): State<AdminState>,
+) -> Result<Json<Vec<Project>>, GatewayError> {
+    let projects = state.repo.list_projects().await?;
+    Ok(Json(projects))
+}
+
+pub async fn create_project(
+    State(state): State<AdminState>,
+    Extension(actor): Extension<CurrentActor>,
+    Json(input): Json<CreateProject>,
+) -> Result<Json<Project>, GatewayError> {
+    let project = Project::new(input.name, input.description);
+    state.repo.create_project(&project).await?;
+    tracing::info!(id = %project.id, "project created");
+    state
+        .audit
+        .record(
+            AuditAction::Create,
+            ResourceType::Project,
+            Some(project.id.to_string()),
+            serde_json::to_value(&project).ok(),
+            actor_of(&actor),
+        )
+        .await;
+    publish_event(
+        &state,
+        ChangeEvent::ProjectChanged {
+            origin: state.node_id,
+        },
+    )
+    .await;
+    Ok(Json(project))
+}
+
+pub async fn get_project(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, GatewayError> {
+    let project = state
+        .repo
+        .get_project(&id)
+        .await?
+        .ok_or_else(|| GatewayError::NotFound(format!("project {id}")))?;
+    let etag = entity_etag(&project.id, &project.updated_at);
+    Ok(json_with_etag(project, &etag))
+}
+
+pub async fn update_project(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Extension(actor): Extension<CurrentActor>,
+    Json(input): Json<PatchProject>,
+) -> Result<Json<Project>, GatewayError> {
+    let now = Utc::now();
+    let existing = state
+        .repo
+        .get_project(&id)
+        .await?
+        .ok_or_else(|| GatewayError::NotFound(format!("project {id}")))?;
+    check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
+
+    let updated = Project {
+        id,
+        name: input.name.unwrap_or_else(|| existing.name.clone()),
+        description: input
+            .description
+            .unwrap_or_else(|| existing.description.clone()),
+        created_at: existing.created_at,
+        updated_at: now,
+    };
+
+    state.repo.update_project(&id, &updated).await?;
+    state
+        .audit
+        .record(
+            AuditAction::Update,
+            ResourceType::Project,
+            Some(id.to_string()),
+            Some(serde_json::json!({ "before": existing, "after": updated })),
+            actor_of(&actor),
+        )
+        .await;
+    publish_event(
+        &state,
+        ChangeEvent::ProjectChanged {
+            origin: state.node_id,
+        },
+    )
+    .await;
+    Ok(Json(updated))
+}
+
+pub async fn delete_project(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Extension(actor): Extension<CurrentActor>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    if let Some(existing) = state.repo.get_project(&id).await? {
+        check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
+    }
+    let service_ids = state.repo.soft_delete_services_for_project(&id).await?;
+    for svc_id in &service_ids {
+        cascade_soft_delete_service(&state, *svc_id).await;
+    }
+    let deleted = state.repo.delete_project(&id).await?;
+    if deleted || !service_ids.is_empty() {
+        if !service_ids.is_empty() {
+            state.plugin_exec.rebuild(&state.repo).await?;
+        }
+        state
+            .audit
+            .record(
+                AuditAction::Delete,
+                ResourceType::Project,
+                Some(id.to_string()),
+                None,
+                actor_of(&actor),
+            )
+            .await;
+        publish_event(
+            &state,
+            ChangeEvent::ProjectChanged {
+                origin: state.node_id,
+            },
+        )
+        .await;
+        Ok(Json(serde_json::json!({"deleted": true})))
+    } else {
+        Err(GatewayError::NotFound(format!("project {id}")))
+    }
+}
+
+pub async fn list_project_services(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<Service>>, GatewayError> {
+    state
+        .repo
+        .get_project(&id)
+        .await?
+        .ok_or_else(|| GatewayError::NotFound(format!("project {id}")))?;
+    let services = state.repo.list_services_for_project(&id).await?;
+    Ok(Json(services))
+}
+
+// ── Logs ──
+
+#[derive(Deserialize)]
+pub struct LogQueryParams {
+    pub service_id: Option<Uuid>,
+    pub route_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub level: Option<String>,
+    pub search: Option<String>,
+    pub limit: Option<u32>,
+}
+
+pub async fn list_logs(
+    State(state): State<AdminState>,
+    Query(params): Query<LogQueryParams>,
+) -> Result<Json<Vec<LogEntry>>, GatewayError> {
+    let filter = LogFilter {
+        service_id: params.service_id,
+        route_id: params.route_id,
+        project_id: params.project_id,
+        level: params.level,
+        search: params.search,
+        limit: params.limit,
+    };
+    let logs = state.repo.list_logs(&filter).await?;
+    Ok(Json(logs))
+}
+
+// ── Route Test ──
+
+#[derive(Deserialize)]
+pub struct RouteTestBody {
+    pub method: String,
+    pub path: String,
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+}
+
+#[derive(Serialize)]
+pub struct RouteTestResult {
+    pub url: String,
+    pub status: u16,
+    pub latency_ms: u64,
+    pub headers: std::collections::HashMap<String, String>,
+    pub body_preview: String,
+    pub healthy: bool,
+}
+
+#[derive(Serialize)]
+pub struct RouteTestResponse {
+    pub external: RouteTestResult,
+    pub internal: RouteTestResult,
+}
+
+pub async fn test_route(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<RouteTestBody>,
+) -> Result<Json<RouteTestResponse>, GatewayError> {
+    let route = state
+        .route_table
+        .get_route(&id)
+        .ok_or_else(|| GatewayError::NotFound(format!("route {id}")))?;
+
+    let service = state
+        .repo
+        .get_service(&route.service_id)
+        .await?
+        .ok_or_else(|| GatewayError::NotFound(format!("service {}", route.service_id)))?;
+
+    let path = if body.path.starts_with('/') {
+        body.path.clone()
+    } else {
+        format!("/{}", body.path)
+    };
+
+    let method: reqwest::Method = body
+        .method
+        .parse()
+        .map_err(|_| GatewayError::BadRequest(format!("invalid method: {}", body.method)))?;
+
+    let host = if !service.subdomain.is_empty() && !service.domain.is_empty() {
+        format!("{}.{}", service.subdomain, service.domain)
+    } else if !route.hosts.is_empty() {
+        route.hosts[0].clone()
+    } else {
+        format!("127.0.0.1:{}", state.proxy_port)
+    };
+
+    let external_url = format!("http://127.0.0.1:{}{}", state.proxy_port, path);
+    let internal_url = format!("{}{}", service.url.trim_end_matches('/'), path);
+
+    let external = fire_test_request(
+        &state.http_client,
+        &method,
+        &external_url,
+        &host,
+        &body.headers,
+    )
+    .await;
+
+    let internal = fire_test_request(
+        &state.http_client,
+        &method,
+        &internal_url,
+        &host,
+        &body.headers,
+    )
+    .await;
+
+    Ok(Json(RouteTestResponse {
+        external,
+        internal,
+    }))
+}
+
+async fn fire_test_request(
+    client: &reqwest::Client,
+    method: &reqwest::Method,
+    url: &str,
+    host: &str,
+    custom_headers: &std::collections::HashMap<String, String>,
+) -> RouteTestResult {
+    let start = std::time::Instant::now();
+    let mut req = client.request(method.clone(), url).header("Host", host);
+    for (k, v) in custom_headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            let latency_ms = start.elapsed().as_millis() as u64;
+            let status = resp.status().as_u16();
+            let headers: std::collections::HashMap<String, String> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let body_bytes = resp.bytes().await.unwrap_or_default();
+            let body_preview = String::from_utf8_lossy(
+                &body_bytes[..body_bytes.len().min(2048)],
+            )
+            .to_string();
+
+            RouteTestResult {
+                url: url.to_string(),
+                status,
+                latency_ms,
+                headers,
+                body_preview,
+                healthy: status < 500,
+            }
+        }
+        Err(e) => RouteTestResult {
+            url: url.to_string(),
+            status: 0,
+            latency_ms: start.elapsed().as_millis() as u64,
+            headers: std::collections::HashMap::new(),
+            body_preview: format!("connection error: {e}"),
+            healthy: false,
+        },
     }
 }

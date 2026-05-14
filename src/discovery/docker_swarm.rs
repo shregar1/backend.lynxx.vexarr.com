@@ -504,6 +504,9 @@ impl DockerSwarmProvider {
             stream_close_delay_ms: None,
             pass_host_header: None,
             drain_timeout_ms: None,
+            project_id: None,
+            domain: String::new(),
+            subdomain: String::new(),
             created_at: now,
             updated_at: now,
         };
