@@ -252,6 +252,15 @@ pub struct GatewaySettings {
     /// UDP L4 routing configuration.
     #[serde(default)]
     pub udp: UdpConfig,
+
+    #[serde(default = "default_drain_timeout")]
+    pub default_drain_timeout_ms: u64,
+    #[serde(default = "default_deploy_hc_interval")]
+    pub deploy_health_check_interval_ms: u64,
+    #[serde(default = "default_deploy_hc_timeout")]
+    pub deploy_health_check_timeout_ms: u64,
+    #[serde(default = "default_deploy_hc_threshold")]
+    pub deploy_health_check_threshold: u32,
 }
 
 /// Webhook URLs called on upstream health transitions.
@@ -559,7 +568,9 @@ impl Default for Dns01Config {
 }
 
 fn default_dns_propagation_timeout() -> u64 {
-    120
+    // Must exceed typical SOA negative-cache TTL (300s) to avoid
+    // failing on freshly created records whose absence was cached.
+    360
 }
 
 /// Admin API TLS settings. When enabled, the admin port serves HTTPS
@@ -1025,6 +1036,10 @@ fn default_gateway() -> GatewaySettings {
         filesystems: HashMap::new(),
         tcp: TcpConfig::default(),
         udp: UdpConfig::default(),
+        default_drain_timeout_ms: default_drain_timeout(),
+        deploy_health_check_interval_ms: default_deploy_hc_interval(),
+        deploy_health_check_timeout_ms: default_deploy_hc_timeout(),
+        deploy_health_check_threshold: default_deploy_hc_threshold(),
     }
 }
 
@@ -1140,6 +1155,22 @@ fn default_bind_address() -> String {
 
 fn default_true_bool() -> bool {
     true
+}
+
+fn default_drain_timeout() -> u64 {
+    30_000
+}
+
+fn default_deploy_hc_interval() -> u64 {
+    2_000
+}
+
+fn default_deploy_hc_timeout() -> u64 {
+    3_000
+}
+
+fn default_deploy_hc_threshold() -> u32 {
+    3
 }
 
 /// Detected config file format based on extension.

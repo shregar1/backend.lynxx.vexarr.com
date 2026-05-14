@@ -748,20 +748,28 @@ impl AcmeManager {
             ));
         }
 
-        let reachable = self.filter_resolvable_domains(domains).await;
-        if reachable.is_empty() {
-            return Err(GatewayError::Internal(
-                "ACME: no configured domains resolve to this server's public IP".into(),
-            ));
-        }
-        if reachable.len() < domains.len() {
-            let skipped: Vec<&String> = domains.iter().filter(|d| !reachable.contains(d)).collect();
-            tracing::warn!(
-                skipped = ?skipped,
-                "ACME: some configured domains don't resolve here; proceeding with {:?}",
-                reachable
-            );
-        }
+        // DNS-01 proves zone control via TXT records — domains do NOT need
+        // to resolve to this server.  Only filter for HTTP-01 / TLS-ALPN-01.
+        let reachable = if self.config.challenge_type == "dns-01" {
+            tracing::info!("DNS-01 mode: skipping domain resolution pre-flight");
+            domains.clone()
+        } else {
+            let r = self.filter_resolvable_domains(domains).await;
+            if r.is_empty() {
+                return Err(GatewayError::Internal(
+                    "ACME: no configured domains resolve to this server's public IP".into(),
+                ));
+            }
+            if r.len() < domains.len() {
+                let skipped: Vec<&String> = domains.iter().filter(|d| !r.contains(d)).collect();
+                tracing::warn!(
+                    skipped = ?skipped,
+                    "ACME: some configured domains don't resolve here; proceeding with {:?}",
+                    r
+                );
+            }
+            r
+        };
 
         tracing::info!(domains = ?reachable, "starting ACME certificate request");
 
@@ -991,8 +999,21 @@ impl AcmeManager {
                     let _record_id = provider
                         .set_txt_record(&fqdn, &dns_value)
                         .await?;
-                    dns_challenge::wait_for_propagation(&fqdn, &dns_value)
-                        .await?;
+
+                    // Wait the configured propagation delay before polling,
+                    // then poll until visible or timeout.
+                    let delay = self.config.dns01.propagation_delay_secs;
+                    let timeout = self.config.dns01.propagation_timeout_secs;
+                    tracing::info!(
+                        fqdn = %fqdn,
+                        delay_secs = delay,
+                        timeout_secs = timeout,
+                        "DNS-01: waiting for TXT propagation"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                    dns_challenge::wait_for_propagation_with_timeout(
+                        &fqdn, &dns_value, timeout,
+                    ).await?;
                 }
                 _ => {
                     return Err(GatewayError::Internal(format!(

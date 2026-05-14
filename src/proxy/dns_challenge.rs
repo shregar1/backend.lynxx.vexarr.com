@@ -293,18 +293,33 @@ pub async fn wait_for_propagation(
     fqdn: &str,
     expected: &str,
 ) -> Result<(), GatewayError> {
+    wait_for_propagation_with_timeout(fqdn, expected, PROPAGATION_TIMEOUT_SECS).await
+}
+
+pub async fn wait_for_propagation_with_timeout(
+    fqdn: &str,
+    expected: &str,
+    timeout_secs: u64,
+) -> Result<(), GatewayError> {
     let resolver = hickory_resolver::TokioAsyncResolver::tokio(
         hickory_resolver::config::ResolverConfig::default(),
-        hickory_resolver::config::ResolverOpts::default(),
+        {
+            let mut opts = hickory_resolver::config::ResolverOpts::default();
+            // Disable negative caching so we detect freshly-created records
+            // faster than the SOA minimum TTL would normally allow.
+            opts.negative_min_ttl = Some(std::time::Duration::from_secs(0));
+            opts.negative_max_ttl = Some(std::time::Duration::from_secs(5));
+            opts
+        },
     );
 
     let deadline =
-        tokio::time::Instant::now() + std::time::Duration::from_secs(PROPAGATION_TIMEOUT_SECS);
+        tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     loop {
         if tokio::time::Instant::now() >= deadline {
             return Err(GatewayError::Internal(format!(
-                "DNS propagation timeout for {fqdn} (waited {PROPAGATION_TIMEOUT_SECS}s)"
+                "DNS propagation timeout for {fqdn} (waited {timeout_secs}s)"
             )));
         }
 
@@ -424,14 +439,16 @@ impl DnsProvider for DigitalOceanDns {
 #[derive(Debug)]
 pub struct GoogleCloudDns {
     token: String,
+    project: String,
     managed_zone: String,
     client: reqwest::Client,
 }
 
 impl GoogleCloudDns {
-    pub fn new(token: String, managed_zone: String) -> Self {
+    pub fn new(token: String, project: String, managed_zone: String) -> Self {
         Self {
             token,
+            project,
             managed_zone,
             client: reqwest::Client::new(),
         }
@@ -445,15 +462,37 @@ impl DnsProvider for GoogleCloudDns {
         fqdn: &str,
         value: &str,
     ) -> Result<String, GatewayError> {
-        let acme_fqdn = format!("{}.", build_acme_dns_name(fqdn));
-        let project = &self.managed_zone;
+        // fqdn is already `_acme-challenge.{domain}` from the caller
+        let acme_fqdn = format!("{fqdn}.");
+        let project = &self.project;
+        let zone = &self.managed_zone;
+        let url = format!(
+            "https://dns.googleapis.com/dns/v1/projects/{project}/managedZones/{zone}/changes",
+        );
+
+        // First try to delete any existing TXT record at this name so
+        // we don't fail with "already exists" on retry / restart.
+        if let Ok(existing) = self.lookup_txt(&acme_fqdn).await {
+            tracing::debug!(fqdn = %acme_fqdn, "gcloud dns: removing stale TXT before create");
+            let _ = self
+                .client
+                .post(&url)
+                .bearer_auth(&self.token)
+                .json(&serde_json::json!({
+                    "deletions": [{
+                        "name": &acme_fqdn,
+                        "type": "TXT",
+                        "ttl": TXT_TTL,
+                        "rrdatas": existing,
+                    }]
+                }))
+                .send()
+                .await;
+        }
 
         let resp = self
             .client
-            .post(format!(
-                "https://dns.googleapis.com/dns/v1/projects/{project}/managedZones/{}/changes",
-                project
-            ))
+            .post(&url)
             .bearer_auth(&self.token)
             .json(&serde_json::json!({
                 "additions": [{
@@ -474,18 +513,80 @@ impl DnsProvider for GoogleCloudDns {
             )));
         }
 
-        let _ = wait_for_propagation(acme_fqdn.trim_end_matches('.'), value).await;
+        // Propagation is checked by the caller (issue_order); don't
+        // duplicate the wait here — it wastes time against the DNS
+        // negative-cache TTL window.
         Ok(acme_fqdn)
     }
 
     async fn clear_txt_record(&self, record_id: &str) -> Result<(), GatewayError> {
-        // Google Cloud DNS requires a deletion change; simplified here.
-        tracing::debug!(record = %record_id, "gcloud dns cleanup (manual)");
+        let project = &self.project;
+        let zone = &self.managed_zone;
+
+        // record_id is the FQDN with trailing dot (e.g. "_acme-challenge.example.com.")
+        if let Ok(existing) = self.lookup_txt(record_id).await {
+            let resp = self
+                .client
+                .post(format!(
+                    "https://dns.googleapis.com/dns/v1/projects/{project}/managedZones/{zone}/changes",
+                ))
+                .bearer_auth(&self.token)
+                .json(&serde_json::json!({
+                    "deletions": [{
+                        "name": record_id,
+                        "type": "TXT",
+                        "ttl": TXT_TTL,
+                        "rrdatas": existing,
+                    }]
+                }))
+                .send()
+                .await
+                .map_err(|e| GatewayError::Internal(format!("gcloud dns cleanup: {e}")))?;
+
+            if !resp.status().is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!(record = %record_id, body = %body, "gcloud dns cleanup failed");
+            } else {
+                tracing::debug!(record = %record_id, "gcloud dns cleanup ok");
+            }
+        }
         Ok(())
     }
 
     fn provider_name(&self) -> &'static str {
         "gcloud"
+    }
+}
+
+impl GoogleCloudDns {
+    /// Look up existing TXT rrdatas for a record so we can delete it.
+    async fn lookup_txt(&self, fqdn: &str) -> Result<Vec<String>, GatewayError> {
+        let project = &self.project;
+        let zone = &self.managed_zone;
+        let resp = self
+            .client
+            .get(format!(
+                "https://dns.googleapis.com/dns/v1/projects/{project}/managedZones/{zone}/rrsets/{fqdn}/TXT",
+            ))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| GatewayError::Internal(format!("gcloud dns lookup: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(GatewayError::Internal("no existing record".into()));
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| GatewayError::Internal(format!("gcloud dns parse: {e}")))?;
+        let rrdatas = body
+            .get("rrdatas")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        Ok(rrdatas)
     }
 }
 
@@ -1452,17 +1553,18 @@ pub fn from_config(
             } else {
                 cfg.api_token.clone()
             };
-            let project = if cfg.zone_id.is_empty() {
-                std::env::var("GCLOUD_PROJECT").unwrap_or_default()
+            let project = std::env::var("GCLOUD_PROJECT").unwrap_or_default();
+            let managed_zone = if cfg.zone_id.is_empty() {
+                std::env::var("GCLOUD_DNS_ZONE").unwrap_or_default()
             } else {
                 cfg.zone_id.clone()
             };
-            if token.is_empty() || project.is_empty() {
+            if token.is_empty() || project.is_empty() || managed_zone.is_empty() {
                 return Err(GatewayError::ConfigError(
-                    "dns-01 gcloud requires api_token and zone_id (managed zone)".into(),
+                    "dns-01 gcloud requires api_token (or GCLOUD_DNS_TOKEN), GCLOUD_PROJECT, and zone_id (or GCLOUD_DNS_ZONE)".into(),
                 ));
             }
-            Ok(Arc::new(GoogleCloudDns::new(token, project)))
+            Ok(Arc::new(GoogleCloudDns::new(token, project, managed_zone)))
         }
         "hetzner" => {
             let token = if cfg.api_token.is_empty() {
