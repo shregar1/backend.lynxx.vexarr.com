@@ -30,6 +30,9 @@ use uuid::Uuid;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum ChangeEvent {
+    ProjectChanged {
+        origin: Uuid,
+    },
     ServiceCreated {
         id: Uuid,
         origin: Uuid,
@@ -80,7 +83,8 @@ impl ChangeEvent {
     /// events on the subscriber side.
     pub fn origin(&self) -> Uuid {
         match self {
-            ChangeEvent::ServiceCreated { origin, .. }
+            ChangeEvent::ProjectChanged { origin }
+            | ChangeEvent::ServiceCreated { origin, .. }
             | ChangeEvent::ServiceUpdated { origin, .. }
             | ChangeEvent::ServiceDeleted { origin, .. }
             | ChangeEvent::RouteCreated { origin, .. }
@@ -96,6 +100,7 @@ impl ChangeEvent {
     /// Short tag for log messages.
     pub fn kind(&self) -> &'static str {
         match self {
+            ChangeEvent::ProjectChanged { .. } => "project.changed",
             ChangeEvent::ServiceCreated { .. } => "service.created",
             ChangeEvent::ServiceUpdated { .. } => "service.updated",
             ChangeEvent::ServiceDeleted { .. } => "service.deleted",

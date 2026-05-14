@@ -1,7 +1,17 @@
+pub mod alerts;
+pub mod analytics;
 pub mod config_api;
+pub mod consumer_groups;
 pub mod deploy;
+pub mod docs;
+pub mod error_pages;
+pub mod graph;
+pub mod ip_rules;
+pub mod probes;
 pub mod profiling;
+pub mod replay;
 pub mod routes;
+pub mod snapshots;
 
 use crate::audit::AuditLog;
 use crate::auth::middleware::{extract_token, require_role};
@@ -16,16 +26,19 @@ use crate::proxy::loadbalancer::LoadBalancerRegistry;
 use crate::proxy::router::SharedRouteTable;
 use crate::quota::QuotaTracker;
 use crate::reload::ReloadHandle;
+use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{header, Method, StatusCode, Uri};
+use axum::http::{header, HeaderValue, Method, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use chrono::Utc;
+use http_body_util::BodyExt;
 use metrics_exporter_prometheus::PrometheusHandle;
 use routes::AdminState;
 use rust_embed::RustEmbed;
+use serde_json::json;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
@@ -90,6 +103,12 @@ pub fn admin_router(
 
     // ---- read-only (viewer) ----
     let reads = Router::new()
+        .route("/projects", get(routes::list_projects))
+        .route("/projects/:id", get(routes::get_project))
+        .route(
+            "/projects/:id/services",
+            get(routes::list_project_services),
+        )
         .route("/services", get(routes::list_services))
         .route("/services/:id", get(routes::get_service))
         .route("/services/:id/targets", get(routes::list_service_targets))
@@ -113,10 +132,42 @@ pub fn admin_router(
         .route("/debug/pprof/threads", get(profiling::threads_profile))
         .route("/debug/pprof/uptime", get(profiling::runtime_profile))
         .route("/debug/pprof/stats", get(profiling::combined_profile))
+        .route("/logs", get(routes::list_logs))
+        // ── analytics (read-only) ──
+        .route("/services/:id/analytics", get(analytics::service_analytics))
+        .route("/services/:id/rate-limits", get(analytics::service_rate_limits))
+        .route("/services/:id/rate-limit-stats", get(analytics::service_rate_limit_stats))
+        .route("/services/:id/geo", get(analytics::service_geo))
+        // ── probes (read-only) ──
+        .route("/services/:id/probes", get(probes::list_probes))
+        .route("/probes/:id/results", get(probes::probe_results))
+        .route("/probes/:id/stats", get(probes::probe_stats))
+        // ── snapshots (read-only) ──
+        .route("/services/:id/snapshots", get(snapshots::list_snapshots))
+        // ── alerts (read-only) ──
+        .route("/services/:id/alerts", get(alerts::list_alert_rules))
+        .route("/services/:id/alert-events", get(alerts::list_alert_events))
+        // ── ip rules (read-only) ──
+        .route("/services/:id/ip-rules", get(ip_rules::list_ip_rules))
+        // ── error pages (read-only) ──
+        .route("/services/:id/error-pages", get(error_pages::list_error_pages))
+        // ── consumer groups (read-only) ──
+        .route("/services/:id/consumer-groups", get(consumer_groups::list_consumer_groups))
+        .route("/consumer-groups/:id/members", get(consumer_groups::list_members))
+        .route("/consumer-groups/:id/usage", get(consumer_groups::group_usage))
+        // ── dependency graph ──
+        .route("/services/:id/graph", get(graph::service_graph))
+        // ── api docs ──
+        .route("/services/:id/docs", get(docs::service_docs))
         .route_layer(middleware::from_fn(viewer));
 
     // ---- mutations (operator) ----
     let mutations = Router::new()
+        .route("/projects", post(routes::create_project))
+        .route(
+            "/projects/:id",
+            patch(routes::update_project).delete(routes::delete_project),
+        )
         .route("/services", post(routes::create_service))
         .route(
             "/services/:id",
@@ -154,6 +205,7 @@ pub fn admin_router(
             get(routes::get_recording).delete(routes::delete_recording_handler),
         )
         .route("/recordings/:id/replay", post(routes::replay_recording))
+        .route("/routes/:id/test", post(routes::test_route))
         // ACME challenge endpoints — let an external orchestrator
         // (lego, certbot --manual, custom client) push HTTP-01 and
         // TLS-ALPN-01 challenges into the running gateway without
@@ -189,6 +241,34 @@ pub fn admin_router(
             "/services/:id/deploy/status",
             get(deploy::deploy_status),
         )
+        // ── probes (mutations) ──
+        .route("/services/:id/probes", post(probes::create_probe))
+        .route("/probes/:id", patch(probes::patch_probe).delete(probes::delete_probe))
+        // ── snapshots (mutations) ──
+        .route("/services/:id/snapshots", post(snapshots::create_snapshot))
+        .route("/services/:id/snapshots/:sid/diff", get(snapshots::snapshot_diff))
+        .route("/services/:id/snapshots/:sid/rollback", post(snapshots::rollback_snapshot))
+        .route("/services/:id/snapshots/:sid", delete(snapshots::delete_snapshot))
+        // ── alerts (mutations) ──
+        .route("/services/:id/alerts", post(alerts::create_alert_rule))
+        .route("/alerts/:id", patch(alerts::patch_alert_rule).delete(alerts::delete_alert_rule))
+        .route("/alert-events/:id/resolve", post(alerts::resolve_alert_event))
+        .route("/alerts/:id/test", post(alerts::test_alert))
+        // ── ip rules (mutations) ──
+        .route("/services/:id/ip-rules", post(ip_rules::create_ip_rule))
+        .route("/services/:id/ip-rules/bulk", post(ip_rules::bulk_create_ip_rules))
+        .route("/ip-rules/:id", patch(ip_rules::patch_ip_rule).delete(ip_rules::delete_ip_rule))
+        // ── error pages (mutations) ──
+        .route("/services/:id/error-pages", post(error_pages::create_error_page))
+        .route("/error-pages/:id", patch(error_pages::patch_error_page).delete(error_pages::delete_error_page))
+        // ── consumer groups (mutations) ──
+        .route("/services/:id/consumer-groups", post(consumer_groups::create_consumer_group))
+        .route("/consumer-groups/:id", patch(consumer_groups::patch_consumer_group).delete(consumer_groups::delete_consumer_group))
+        .route("/consumer-groups/:id/members", post(consumer_groups::add_member))
+        .route("/consumer-groups/:id/members/:cid", delete(consumer_groups::remove_member))
+        // ── proxy helpers ──
+        .route("/proxy/try", post(docs::proxy_try))
+        .route("/proxy/replay", post(replay::proxy_replay))
         .route_layer(middleware::from_fn(operator));
 
     // ---- token management (admin) ----
@@ -215,7 +295,8 @@ pub fn admin_router(
     let api = reads
         .merge(mutations)
         .merge(tokens)
-        .layer(middleware::from_fn_with_state(state.clone(), extract_token));
+        .layer(middleware::from_fn_with_state(state.clone(), extract_token))
+        .layer(middleware::from_fn(api_envelope));
 
     dashboard
         .merge(api)
@@ -273,9 +354,91 @@ async fn index_handler() -> impl IntoResponse {
     }
 }
 
-/// Permissive CORS for the admin API: any origin, common methods + headers.
-/// The admin port is meant for trusted control-plane traffic; locking origins
-/// down is the operator's responsibility behind a real auth/proxy layer.
+async fn api_envelope(req: Request, next: Next) -> Response {
+    let txn_urn = format!("urn:lynxx:txn:{}", Uuid::new_v4());
+    let timestamp = Utc::now().to_rfc3339();
+
+    let response = next.run(req).await;
+    let status_code = response.status();
+
+    let is_json = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.contains("application/json"))
+        .unwrap_or(false);
+
+    let has_body = status_code != StatusCode::NO_CONTENT;
+
+    if !is_json && has_body && status_code.is_success() {
+        return response;
+    }
+
+    let (parts, body) = response.into_parts();
+    let bytes = body
+        .collect()
+        .await
+        .map(|c| c.to_bytes())
+        .unwrap_or_default();
+
+    let data: serde_json::Value = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+
+    let envelope = if status_code.is_success() {
+        json!({
+            "transactionUrn": txn_urn,
+            "status": "SUCCESS",
+            "responseMessage": "Request processed successfully",
+            "responseKey": "SUCCESS",
+            "errors": [],
+            "timestamp": timestamp,
+            "metadata": {},
+            "data": data,
+            "reference_urn": ""
+        })
+    } else {
+        let response_key = match status_code.as_u16() {
+            400 => "VALIDATION_ERROR",
+            401 => "UNAUTHORIZED",
+            403 => "FORBIDDEN",
+            404 => "NOT_FOUND",
+            409 => "CONFLICT",
+            412 => "PRECONDITION_FAILED",
+            429 => "QUOTA_EXCEEDED",
+            _ => "INTERNAL_ERROR",
+        };
+        let msg = data
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("An error occurred");
+        json!({
+            "transactionUrn": txn_urn,
+            "status": "FAILED",
+            "responseMessage": msg,
+            "responseKey": response_key,
+            "errors": [{ "message": msg }],
+            "timestamp": timestamp,
+            "metadata": {},
+            "data": serde_json::Value::Null,
+            "reference_urn": ""
+        })
+    };
+
+    let body_bytes = serde_json::to_vec(&envelope).unwrap_or_default();
+    let content_len = body_bytes.len();
+    let mut response = Response::from_parts(parts, Body::from(body_bytes));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, HeaderValue::from(content_len));
+    response
+}
+
 fn admin_cors() -> CorsLayer {
     CorsLayer::new()
         .allow_methods([

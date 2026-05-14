@@ -19,6 +19,7 @@ mod error;
 mod health;
 mod license;
 mod logging;
+mod logs;
 mod lynxfile;
 mod metrics;
 mod models;
@@ -29,7 +30,7 @@ mod recording;
 mod reload;
 
 use crate::cluster::ChangeEvent;
-use crate::config::{load_config, GatewayConfig};
+use crate::config::{apply_env_overrides, load_config, GatewayConfig};
 use crate::db::Repository;
 use crate::health::{HealthConfig, HealthRegistry};
 use crate::plugins::PluginExecutor;
@@ -138,35 +139,51 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main() -> anyhow::Result<()> {
+    // --- Load config early so telemetry settings are available ----------
+    let args = Args::parse();
+    let config_path: String = args.config.to_string_lossy().into_owned();
+    let mut config = load_config(&config_path)?;
+    apply_env_overrides(&mut config);
+    apply_cli_overrides(&mut config, &args);
+
     // --- Telemetry init -------------------------------------------------
-    // Build the tracing subscriber with an optional OTel layer. The OTel
-    // TracerProvider supports multiple exporters:
-    //
-    //  1. Primary exporter — controlled by OTEL_EXPORTER_OTLP_ENDPOINT
-    //     (standard env var). Points at whatever collector the deployment
-    //     uses (Jaeger, Datadog, Grafana Tempo, …).
-    //
-    //  2. Fluxx exporter — controlled by FLUXX_OTEL_ENDPOINT. Sends a
-    //     copy of every span to the local Fluxx agent over OTLP/HTTP on
-    //     loopback. Non-blocking; the gateway boots and runs identically
-    //     when the var is absent.
-    //
-    // When neither var is set the OTel layer is omitted entirely and the
-    // subscriber is plain fmt + env-filter.
+    // Reads from config.telemetry (populated from TOML + env overrides).
+    // Primary endpoint: [telemetry].endpoint / LYNXX_TELEMETRY_URL / OTEL_EXPORTER_OTLP_ENDPOINT
+    // Fluxx sidecar:    [telemetry].fluxx_endpoint / FLUXX_OTEL_ENDPOINT
+    // When neither is set the OTel layer is omitted entirely.
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("lynxx_gateway=info,tower_http=debug"));
     let fmt_layer = tracing_subscriber::fmt::layer();
 
-    let primary_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let fluxx_endpoint = std::env::var("FLUXX_OTEL_ENDPOINT")
-        .ok()
-        .filter(|s| !s.is_empty());
+    let primary_endpoint = if config.telemetry.endpoint.is_empty() {
+        None
+    } else {
+        Some(config.telemetry.endpoint.clone())
+    };
+    let fluxx_endpoint = if config.telemetry.fluxx_endpoint.is_empty() {
+        None
+    } else {
+        Some(config.telemetry.fluxx_endpoint.clone())
+    };
+    let telemetry_api_key = if config.telemetry.api_key.is_empty() {
+        None
+    } else {
+        Some(config.telemetry.api_key.clone())
+    };
 
     if primary_endpoint.is_some() || fluxx_endpoint.is_some() {
-        let svc_name = std::env::var("OTEL_SERVICE_NAME")
-            .unwrap_or_else(|_| "lynxx-gateway".into());
+        // Inject the telemetry API key via the standard OTEL headers env var
+        // so the OTLP HTTP exporter picks it up automatically.
+        if let Some(ref key) = telemetry_api_key {
+            if std::env::var("OTEL_EXPORTER_OTLP_HEADERS").is_err() {
+                std::env::set_var(
+                    "OTEL_EXPORTER_OTLP_HEADERS",
+                    format!("Authorization=Bearer {key}"),
+                );
+            }
+        }
+
+        let svc_name = config.telemetry.service_name.clone();
 
         let mut provider_builder = opentelemetry_sdk::trace::TracerProvider::builder()
             .with_resource(opentelemetry_sdk::Resource::new(vec![
@@ -216,11 +233,6 @@ async fn async_main() -> anyhow::Result<()> {
 
     let metrics_handle = metrics::install();
     metrics::describe();
-
-    let args = Args::parse();
-    let config_path: String = args.config.to_string_lossy().into_owned();
-    let mut config = load_config(&config_path)?;
-    apply_cli_overrides(&mut config, &args);
 
     // ---------- licence gate ----------
     // Verify the subscription API key before doing any other startup
@@ -365,15 +377,20 @@ async fn async_main() -> anyhow::Result<()> {
     // above is hard-fail; this background loop catches mid-run
     // cancellations within REVERIFY_INTERVAL_SECS instead of waiting
     // for the offline cache to expire (7 days).
-    let license_verify_url = std::env::var("LYNXX_LICENSE_VERIFY_URL")
-        .unwrap_or_else(|_| "https://api.lynxx.vexarr.com/v1/license/verify".to_string());
+    let lynxx_base_url = std::env::var("LYNXX_BASE_URL")
+        .or_else(|_| std::env::var("LYNXX_LICENSE_VERIFY_URL").map(|u| {
+            u.trim_end_matches("/v1/license/verify").to_string()
+        }))
+        .unwrap_or_else(|_| "https://api.lynxx.vexarr.com".to_string());
+    let lynxx_base_url = lynxx_base_url.trim_end_matches('/').to_string();
     let license_api_key = std::env::var("LYNXX_API_KEY")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| config.license.api_key.clone());
+    let license_verify_url = format!("{}/v1/license/verify", lynxx_base_url);
     let license_state = crate::license::LicenseState::new(
         license_api_key.clone(),
-        license_verify_url.clone(),
+        license_verify_url,
         plan_tier,
         license.active_nodes,
         license.max_nodes,
@@ -381,13 +398,13 @@ async fn async_main() -> anyhow::Result<()> {
     crate::license::spawn_license_refresher(license_state.clone(), Some(quota.clone()));
 
     // Register this node with the billing API and start heartbeat.
-    if let Err(e) = crate::license::register_node(&license_api_key, &license_verify_url).await {
+    if let Err(e) = crate::license::register_node(&license_api_key, &lynxx_base_url).await {
         tracing::error!(error = %e, "node registration failed — gateway may not be tracked for billing");
     }
-    crate::license::spawn_node_heartbeat(license_api_key.clone(), license_verify_url.clone());
+    crate::license::spawn_node_heartbeat(license_api_key.clone(), lynxx_base_url.clone());
     crate::license::spawn_usage_reporter(
         license_api_key.clone(),
-        license_verify_url.clone(),
+        lynxx_base_url.clone(),
         quota.clone(),
         license_state.clone(),
     );
@@ -401,9 +418,13 @@ async fn async_main() -> anyhow::Result<()> {
 
     let deploy_registry = crate::admin::deploy::new_deploy_registry();
 
+    let log_writer = crate::logs::LogWriter::new(repo.clone(), 4096);
+    crate::logs::spawn_log_pruner(repo.clone(), 30);
+
     let proxy_state = ProxyState {
         route_table: route_table.clone(),
         plugins: plugin_exec.clone(),
+        log_writer,
         trusted_proxies,
         http_client: http_client.clone(),
         client_pool: client_pool.clone(),
@@ -889,7 +910,7 @@ async fn async_main() -> anyhow::Result<()> {
         run_select!(proxy_serve, None::<axum_server::Handle>);
     }
 
-    crate::license::deregister_node(&license_api_key, &license_verify_url).await;
+    crate::license::deregister_node(&license_api_key, &lynxx_base_url).await;
 
     if let Some(h) = acme_http_handle {
         h.abort();
@@ -1017,6 +1038,9 @@ async fn apply_remote_event(
         }
         ChangeEvent::PluginChanged { .. } => {
             plugin_exec.rebuild(repo).await?;
+        }
+        ChangeEvent::ProjectChanged { .. } => {
+            // Projects are metadata-only; no in-memory state to refresh.
         }
         ChangeEvent::ConsumerChanged { .. } => {
             // Consumers are read on-demand by basic-auth/key-auth/hmac-auth

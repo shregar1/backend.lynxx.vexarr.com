@@ -39,6 +39,7 @@ impl AuditAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ResourceType {
+    Project,
     Service,
     Route,
     Plugin,
@@ -51,6 +52,7 @@ pub enum ResourceType {
 impl ResourceType {
     pub fn as_str(&self) -> &'static str {
         match self {
+            ResourceType::Project => "project",
             ResourceType::Service => "service",
             ResourceType::Route => "route",
             ResourceType::Plugin => "plugin",

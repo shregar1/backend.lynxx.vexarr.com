@@ -35,6 +35,29 @@ impl Default for TargetLifecycle {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Project {
+    pub fn new(name: String, description: String) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            name,
+            description,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Service {
     pub id: Uuid,
     pub name: String,
@@ -102,6 +125,12 @@ pub struct Service {
     pub pass_host_header: Option<bool>,
     #[serde(default)]
     pub drain_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub project_id: Option<Uuid>,
+    #[serde(default)]
+    pub domain: String,
+    #[serde(default)]
+    pub subdomain: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -233,6 +262,43 @@ pub struct Route {
     pub updated_at: DateTime<Utc>,
 }
 
+impl Route {
+    /// Synthetic route for subdomain-routed requests that don't match any
+    /// explicit route. Passes the path through unchanged.
+    pub fn passthrough(service_id: Uuid) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::nil(),
+            paths: vec!["/*".into()],
+            methods: Vec::new(),
+            hosts: Vec::new(),
+            service_id,
+            strip_path: false,
+            path_rewrite_pattern: None,
+            path_rewrite_replacement: None,
+            buffer_request: false,
+            headers: Default::default(),
+            query_params: Default::default(),
+            path_regexes: Vec::new(),
+            read_timeout_ms: None,
+            write_timeout_ms: None,
+            idle_timeout_ms: None,
+            retry_on_status: Vec::new(),
+            matchers: Vec::new(),
+            matcher_refs: Vec::new(),
+            handle_blocks: Vec::new(),
+            try_files: None,
+            uri_directives: Vec::new(),
+            intercept_rules: Vec::new(),
+            push: None,
+            static_response: None,
+            health_gate: false,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
 /// Static response configuration for the `respond` directive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StaticResponse {
@@ -360,6 +426,9 @@ impl Service {
             stream_close_delay_ms: None,
             pass_host_header: None,
             drain_timeout_ms: None,
+            project_id: None,
+            domain: String::new(),
+            subdomain: String::new(),
             created_at: now,
             updated_at: now,
         }
@@ -420,4 +489,189 @@ impl Consumer {
             updated_at: now,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub id: Uuid,
+    pub urn: String,
+    pub ts: DateTime<Utc>,
+    pub level: String,
+    pub message: String,
+    pub service_id: Option<Uuid>,
+    pub route_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub method: Option<String>,
+    pub path: Option<String>,
+    pub status: Option<i32>,
+    pub duration_ms: Option<i64>,
+    pub client_ip: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+// ── Analytics ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricBucket {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub route_id: Option<Uuid>,
+    pub bucket_ts: DateTime<Utc>,
+    pub granularity: String,
+    pub total_requests: i64,
+    pub success_count: i64,
+    pub error_4xx: i64,
+    pub error_5xx: i64,
+    pub total_latency_ms: i64,
+    pub min_latency_ms: Option<i64>,
+    pub max_latency_ms: Option<i64>,
+    pub bytes_in: i64,
+    pub bytes_out: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeoBucket {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub bucket_ts: DateTime<Utc>,
+    pub country_code: String,
+    pub city: String,
+    pub request_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitBucket {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub consumer_id: Option<Uuid>,
+    pub bucket_ts: DateTime<Utc>,
+    pub allowed: i64,
+    pub throttled: i64,
+}
+
+// ── Uptime Probes ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Probe {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub route_id: Option<Uuid>,
+    pub name: String,
+    pub method: String,
+    pub path: String,
+    pub interval_seconds: i32,
+    pub timeout_ms: i32,
+    pub expected_status: i32,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbeResult {
+    pub id: Uuid,
+    pub probe_id: Uuid,
+    pub ts: DateTime<Utc>,
+    pub status: Option<i32>,
+    pub latency_ms: Option<i32>,
+    pub healthy: bool,
+    pub error: Option<String>,
+}
+
+// ── Snapshots ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub name: String,
+    pub data: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+// ── Alerts ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertRule {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub name: String,
+    pub metric: String,
+    pub operator: String,
+    pub threshold: f64,
+    pub window_seconds: i32,
+    pub cooldown_seconds: i32,
+    pub channels: serde_json::Value,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertEvent {
+    pub id: Uuid,
+    pub rule_id: Uuid,
+    pub service_id: Uuid,
+    pub ts: DateTime<Utc>,
+    pub metric: String,
+    pub value: f64,
+    pub threshold: f64,
+    pub message: String,
+    pub resolved: bool,
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+// ── IP Rules ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpRule {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub route_id: Option<Uuid>,
+    pub cidr: String,
+    pub action: String,
+    pub description: String,
+    pub priority: i32,
+    pub enabled: bool,
+    pub hits: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+// ── Error Pages ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorPage {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub status_code: i32,
+    pub content_type: String,
+    pub body: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+// ── Consumer Groups ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsumerGroup {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub rate_limit: i32,
+    pub rate_window_seconds: i32,
+    pub burst_limit: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsumerGroupMember {
+    pub group_id: Uuid,
+    pub consumer_id: Uuid,
+    pub joined_at: DateTime<Utc>,
 }

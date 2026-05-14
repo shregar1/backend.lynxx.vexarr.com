@@ -13,6 +13,9 @@ pub struct RouteTable {
     /// route matching from O(N) into O(1) for the common "exact path" case.
     /// Prefix and wildcard routes still fall through to the linear scan.
     exact_index: DashMap<String, Uuid>,
+    /// Host-to-service index: `"sub.domain.com"` -> `service_id` for services
+    /// with non-empty `subdomain` + `domain`. Enables O(1) subdomain routing.
+    host_index: DashMap<String, Uuid>,
 }
 
 impl RouteTable {
@@ -21,6 +24,7 @@ impl RouteTable {
             services: DashMap::new(),
             routes: DashMap::new(),
             exact_index: DashMap::new(),
+            host_index: DashMap::new(),
         }
     }
 
@@ -33,6 +37,86 @@ impl RouteTable {
                     self.exact_index.insert(p.clone(), route.id);
                 }
             }
+        }
+    }
+
+    fn rebuild_host_index(&self) {
+        self.host_index.clear();
+        for entry in self.services.iter() {
+            let svc = entry.value();
+            if let Some(fqdn) = Self::service_fqdn(svc) {
+                self.host_index.insert(fqdn, svc.id);
+            }
+        }
+    }
+
+    fn service_fqdn(svc: &Service) -> Option<String> {
+        if svc.subdomain.is_empty() || svc.domain.is_empty() {
+            return None;
+        }
+        Some(format!("{}.{}", svc.subdomain, svc.domain).to_ascii_lowercase())
+    }
+
+    /// O(1) lookup: does `host` match a service's `subdomain.domain`?
+    pub fn match_by_host(&self, host: &str) -> Option<Service> {
+        let key = host.to_ascii_lowercase();
+        let svc_id = *self.host_index.get(&key)?;
+        self.services.get(&svc_id).map(|s| s.clone())
+    }
+
+    /// Find the best matching route within a specific service.
+    pub fn match_route_for_service(
+        &self,
+        service_id: &Uuid,
+        path: &str,
+        method: &str,
+    ) -> Option<Route> {
+        let mut best: Option<Route> = None;
+        for entry in self.routes.iter() {
+            let route = entry.value();
+            if &route.service_id != service_id {
+                continue;
+            }
+            let path_matches = if !route.path_regexes.is_empty() {
+                route.path_regexes.iter().any(|pattern| {
+                    regex::Regex::new(pattern)
+                        .map(|re| re.is_match(path))
+                        .unwrap_or(false)
+                })
+            } else {
+                route.paths.iter().any(|p| {
+                    if p.ends_with('*') {
+                        let prefix = &p[..p.len() - 1];
+                        path.starts_with(prefix)
+                    } else if p == "/" {
+                        true
+                    } else {
+                        path == p || path.starts_with(&format!("{p}/"))
+                    }
+                })
+            };
+            if !path_matches {
+                continue;
+            }
+            let method_matches =
+                route.methods.is_empty() || route.methods.iter().any(|m| m == method);
+            if !method_matches {
+                continue;
+            }
+            best = Some(route.clone());
+            break;
+        }
+        best
+    }
+
+    pub fn is_host_taken(&self, fqdn: &str, exclude_service: Option<&Uuid>) -> bool {
+        let key = fqdn.to_ascii_lowercase();
+        match self.host_index.get(&key) {
+            Some(entry) => match exclude_service {
+                Some(id) => entry.value() != id,
+                None => true,
+            },
+            None => false,
         }
     }
 
@@ -55,12 +139,16 @@ impl RouteTable {
             self.routes.insert(route.id, route.clone());
         }
         self.rebuild_exact_index();
+        self.rebuild_host_index();
 
         Ok((services.len(), routes.len()))
     }
 
     pub fn add_service(&self, service: Service) -> Uuid {
         let id = service.id;
+        if let Some(fqdn) = Self::service_fqdn(&service) {
+            self.host_index.insert(fqdn, id);
+        }
         self.services.insert(id, service);
         id
     }
@@ -82,6 +170,14 @@ impl RouteTable {
 
     pub fn update_service(&self, id: &Uuid, service: Service) -> bool {
         if self.services.contains_key(id) {
+            if let Some(old) = self.services.get(id) {
+                if let Some(old_fqdn) = Self::service_fqdn(old.value()) {
+                    self.host_index.remove(&old_fqdn);
+                }
+            }
+            if let Some(fqdn) = Self::service_fqdn(&service) {
+                self.host_index.insert(fqdn, *id);
+            }
             self.services.insert(*id, service);
             true
         } else {
@@ -90,7 +186,14 @@ impl RouteTable {
     }
 
     pub fn remove_service(&self, id: &Uuid) -> bool {
-        self.services.remove(id).is_some()
+        if let Some((_, svc)) = self.services.remove(id) {
+            if let Some(fqdn) = Self::service_fqdn(&svc) {
+                self.host_index.remove(&fqdn);
+            }
+            true
+        } else {
+            false
+        }
     }
 
     pub fn add_route(&self, route: Route) -> Uuid {

@@ -1111,15 +1111,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "clap_complete"
-version = "4.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "660c0520455b1013b9bcb0393d5f643d7e4454fb69c915b8d6d2aa0e9a45acc3"
-dependencies = [
- "clap",
-]
-
-[[package]]
 name = "clap_derive"
 version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3279,7 +3270,6 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
- "clap_complete",
  "dashmap",
  "dirs",
  "ed25519-dalek",
@@ -3303,7 +3293,6 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "libc",
- "machine-uid",
  "metrics",
  "metrics-exporter-prometheus",
  "mimalloc",
@@ -3348,7 +3337,6 @@ dependencies = [
  "wasmtime",
  "wat",
  "webpki-roots 0.26.11",
- "whoami",
  "wiremock",
  "x509-parser",
  "zstd",
@@ -3361,15 +3349,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d640282b302c0bb0a2a8e0233ead9035e3bed871f0b7e81fe4a1ec829765db44"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "machine-uid"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26141aceb9f046065617266f41a4a652e4583da643472a10a89b4b3664d99eb6"
-dependencies = [
- "winreg",
 ]
 
 [[package]]
@@ -6640,7 +6619,6 @@ checksum = "5d4a4db5077702ca3015d3d02d74974948aba2ad9e12ab7df718ee64ccd7e97d"
 dependencies = [
  "libredox",
  "wasite",
- "web-sys",
 ]
 
 [[package]]
@@ -7071,16 +7049,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "winreg"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76a1a57ff50e9b408431e8f97d5456f2807f8eb2a2cd79b06068fc87f8ecf189"
-dependencies = [
- "cfg-if",
- "winapi",
 ]
 
 [[package]]

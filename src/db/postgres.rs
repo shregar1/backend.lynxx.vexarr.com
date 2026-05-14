@@ -6,7 +6,12 @@ use crate::config::GatewayConfig;
 use crate::db::sqlite::seed_from_config_generic;
 use crate::db::{AdminTokenPatch, NewAdminToken, Repository};
 use crate::error::GatewayError;
-use crate::models::{Consumer, PluginInstance, Route, Service, Target};
+use crate::db::LogFilter;
+use crate::models::{
+    AlertEvent, AlertRule, Consumer, ConsumerGroup, ConsumerGroupMember, ErrorPage,
+    GeoBucket, IpRule, LogEntry, MetricBucket, PluginInstance, Probe, ProbeResult,
+    Project, RateLimitBucket, Route, Service, Snapshot, Target,
+};
 use crate::recording::{RecordingFilter, RecordingIndexRow};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -42,6 +47,87 @@ impl PostgresRepository {
 
 #[async_trait]
 impl Repository for PostgresRepository {
+    // ---------- projects ----------
+
+    async fn list_projects(&self) -> Result<Vec<Project>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, name, description, created_at, updated_at \
+             FROM projects WHERE is_deleted = FALSE",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_project).collect()
+    }
+
+    async fn get_project(&self, id: &Uuid) -> Result<Option<Project>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, name, description, created_at, updated_at \
+             FROM projects WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_project).transpose()
+    }
+
+    async fn create_project(&self, project: &Project) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO projects (id, name, description, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(project.id)
+        .bind(&project.name)
+        .bind(&project.description)
+        .bind(project.created_at)
+        .bind(project.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn update_project(&self, id: &Uuid, project: &Project) -> Result<(), GatewayError> {
+        sqlx::query(
+            "UPDATE projects SET name = $1, description = $2, updated_at = $3 \
+             WHERE id = $4 AND is_deleted = FALSE",
+        )
+        .bind(&project.name)
+        .bind(&project.description)
+        .bind(project.updated_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_project(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let result = sqlx::query(
+            "UPDATE projects SET is_deleted = TRUE, name = name || '__deleted_' || id \
+             WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn list_services_for_project(
+        &self,
+        project_id: &Uuid,
+    ) -> Result<Vec<Service>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
+                    document_root, index_file, spa_fallback, \
+                    tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
+                    project_id, domain, subdomain, \
+                    created_at, updated_at \
+             FROM services WHERE project_id = $1 AND is_deleted = FALSE",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_service).collect()
+    }
+
     // ---------- services ----------
 
     async fn list_services(&self) -> Result<Vec<Service>, GatewayError> {
@@ -49,6 +135,7 @@ impl Repository for PostgresRepository {
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
                     document_root, index_file, spa_fallback, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
+                    project_id, domain, subdomain, \
                     created_at, updated_at \
              FROM services WHERE is_deleted = FALSE",
         )
@@ -63,6 +150,7 @@ impl Repository for PostgresRepository {
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
                     document_root, index_file, spa_fallback, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
+                    project_id, domain, subdomain, \
                     created_at, updated_at \
              FROM services WHERE id = $1 AND is_deleted = FALSE",
         )
@@ -78,6 +166,7 @@ impl Repository for PostgresRepository {
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
                     document_root, index_file, spa_fallback, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
+                    project_id, domain, subdomain, \
                     created_at, updated_at \
              FROM services WHERE name = $1 AND is_deleted = FALSE",
         )
@@ -93,8 +182,9 @@ impl Repository for PostgresRepository {
             "INSERT INTO services (id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
                                    document_root, index_file, spa_fallback, \
                                    tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
+                                   project_id, domain, subdomain, \
                                    enabled, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE, $15, $16)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, TRUE, $18, $19)",
         )
         .bind(svc.id)
         .bind(&svc.name)
@@ -110,6 +200,9 @@ impl Repository for PostgresRepository {
         .bind(svc.tls_client_cert_path.as_deref())
         .bind(svc.tls_client_key_path.as_deref())
         .bind(svc.tls_ca_path.as_deref())
+        .bind(svc.project_id)
+        .bind(&svc.domain)
+        .bind(&svc.subdomain)
         .bind(svc.created_at)
         .bind(svc.updated_at)
         .execute(&self.pool)
@@ -122,8 +215,9 @@ impl Repository for PostgresRepository {
             "UPDATE services SET name = $1, url = $2, retries = $3, connect_timeout_ms = $4, lb_strategy = $5, service_type = $6, \
                                  document_root = $7, index_file = $8, spa_fallback = $9, \
                                  tls_verify = $10, tls_client_cert_path = $11, tls_client_key_path = $12, tls_ca_path = $13, \
-                                 updated_at = $14 \
-             WHERE id = $15 AND is_deleted = FALSE",
+                                 project_id = $14, domain = $15, subdomain = $16, \
+                                 updated_at = $17 \
+             WHERE id = $18 AND is_deleted = FALSE",
         )
         .bind(&svc.name)
         .bind(&svc.url)
@@ -138,6 +232,9 @@ impl Repository for PostgresRepository {
         .bind(svc.tls_client_cert_path.as_deref())
         .bind(svc.tls_client_key_path.as_deref())
         .bind(svc.tls_ca_path.as_deref())
+        .bind(svc.project_id)
+        .bind(&svc.domain)
+        .bind(&svc.subdomain)
         .bind(svc.updated_at)
         .bind(id)
         .execute(&self.pool)
@@ -431,6 +528,94 @@ impl Repository for PostgresRepository {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    // ---------- cascade soft-delete ----------
+
+    async fn soft_delete_plugins_for_route(
+        &self,
+        route_id: &Uuid,
+    ) -> Result<u64, GatewayError> {
+        let result = sqlx::query(
+            "UPDATE plugins SET is_deleted = TRUE WHERE route_id = $1 AND is_deleted = FALSE",
+        )
+        .bind(route_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn soft_delete_plugins_for_service(
+        &self,
+        service_id: &Uuid,
+    ) -> Result<u64, GatewayError> {
+        let result = sqlx::query(
+            "UPDATE plugins SET is_deleted = TRUE WHERE service_id = $1 AND is_deleted = FALSE",
+        )
+        .bind(service_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn soft_delete_routes_for_service(
+        &self,
+        service_id: &Uuid,
+    ) -> Result<Vec<Uuid>, GatewayError> {
+        let rows: Vec<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM routes WHERE service_id = $1 AND is_deleted = FALSE",
+        )
+        .bind(service_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let ids: Vec<Uuid> = rows.iter().map(|(id,)| *id).collect();
+
+        sqlx::query(
+            "UPDATE routes SET is_deleted = TRUE WHERE service_id = $1 AND is_deleted = FALSE",
+        )
+        .bind(service_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(ids)
+    }
+
+    async fn soft_delete_targets_for_service(
+        &self,
+        service_id: &Uuid,
+    ) -> Result<u64, GatewayError> {
+        let result = sqlx::query(
+            "UPDATE targets SET is_deleted = TRUE WHERE service_id = $1 AND is_deleted = FALSE",
+        )
+        .bind(service_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn soft_delete_services_for_project(
+        &self,
+        project_id: &Uuid,
+    ) -> Result<Vec<Uuid>, GatewayError> {
+        let rows: Vec<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM services WHERE project_id = $1 AND is_deleted = FALSE",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let ids: Vec<Uuid> = rows.iter().map(|(id,)| *id).collect();
+
+        sqlx::query(
+            "UPDATE services SET is_deleted = TRUE, name = name || '__deleted_' || id \
+             WHERE project_id = $1 AND is_deleted = FALSE",
+        )
+        .bind(project_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(ids)
     }
 
     // ---------- bootstrap helpers ----------
@@ -1006,6 +1191,440 @@ impl Repository for PostgresRepository {
         .await?;
         Ok(())
     }
+
+    // ---------- logs ----------
+
+    async fn insert_logs(&self, entries: &[LogEntry]) -> Result<(), GatewayError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for e in entries {
+            sqlx::query(
+                "INSERT INTO logs (id, urn, ts, level, message, service_id, route_id, project_id, \
+                 method, path, status, duration_ms, client_ip, metadata, created_at, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+            )
+            .bind(e.id)
+            .bind(&e.urn)
+            .bind(e.ts)
+            .bind(&e.level)
+            .bind(&e.message)
+            .bind(e.service_id)
+            .bind(e.route_id)
+            .bind(e.project_id)
+            .bind(&e.method)
+            .bind(&e.path)
+            .bind(e.status)
+            .bind(e.duration_ms)
+            .bind(&e.client_ip)
+            .bind(&e.metadata)
+            .bind(e.created_at)
+            .bind(e.updated_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn list_logs(&self, filter: &LogFilter) -> Result<Vec<LogEntry>, GatewayError> {
+        let mut sql = String::from(
+            "SELECT id, urn, ts, level, message, service_id, route_id, project_id, \
+             method, path, status, duration_ms, client_ip, metadata, created_at, updated_at FROM logs WHERE TRUE",
+        );
+        let mut idx = 0u32;
+        let mut bind_service: Option<Uuid> = None;
+        let mut bind_route: Option<Uuid> = None;
+        let mut bind_project: Option<Uuid> = None;
+        let mut bind_level: Option<String> = None;
+        let mut bind_search: Option<String> = None;
+
+        if let Some(sid) = filter.service_id {
+            idx += 1;
+            sql.push_str(&format!(" AND service_id = ${idx}"));
+            bind_service = Some(sid);
+        }
+        if let Some(rid) = filter.route_id {
+            idx += 1;
+            sql.push_str(&format!(" AND route_id = ${idx}"));
+            bind_route = Some(rid);
+        }
+        if let Some(pid) = filter.project_id {
+            idx += 1;
+            sql.push_str(&format!(" AND project_id = ${idx}"));
+            bind_project = Some(pid);
+        }
+        if let Some(ref level) = filter.level {
+            idx += 1;
+            sql.push_str(&format!(" AND level = ${idx}"));
+            bind_level = Some(level.clone());
+        }
+        if let Some(ref search) = filter.search {
+            idx += 1;
+            sql.push_str(&format!(
+                " AND (message ILIKE ${idx} OR path ILIKE ${idx} OR client_ip ILIKE ${idx})"
+            ));
+            bind_search = Some(format!("%{search}%"));
+        }
+        let limit = filter.limit.unwrap_or(200).min(1000);
+        sql.push_str(&format!(" ORDER BY ts DESC LIMIT {limit}"));
+
+        let mut q = sqlx::query(&sql);
+        if let Some(v) = &bind_service {
+            q = q.bind(v);
+        }
+        if let Some(v) = &bind_route {
+            q = q.bind(v);
+        }
+        if let Some(v) = &bind_project {
+            q = q.bind(v);
+        }
+        if let Some(v) = &bind_level {
+            q = q.bind(v);
+        }
+        if let Some(v) = &bind_search {
+            q = q.bind(v);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_log).collect()
+    }
+
+    async fn prune_logs(&self, retention_days: u32) -> Result<u64, GatewayError> {
+        let result = sqlx::query(&format!(
+            "DELETE FROM logs WHERE ts < now() - interval '{retention_days} days'"
+        ))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    // ── Analytics ──
+
+    async fn upsert_metric_bucket(&self, b: &MetricBucket) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO metric_buckets (id, service_id, route_id, bucket_ts, granularity, \
+             total_requests, success_count, error_4xx, error_5xx, total_latency_ms, \
+             min_latency_ms, max_latency_ms, bytes_in, bytes_out) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"
+        )
+        .bind(b.id).bind(b.service_id).bind(b.route_id)
+        .bind(b.bucket_ts).bind(&b.granularity)
+        .bind(b.total_requests as i32).bind(b.success_count as i32)
+        .bind(b.error_4xx as i32).bind(b.error_5xx as i32)
+        .bind(b.total_latency_ms).bind(b.min_latency_ms.map(|v| v as i32))
+        .bind(b.max_latency_ms.map(|v| v as i32))
+        .bind(b.bytes_in).bind(b.bytes_out)
+        .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn list_metric_buckets(&self, service_id: &Uuid, from: DateTime<Utc>, to: DateTime<Utc>, granularity: &str) -> Result<Vec<MetricBucket>, GatewayError> {
+        let rows = sqlx::query("SELECT * FROM metric_buckets WHERE service_id = $1 AND bucket_ts >= $2 AND bucket_ts <= $3 AND granularity = $4 ORDER BY bucket_ts")
+            .bind(service_id).bind(from).bind(to).bind(granularity)
+            .fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_metric_bucket).collect()
+    }
+
+    async fn upsert_geo_bucket(&self, b: &GeoBucket) -> Result<(), GatewayError> {
+        sqlx::query("INSERT INTO geo_buckets (id, service_id, bucket_ts, country_code, city, request_count) VALUES ($1, $2, $3, $4, $5, $6)")
+            .bind(b.id).bind(b.service_id).bind(b.bucket_ts)
+            .bind(&b.country_code).bind(&b.city).bind(b.request_count as i32)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn list_geo_buckets(&self, service_id: &Uuid, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<GeoBucket>, GatewayError> {
+        let rows = sqlx::query("SELECT * FROM geo_buckets WHERE service_id = $1 AND bucket_ts >= $2 AND bucket_ts <= $3 ORDER BY bucket_ts")
+            .bind(service_id).bind(from).bind(to)
+            .fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_geo_bucket).collect()
+    }
+
+    async fn upsert_rate_limit_bucket(&self, b: &RateLimitBucket) -> Result<(), GatewayError> {
+        sqlx::query("INSERT INTO rate_limit_buckets (id, service_id, consumer_id, bucket_ts, allowed, throttled) VALUES ($1, $2, $3, $4, $5, $6)")
+            .bind(b.id).bind(b.service_id).bind(b.consumer_id)
+            .bind(b.bucket_ts).bind(b.allowed as i32).bind(b.throttled as i32)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn list_rate_limit_buckets(&self, service_id: &Uuid, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<RateLimitBucket>, GatewayError> {
+        let rows = sqlx::query("SELECT * FROM rate_limit_buckets WHERE service_id = $1 AND bucket_ts >= $2 AND bucket_ts <= $3 ORDER BY bucket_ts")
+            .bind(service_id).bind(from).bind(to)
+            .fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_rate_limit_bucket).collect()
+    }
+
+    // ── Probes ──
+
+    async fn list_probes(&self, service_id: &Uuid) -> Result<Vec<Probe>, GatewayError> {
+        let rows = sqlx::query("SELECT * FROM probes WHERE service_id = $1 ORDER BY created_at")
+            .bind(service_id).fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_probe).collect()
+    }
+
+    async fn get_probe(&self, id: &Uuid) -> Result<Option<Probe>, GatewayError> {
+        let row = sqlx::query("SELECT * FROM probes WHERE id = $1")
+            .bind(id).fetch_optional(&self.pool).await?;
+        row.map(row_to_probe).transpose()
+    }
+
+    async fn create_probe(&self, p: &Probe) -> Result<(), GatewayError> {
+        sqlx::query("INSERT INTO probes (id, service_id, route_id, name, method, path, interval_seconds, timeout_ms, expected_status, enabled, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
+            .bind(p.id).bind(p.service_id).bind(p.route_id)
+            .bind(&p.name).bind(&p.method).bind(&p.path)
+            .bind(p.interval_seconds).bind(p.timeout_ms).bind(p.expected_status)
+            .bind(p.enabled).bind(p.created_at).bind(p.updated_at)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn update_probe(&self, id: &Uuid, p: &Probe) -> Result<(), GatewayError> {
+        sqlx::query("UPDATE probes SET name=$1, method=$2, path=$3, interval_seconds=$4, timeout_ms=$5, expected_status=$6, enabled=$7 WHERE id=$8")
+            .bind(&p.name).bind(&p.method).bind(&p.path)
+            .bind(p.interval_seconds).bind(p.timeout_ms).bind(p.expected_status)
+            .bind(p.enabled).bind(id)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn delete_probe(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let r = sqlx::query("DELETE FROM probes WHERE id = $1").bind(id).execute(&self.pool).await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    async fn append_probe_result(&self, r: &ProbeResult) -> Result<(), GatewayError> {
+        sqlx::query("INSERT INTO probe_results (id, probe_id, ts, status, latency_ms, healthy, error) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+            .bind(r.id).bind(r.probe_id).bind(r.ts)
+            .bind(r.status).bind(r.latency_ms).bind(r.healthy).bind(&r.error)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn list_probe_results(&self, probe_id: &Uuid, limit: u32) -> Result<Vec<ProbeResult>, GatewayError> {
+        let rows = sqlx::query("SELECT * FROM probe_results WHERE probe_id = $1 ORDER BY ts DESC LIMIT $2")
+            .bind(probe_id).bind(limit as i64)
+            .fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_probe_result).collect()
+    }
+
+    // ── Snapshots ──
+
+    async fn list_snapshots(&self, service_id: &Uuid) -> Result<Vec<Snapshot>, GatewayError> {
+        let rows = sqlx::query("SELECT * FROM snapshots WHERE service_id = $1 ORDER BY created_at DESC")
+            .bind(service_id).fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_snapshot).collect()
+    }
+
+    async fn get_snapshot(&self, id: &Uuid) -> Result<Option<Snapshot>, GatewayError> {
+        let row = sqlx::query("SELECT * FROM snapshots WHERE id = $1")
+            .bind(id).fetch_optional(&self.pool).await?;
+        row.map(row_to_snapshot).transpose()
+    }
+
+    async fn create_snapshot(&self, s: &Snapshot) -> Result<(), GatewayError> {
+        sqlx::query("INSERT INTO snapshots (id, service_id, name, data, created_at) VALUES ($1,$2,$3,$4,$5)")
+            .bind(s.id).bind(s.service_id).bind(&s.name).bind(&s.data).bind(s.created_at)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn delete_snapshot(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let r = sqlx::query("DELETE FROM snapshots WHERE id = $1").bind(id).execute(&self.pool).await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    // ── Alerts ──
+
+    async fn list_alert_rules(&self, service_id: &Uuid) -> Result<Vec<AlertRule>, GatewayError> {
+        let rows = sqlx::query("SELECT * FROM alert_rules WHERE service_id = $1 ORDER BY created_at")
+            .bind(service_id).fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_alert_rule).collect()
+    }
+
+    async fn get_alert_rule(&self, id: &Uuid) -> Result<Option<AlertRule>, GatewayError> {
+        let row = sqlx::query("SELECT * FROM alert_rules WHERE id = $1")
+            .bind(id).fetch_optional(&self.pool).await?;
+        row.map(row_to_alert_rule).transpose()
+    }
+
+    async fn create_alert_rule(&self, r: &AlertRule) -> Result<(), GatewayError> {
+        sqlx::query("INSERT INTO alert_rules (id, service_id, name, metric, operator, threshold, window_seconds, cooldown_seconds, channels, enabled, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
+            .bind(r.id).bind(r.service_id).bind(&r.name).bind(&r.metric)
+            .bind(&r.operator).bind(r.threshold)
+            .bind(r.window_seconds).bind(r.cooldown_seconds)
+            .bind(&r.channels).bind(r.enabled)
+            .bind(r.created_at).bind(r.updated_at)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn update_alert_rule(&self, id: &Uuid, r: &AlertRule) -> Result<(), GatewayError> {
+        sqlx::query("UPDATE alert_rules SET name=$1, metric=$2, operator=$3, threshold=$4, window_seconds=$5, cooldown_seconds=$6, channels=$7, enabled=$8 WHERE id=$9")
+            .bind(&r.name).bind(&r.metric).bind(&r.operator).bind(r.threshold)
+            .bind(r.window_seconds).bind(r.cooldown_seconds)
+            .bind(&r.channels).bind(r.enabled).bind(id)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn delete_alert_rule(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let r = sqlx::query("DELETE FROM alert_rules WHERE id = $1").bind(id).execute(&self.pool).await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    async fn list_alert_events(&self, service_id: &Uuid, limit: u32) -> Result<Vec<AlertEvent>, GatewayError> {
+        let rows = sqlx::query("SELECT * FROM alert_events WHERE service_id = $1 ORDER BY ts DESC LIMIT $2")
+            .bind(service_id).bind(limit as i64)
+            .fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_alert_event).collect()
+    }
+
+    async fn create_alert_event(&self, e: &AlertEvent) -> Result<(), GatewayError> {
+        sqlx::query("INSERT INTO alert_events (id, rule_id, service_id, ts, metric, value, threshold, message, resolved) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+            .bind(e.id).bind(e.rule_id).bind(e.service_id).bind(e.ts)
+            .bind(&e.metric).bind(e.value).bind(e.threshold)
+            .bind(&e.message).bind(e.resolved)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn resolve_alert_event(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let r = sqlx::query("UPDATE alert_events SET resolved = TRUE, resolved_at = now() WHERE id = $1 AND resolved = FALSE")
+            .bind(id).execute(&self.pool).await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    // ── IP Rules ──
+
+    async fn list_ip_rules(&self, service_id: &Uuid) -> Result<Vec<IpRule>, GatewayError> {
+        let rows = sqlx::query("SELECT * FROM ip_rules WHERE service_id = $1 ORDER BY priority, created_at")
+            .bind(service_id).fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_ip_rule).collect()
+    }
+
+    async fn get_ip_rule(&self, id: &Uuid) -> Result<Option<IpRule>, GatewayError> {
+        let row = sqlx::query("SELECT * FROM ip_rules WHERE id = $1")
+            .bind(id).fetch_optional(&self.pool).await?;
+        row.map(row_to_ip_rule).transpose()
+    }
+
+    async fn create_ip_rule(&self, r: &IpRule) -> Result<(), GatewayError> {
+        sqlx::query("INSERT INTO ip_rules (id, service_id, route_id, cidr, action, description, priority, enabled, hits, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+            .bind(r.id).bind(r.service_id).bind(r.route_id)
+            .bind(&r.cidr).bind(&r.action).bind(&r.description)
+            .bind(r.priority).bind(r.enabled).bind(r.hits)
+            .bind(r.created_at).bind(r.updated_at)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn update_ip_rule(&self, id: &Uuid, r: &IpRule) -> Result<(), GatewayError> {
+        sqlx::query("UPDATE ip_rules SET cidr=$1, action=$2, description=$3, priority=$4, enabled=$5 WHERE id=$6")
+            .bind(&r.cidr).bind(&r.action).bind(&r.description)
+            .bind(r.priority).bind(r.enabled).bind(id)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn delete_ip_rule(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let r = sqlx::query("DELETE FROM ip_rules WHERE id = $1").bind(id).execute(&self.pool).await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    // ── Error Pages ──
+
+    async fn list_error_pages(&self, service_id: &Uuid) -> Result<Vec<ErrorPage>, GatewayError> {
+        let rows = sqlx::query("SELECT * FROM error_pages WHERE service_id = $1 ORDER BY status_code")
+            .bind(service_id).fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_error_page).collect()
+    }
+
+    async fn get_error_page(&self, id: &Uuid) -> Result<Option<ErrorPage>, GatewayError> {
+        let row = sqlx::query("SELECT * FROM error_pages WHERE id = $1")
+            .bind(id).fetch_optional(&self.pool).await?;
+        row.map(row_to_error_page).transpose()
+    }
+
+    async fn create_error_page(&self, p: &ErrorPage) -> Result<(), GatewayError> {
+        sqlx::query("INSERT INTO error_pages (id, service_id, status_code, content_type, body, enabled, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
+            .bind(p.id).bind(p.service_id).bind(p.status_code)
+            .bind(&p.content_type).bind(&p.body).bind(p.enabled)
+            .bind(p.created_at).bind(p.updated_at)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn update_error_page(&self, id: &Uuid, p: &ErrorPage) -> Result<(), GatewayError> {
+        sqlx::query("UPDATE error_pages SET status_code=$1, content_type=$2, body=$3, enabled=$4 WHERE id=$5")
+            .bind(p.status_code).bind(&p.content_type).bind(&p.body)
+            .bind(p.enabled).bind(id)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn delete_error_page(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let r = sqlx::query("DELETE FROM error_pages WHERE id = $1").bind(id).execute(&self.pool).await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    // ── Consumer Groups ──
+
+    async fn list_consumer_groups(&self, service_id: &Uuid) -> Result<Vec<ConsumerGroup>, GatewayError> {
+        let rows = sqlx::query("SELECT * FROM consumer_groups WHERE service_id = $1 ORDER BY created_at")
+            .bind(service_id).fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_consumer_group).collect()
+    }
+
+    async fn get_consumer_group(&self, id: &Uuid) -> Result<Option<ConsumerGroup>, GatewayError> {
+        let row = sqlx::query("SELECT * FROM consumer_groups WHERE id = $1")
+            .bind(id).fetch_optional(&self.pool).await?;
+        row.map(row_to_consumer_group).transpose()
+    }
+
+    async fn create_consumer_group(&self, g: &ConsumerGroup) -> Result<(), GatewayError> {
+        sqlx::query("INSERT INTO consumer_groups (id, service_id, name, description, rate_limit, rate_window_seconds, burst_limit, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+            .bind(g.id).bind(g.service_id).bind(&g.name).bind(&g.description)
+            .bind(g.rate_limit).bind(g.rate_window_seconds).bind(g.burst_limit)
+            .bind(g.created_at).bind(g.updated_at)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn update_consumer_group(&self, id: &Uuid, g: &ConsumerGroup) -> Result<(), GatewayError> {
+        sqlx::query("UPDATE consumer_groups SET name=$1, description=$2, rate_limit=$3, rate_window_seconds=$4, burst_limit=$5 WHERE id=$6")
+            .bind(&g.name).bind(&g.description)
+            .bind(g.rate_limit).bind(g.rate_window_seconds).bind(g.burst_limit)
+            .bind(id)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn delete_consumer_group(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let r = sqlx::query("DELETE FROM consumer_groups WHERE id = $1").bind(id).execute(&self.pool).await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    async fn list_consumer_group_members(&self, group_id: &Uuid) -> Result<Vec<ConsumerGroupMember>, GatewayError> {
+        let rows = sqlx::query("SELECT * FROM consumer_group_members WHERE group_id = $1 ORDER BY joined_at")
+            .bind(group_id).fetch_all(&self.pool).await?;
+        rows.into_iter().map(row_to_consumer_group_member).collect()
+    }
+
+    async fn add_consumer_group_member(&self, m: &ConsumerGroupMember) -> Result<(), GatewayError> {
+        sqlx::query("INSERT INTO consumer_group_members (group_id, consumer_id, joined_at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING")
+            .bind(m.group_id).bind(m.consumer_id).bind(m.joined_at)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn remove_consumer_group_member(&self, group_id: &Uuid, consumer_id: &Uuid) -> Result<bool, GatewayError> {
+        let r = sqlx::query("DELETE FROM consumer_group_members WHERE group_id = $1 AND consumer_id = $2")
+            .bind(group_id).bind(consumer_id)
+            .execute(&self.pool).await?;
+        Ok(r.rows_affected() > 0)
+    }
 }
 
 // ---------- row mappers ----------
@@ -1070,6 +1689,22 @@ fn row_to_service(row: sqlx::postgres::PgRow) -> Result<Service, GatewayError> {
         stream_close_delay_ms: row.try_get::<Option<i64>, _>("stream_close_delay_ms").ok().flatten().map(|v| v as u64),
         pass_host_header: row.try_get::<Option<bool>, _>("pass_host_header").ok().flatten(),
         drain_timeout_ms: row.try_get::<Option<i64>, _>("drain_timeout_ms").ok().flatten().map(|v| v as u64),
+        project_id: row.try_get::<Option<Uuid>, _>("project_id").ok().flatten(),
+        domain: row.try_get("domain").unwrap_or_default(),
+        subdomain: row.try_get("subdomain").unwrap_or_default(),
+        created_at,
+        updated_at,
+    })
+}
+
+fn row_to_project(row: sqlx::postgres::PgRow) -> Result<Project, GatewayError> {
+    let id: Uuid = row.try_get("id")?;
+    let created_at: DateTime<Utc> = row.try_get("created_at")?;
+    let updated_at: DateTime<Utc> = row.try_get("updated_at")?;
+    Ok(Project {
+        id,
+        name: row.try_get("name")?,
+        description: row.try_get("description")?,
         created_at,
         updated_at,
     })
@@ -1285,6 +1920,27 @@ fn row_to_runtime_grant(row: sqlx::postgres::PgRow) -> Result<crate::models::Run
     })
 }
 
+fn row_to_log(row: sqlx::postgres::PgRow) -> Result<LogEntry, GatewayError> {
+    Ok(LogEntry {
+        id: row.try_get("id")?,
+        urn: row.try_get("urn")?,
+        ts: row.try_get("ts")?,
+        level: row.try_get("level")?,
+        message: row.try_get("message")?,
+        service_id: row.try_get("service_id")?,
+        route_id: row.try_get("route_id")?,
+        project_id: row.try_get("project_id")?,
+        method: row.try_get("method")?,
+        path: row.try_get("path")?,
+        status: row.try_get("status")?,
+        duration_ms: row.try_get("duration_ms")?,
+        client_ip: row.try_get("client_ip")?,
+        metadata: row.try_get("metadata")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
 fn row_to_api_key_row(row: sqlx::postgres::PgRow) -> Result<crate::models::ApiKeyRow, GatewayError> {
     let id: i64 = row.try_get("id")?;
     let customer_id: i64 = row.try_get("customer_id")?;
@@ -1300,5 +1956,168 @@ fn row_to_api_key_row(row: sqlx::postgres::PgRow) -> Result<crate::models::ApiKe
         key_hash,
         key_prefix,
         scopes,
+    })
+}
+
+fn row_to_metric_bucket(row: sqlx::postgres::PgRow) -> Result<MetricBucket, GatewayError> {
+    Ok(MetricBucket {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        route_id: row.try_get("route_id")?,
+        bucket_ts: row.try_get("bucket_ts")?,
+        granularity: row.try_get("granularity")?,
+        total_requests: row.try_get::<i32, _>("total_requests")? as i64,
+        success_count: row.try_get::<i32, _>("success_count")? as i64,
+        error_4xx: row.try_get::<i32, _>("error_4xx")? as i64,
+        error_5xx: row.try_get::<i32, _>("error_5xx")? as i64,
+        total_latency_ms: row.try_get("total_latency_ms")?,
+        min_latency_ms: row.try_get::<Option<i32>, _>("min_latency_ms")?.map(|v| v as i64),
+        max_latency_ms: row.try_get::<Option<i32>, _>("max_latency_ms")?.map(|v| v as i64),
+        bytes_in: row.try_get("bytes_in")?,
+        bytes_out: row.try_get("bytes_out")?,
+    })
+}
+
+fn row_to_geo_bucket(row: sqlx::postgres::PgRow) -> Result<GeoBucket, GatewayError> {
+    Ok(GeoBucket {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        bucket_ts: row.try_get("bucket_ts")?,
+        country_code: row.try_get("country_code")?,
+        city: row.try_get("city")?,
+        request_count: row.try_get::<i32, _>("request_count")? as i64,
+    })
+}
+
+fn row_to_rate_limit_bucket(row: sqlx::postgres::PgRow) -> Result<RateLimitBucket, GatewayError> {
+    Ok(RateLimitBucket {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        consumer_id: row.try_get("consumer_id")?,
+        bucket_ts: row.try_get("bucket_ts")?,
+        allowed: row.try_get::<i32, _>("allowed")? as i64,
+        throttled: row.try_get::<i32, _>("throttled")? as i64,
+    })
+}
+
+fn row_to_probe(row: sqlx::postgres::PgRow) -> Result<Probe, GatewayError> {
+    Ok(Probe {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        route_id: row.try_get("route_id")?,
+        name: row.try_get("name")?,
+        method: row.try_get("method")?,
+        path: row.try_get("path")?,
+        interval_seconds: row.try_get("interval_seconds")?,
+        timeout_ms: row.try_get("timeout_ms")?,
+        expected_status: row.try_get("expected_status")?,
+        enabled: row.try_get("enabled")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn row_to_probe_result(row: sqlx::postgres::PgRow) -> Result<ProbeResult, GatewayError> {
+    Ok(ProbeResult {
+        id: row.try_get("id")?,
+        probe_id: row.try_get("probe_id")?,
+        ts: row.try_get("ts")?,
+        status: row.try_get("status")?,
+        latency_ms: row.try_get("latency_ms")?,
+        healthy: row.try_get("healthy")?,
+        error: row.try_get("error")?,
+    })
+}
+
+fn row_to_snapshot(row: sqlx::postgres::PgRow) -> Result<Snapshot, GatewayError> {
+    Ok(Snapshot {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        name: row.try_get("name")?,
+        data: row.try_get("data")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn row_to_alert_rule(row: sqlx::postgres::PgRow) -> Result<AlertRule, GatewayError> {
+    Ok(AlertRule {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        name: row.try_get("name")?,
+        metric: row.try_get("metric")?,
+        operator: row.try_get("operator")?,
+        threshold: row.try_get("threshold")?,
+        window_seconds: row.try_get("window_seconds")?,
+        cooldown_seconds: row.try_get("cooldown_seconds")?,
+        channels: row.try_get("channels")?,
+        enabled: row.try_get("enabled")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn row_to_alert_event(row: sqlx::postgres::PgRow) -> Result<AlertEvent, GatewayError> {
+    Ok(AlertEvent {
+        id: row.try_get("id")?,
+        rule_id: row.try_get("rule_id")?,
+        service_id: row.try_get("service_id")?,
+        ts: row.try_get("ts")?,
+        metric: row.try_get("metric")?,
+        value: row.try_get("value")?,
+        threshold: row.try_get("threshold")?,
+        message: row.try_get("message")?,
+        resolved: row.try_get("resolved")?,
+        resolved_at: row.try_get("resolved_at")?,
+    })
+}
+
+fn row_to_ip_rule(row: sqlx::postgres::PgRow) -> Result<IpRule, GatewayError> {
+    Ok(IpRule {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        route_id: row.try_get("route_id")?,
+        cidr: row.try_get("cidr")?,
+        action: row.try_get("action")?,
+        description: row.try_get("description")?,
+        priority: row.try_get("priority")?,
+        enabled: row.try_get("enabled")?,
+        hits: row.try_get("hits")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn row_to_error_page(row: sqlx::postgres::PgRow) -> Result<ErrorPage, GatewayError> {
+    Ok(ErrorPage {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        status_code: row.try_get("status_code")?,
+        content_type: row.try_get("content_type")?,
+        body: row.try_get("body")?,
+        enabled: row.try_get("enabled")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn row_to_consumer_group(row: sqlx::postgres::PgRow) -> Result<ConsumerGroup, GatewayError> {
+    Ok(ConsumerGroup {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        name: row.try_get("name")?,
+        description: row.try_get("description")?,
+        rate_limit: row.try_get("rate_limit")?,
+        rate_window_seconds: row.try_get("rate_window_seconds")?,
+        burst_limit: row.try_get("burst_limit")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn row_to_consumer_group_member(row: sqlx::postgres::PgRow) -> Result<ConsumerGroupMember, GatewayError> {
+    Ok(ConsumerGroupMember {
+        group_id: row.try_get("group_id")?,
+        consumer_id: row.try_get("consumer_id")?,
+        joined_at: row.try_get("joined_at")?,
     })
 }

@@ -36,6 +36,7 @@ pub struct MatchContext {
 pub struct ProxyState {
     pub route_table: SharedRouteTable,
     pub plugins: Arc<PluginExecutor>,
+    pub log_writer: crate::logs::LogWriter,
     /// Parsed CIDR ranges for trusted proxy validation. When non-empty,
     /// X-Forwarded-For is only honoured from source IPs matching a range.
     pub trusted_proxies: Vec<ipnet::IpNet>,
@@ -205,16 +206,31 @@ pub async fn proxy_handler(
         .or_else(|| req.uri().host().map(|h| h.to_string()));
 
     let query_string = req.uri().query().map(|q| q.to_string());
-    let (route, service) = match state
-        .route_table
-        .match_route_full(
+    let peer_ip_early = req
+        .extensions()
+        .get::<std::net::SocketAddr>()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_default();
+
+    // Subdomain routing: try matching host against service domain/subdomain first.
+    let host_match = host.as_deref().and_then(|h| {
+        let svc = state.route_table.match_by_host(h)?;
+        let route = state
+            .route_table
+            .match_route_for_service(&svc.id, &path, &method)
+            .unwrap_or_else(|| crate::models::Route::passthrough(svc.id));
+        Some((route, svc))
+    });
+
+    let (route, service) = match host_match.or_else(|| {
+        state.route_table.match_route_full(
             &path,
             &method,
             host.as_deref(),
             Some(req.headers()),
             query_string.as_deref(),
         )
-    {
+    }) {
         Some(pair) => pair,
         None => {
             metrics::counter!(
@@ -226,12 +242,18 @@ pub async fn proxy_handler(
                 "target" => "-",
             )
             .increment(1);
+            state.log_writer.log(&method, &path, &peer_ip_early, None, None, None, None, start.elapsed().as_millis() as i64, "error", "no matching route");
             return Err(GatewayError::RouteNotFound(path));
         }
     };
 
     let svc_name = service.name.clone();
     let route_id = route.id.to_string();
+    let log_method = method.clone();
+    let log_path = path.clone();
+    let log_svc_id = Some(service.id);
+    let log_route_id = Some(route.id);
+    let log_project_id = service.project_id;
 
     if route.health_gate && !state.lb.has_healthy_active_target(&service.id) {
         metrics::counter!(
@@ -243,6 +265,7 @@ pub async fn proxy_handler(
             "target" => "-",
         )
         .increment(1);
+        state.log_writer.log(&method, &path, &peer_ip_early, log_svc_id, log_route_id, log_project_id, Some(503), start.elapsed().as_millis() as i64, "error", "health gated — no healthy targets");
         return Err(GatewayError::ServiceUnavailable(format!(
             "service {} has no healthy targets",
             service.name
@@ -263,6 +286,7 @@ pub async fn proxy_handler(
             "target" => "-",
         )
         .increment(1);
+        state.log_writer.log(&method, &path, &peer_ip_early, log_svc_id, log_route_id, log_project_id, Some(503), start.elapsed().as_millis() as i64, "error", "circuit breaker open");
         return Err(GatewayError::CircuitOpen(format!(
             "service {} circuit breaker open",
             service.name
@@ -283,6 +307,7 @@ pub async fn proxy_handler(
             "target" => "-",
         )
         .increment(1);
+        state.log_writer.log(&method, &path, &peer_ip_early, log_svc_id, log_route_id, log_project_id, Some(402), start.elapsed().as_millis() as i64, "error", "license revoked");
         return Err(GatewayError::LicenseRevoked);
     }
 
@@ -297,6 +322,7 @@ pub async fn proxy_handler(
             "target" => "-",
         )
         .increment(1);
+        state.log_writer.log(&method, &path, &peer_ip_early, log_svc_id, log_route_id, log_project_id, Some(429), start.elapsed().as_millis() as i64, "error", "quota exceeded");
         return Err(GatewayError::QuotaExceeded);
     }
     let is_overage = quota_result == crate::quota::QuotaResult::Overage;
@@ -475,6 +501,7 @@ pub async fn proxy_handler(
             )
             .record(start.elapsed().as_secs_f64());
 
+            state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, Some(file_resp.status().as_u16()), start.elapsed().as_millis() as i64, "info", "");
             return Ok(file_resp);
         }
     }
@@ -505,6 +532,9 @@ pub async fn proxy_handler(
                 "target" => target_label,
             )
             .record(start.elapsed().as_secs_f64());
+            let ws_status = result.as_ref().ok().map(|r| r.status().as_u16());
+            let ws_level = if result.is_err() { "error" } else { "info" };
+            state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, ws_status, start.elapsed().as_millis() as i64, ws_level, "");
             return result;
         }
         ProtocolKind::GrpcWeb => {
@@ -539,6 +569,9 @@ pub async fn proxy_handler(
                 "target" => target_label,
             )
             .record(start.elapsed().as_secs_f64());
+            let gw_status = result.as_ref().ok().map(|r| r.status().as_u16());
+            let gw_level = if result.is_err() { "error" } else { "info" };
+            state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, gw_status, start.elapsed().as_millis() as i64, gw_level, "");
             return result;
         }
         ProtocolKind::Grpc => {
@@ -572,6 +605,9 @@ pub async fn proxy_handler(
                 "target" => target_label,
             )
             .record(start.elapsed().as_secs_f64());
+            let grpc_status = result.as_ref().ok().map(|r| r.status().as_u16());
+            let grpc_level = if result.is_err() { "error" } else { "info" };
+            state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, grpc_status, start.elapsed().as_millis() as i64, grpc_level, "");
             return result;
         }
         ProtocolKind::Http => {}
@@ -637,6 +673,7 @@ pub async fn proxy_handler(
                         "target" => target_label.clone(),
                     )
                     .increment(1);
+                    state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, None, start.elapsed().as_millis() as i64, "error", &format!("unix socket: {e}"));
                     return Err(e);
                 }
             };
@@ -646,6 +683,7 @@ pub async fn proxy_handler(
             let resp_body = match axum::body::to_bytes(Body::new(incoming), usize::MAX).await {
                 Ok(b) => b,
                 Err(e) => {
+                    state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, None, start.elapsed().as_millis() as i64, "error", &format!("unix body read: {e}"));
                     return Err(GatewayError::UpstreamError(format!(
                         "unix body read: {e}"
                     )));
@@ -710,6 +748,8 @@ pub async fn proxy_handler(
             )
             .record(start.elapsed().as_secs_f64());
 
+            let unix_level = if status.is_server_error() { "error" } else { "info" };
+            state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, Some(status.as_u16()), start.elapsed().as_millis() as i64, unix_level, "");
             return Ok(final_resp);
         }
     }
@@ -995,6 +1035,7 @@ pub async fn proxy_handler(
                 &svc_name,
                 format!("upstream send error: {last_err}"),
             );
+            state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, None, start.elapsed().as_millis() as i64, "error", &last_err);
             return Err(GatewayError::UpstreamError(last_err));
         }
     };
@@ -1035,6 +1076,7 @@ pub async fn proxy_handler(
                 &svc_name,
                 format!("upstream body error: {e}"),
             );
+            state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, None, start.elapsed().as_millis() as i64, "error", &format!("upstream body error: {e}"));
             return Err(GatewayError::UpstreamError(e.to_string()));
         }
     };
@@ -1156,6 +1198,9 @@ pub async fn proxy_handler(
         "target" => target_label,
     )
     .record(start.elapsed().as_secs_f64());
+
+    let http_level = if status.is_server_error() { "error" } else { "info" };
+    state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, Some(status.as_u16()), start.elapsed().as_millis() as i64, http_level, "");
 
     Ok(final_resp)
 }

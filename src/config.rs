@@ -16,6 +16,10 @@ pub struct GatewayConfig {
     /// gateway refuses to start. See `src/license/mod.rs`.
     #[serde(default)]
     pub license: LicenseSettings,
+    /// OpenTelemetry export. Env vars `LYNXX_TELEMETRY_URL` and
+    /// `LYNXX_TELEMETRY_API_KEY` override the TOML values.
+    #[serde(default)]
+    pub telemetry: TelemetrySettings,
     /// Named matchers (`@name`) that can be referenced by routes.
     /// Equivalent to Caddy's `@name` matcher blocks.
     #[serde(default)]
@@ -39,6 +43,31 @@ pub struct LicenseSettings {
     /// also be set via `LYNXX_API_KEY` env var, which wins on conflict.
     #[serde(default)]
     pub api_key: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct TelemetrySettings {
+    /// OTLP endpoint URL (e.g. `http://localhost:4318`).
+    /// Env override: `LYNXX_TELEMETRY_URL` or `OTEL_EXPORTER_OTLP_ENDPOINT`.
+    #[serde(default)]
+    pub endpoint: String,
+    /// API key / bearer token sent as `Authorization` header on OTLP exports.
+    /// Env override: `LYNXX_TELEMETRY_API_KEY`.
+    #[serde(default)]
+    pub api_key: String,
+    /// Logical service name embedded in every span. Defaults to `lynxx-gateway`.
+    /// Env override: `OTEL_SERVICE_NAME`.
+    #[serde(default = "default_telemetry_service_name")]
+    pub service_name: String,
+    /// Optional secondary endpoint (e.g. Fluxx sidecar). When set, spans
+    /// are exported to both endpoints.
+    /// Env override: `FLUXX_OTEL_ENDPOINT`.
+    #[serde(default)]
+    pub fluxx_endpoint: String,
+}
+
+fn default_telemetry_service_name() -> String {
+    "lynxx-gateway".into()
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -983,6 +1012,7 @@ impl Default for GatewayConfig {
             routes: Vec::new(),
             plugins: Vec::new(),
             license: LicenseSettings::default(),
+            telemetry: TelemetrySettings::default(),
             named_matchers: Vec::new(),
             snippets: HashMap::new(),
             order: Vec::new(),
@@ -1533,9 +1563,13 @@ pub fn spawn_config_watcher<F>(
 /// for the values most commonly set in container/Helm deployments.
 ///
 /// Recognised vars:
-///   * `DATABASE_URL`       overrides `gateway.database_url`
-///   * `LYNXX_PROXY_PORT`   overrides `gateway.proxy_port`
-///   * `LYNXX_ADMIN_PORT`   overrides `gateway.admin_port`
+///   * `DATABASE_URL`            overrides `gateway.database_url`
+///   * `LYNXX_PROXY_PORT`        overrides `gateway.proxy_port`
+///   * `LYNXX_ADMIN_PORT`        overrides `gateway.admin_port`
+///   * `LYNXX_TELEMETRY_URL`     overrides `telemetry.endpoint` (fallback: `OTEL_EXPORTER_OTLP_ENDPOINT`)
+///   * `LYNXX_TELEMETRY_API_KEY` overrides `telemetry.api_key`
+///   * `OTEL_SERVICE_NAME`       overrides `telemetry.service_name`
+///   * `FLUXX_OTEL_ENDPOINT`     overrides `telemetry.fluxx_endpoint`
 pub fn apply_env_overrides(config: &mut GatewayConfig) {
     if let Ok(url) = std::env::var("DATABASE_URL") {
         if !url.is_empty() {
@@ -1550,6 +1584,30 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
     if let Some(port) = parse_port_env("LYNXX_ADMIN_PORT") {
         tracing::info!(port, "LYNXX_ADMIN_PORT env override applied");
         config.gateway.admin_port = port;
+    }
+    if let Ok(url) = std::env::var("LYNXX_TELEMETRY_URL") {
+        if !url.is_empty() {
+            config.telemetry.endpoint = url;
+        }
+    } else if let Ok(url) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
+        if !url.is_empty() {
+            config.telemetry.endpoint = url;
+        }
+    }
+    if let Ok(key) = std::env::var("LYNXX_TELEMETRY_API_KEY") {
+        if !key.is_empty() {
+            config.telemetry.api_key = key;
+        }
+    }
+    if let Ok(name) = std::env::var("OTEL_SERVICE_NAME") {
+        if !name.is_empty() {
+            config.telemetry.service_name = name;
+        }
+    }
+    if let Ok(url) = std::env::var("FLUXX_OTEL_ENDPOINT") {
+        if !url.is_empty() {
+            config.telemetry.fluxx_endpoint = url;
+        }
     }
 }
 
