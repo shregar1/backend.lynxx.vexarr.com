@@ -1,17 +1,29 @@
 pub mod alerts;
 pub mod analytics;
+pub mod cache;
+pub mod cluster_mgmt;
 pub mod config_api;
 pub mod consumer_groups;
+pub mod cost;
 pub mod deploy;
 pub mod docs;
 pub mod error_pages;
 pub mod graph;
+pub mod incidents;
 pub mod ip_rules;
+pub mod loadtest;
+pub mod marketplace;
+pub mod pki;
 pub mod probes;
 pub mod profiling;
+pub mod ratelimit_sim;
 pub mod replay;
 pub mod routes;
 pub mod snapshots;
+pub mod tracing_api;
+pub mod transforms;
+pub mod versioning;
+pub mod webhooks;
 
 use crate::audit::AuditLog;
 use crate::auth::middleware::{extract_token, require_role};
@@ -159,6 +171,45 @@ pub fn admin_router(
         .route("/services/:id/graph", get(graph::service_graph))
         // ── api docs ──
         .route("/services/:id/docs", get(docs::service_docs))
+        // ── cache (read-only) ──
+        .route("/services/:id/cache", get(cache::list_cache_entries))
+        .route("/services/:id/cache/stats", get(cache::cache_stats))
+        // ── tracing (read-only) ──
+        .route("/services/:id/traces", get(tracing_api::list_traces))
+        .route("/traces/:id", get(tracing_api::get_trace))
+        .route("/traces/:id/spans", get(tracing_api::list_spans))
+        // ── transforms (read-only) ──
+        .route("/services/:id/transforms", get(transforms::list_transforms))
+        // ── versioning (read-only) ──
+        .route("/services/:id/versions", get(versioning::list_versions))
+        // ── incidents (read-only) ──
+        .route("/services/:id/incidents", get(incidents::list_incidents))
+        .route("/incidents/:id", get(incidents::get_incident))
+        .route("/incidents/:id/updates", get(incidents::list_incident_updates))
+        // ── webhooks (read-only) ──
+        .route("/services/:id/webhooks", get(webhooks::list_webhooks))
+        .route("/webhooks/:id", get(webhooks::get_webhook))
+        .route("/webhooks/:id/deliveries", get(webhooks::list_deliveries))
+        // ── load testing (read-only) ──
+        .route("/services/:id/load-tests", get(loadtest::list_load_tests))
+        .route("/load-tests/:id", get(loadtest::get_load_test))
+        // ── marketplace (read-only) ──
+        .route("/marketplace/plugins", get(marketplace::list_plugins))
+        .route("/marketplace/plugins/:id", get(marketplace::get_plugin))
+        // ── cost analytics (read-only) ──
+        .route("/services/:id/costs", get(cost::list_cost_records))
+        .route("/services/:id/costs/summary", get(cost::cost_summary))
+        // ── cluster management (read-only) ──
+        .route("/cluster/nodes", get(cluster_mgmt::list_nodes))
+        .route("/cluster/nodes/:id", get(cluster_mgmt::get_node))
+        // ── rate limit simulator (read-only) ──
+        .route("/services/:id/rate-limit-sim", get(ratelimit_sim::list_simulations))
+        .route("/rate-limit-sim/:id", get(ratelimit_sim::get_simulation))
+        // ── PKI / certificates (read-only) ──
+        .route("/certificates", get(pki::list_certificates))
+        .route("/certificates/:id", get(pki::get_certificate))
+        // ── circuit breaker per-service (read-only) ──
+        .route("/services/:id/circuit-breaker", get(routes::get_service_circuit_breaker))
         .route_layer(middleware::from_fn(viewer));
 
     // ---- mutations (operator) ----
@@ -269,6 +320,42 @@ pub fn admin_router(
         // ── proxy helpers ──
         .route("/proxy/try", post(docs::proxy_try))
         .route("/proxy/replay", post(replay::proxy_replay))
+        // ── consumer key regen ──
+        .route("/consumers/:id/regenerate-key", post(routes::regenerate_consumer_key))
+        // ── cache (mutations) ──
+        .route("/services/:id/cache/purge", post(cache::purge_cache))
+        .route("/services/:id/cache/warm", post(cache::warm_cache))
+        // ── tracing (mutations) ──
+        .route("/services/:id/traces", post(tracing_api::ingest_trace))
+        // ── transforms (mutations) ──
+        .route("/services/:id/transforms", post(transforms::create_transform))
+        .route("/transforms/:id", patch(transforms::patch_transform).delete(transforms::delete_transform))
+        // ── versioning (mutations) ──
+        .route("/services/:id/versions", post(versioning::create_version))
+        .route("/versions/:id", patch(versioning::patch_version).delete(versioning::delete_version))
+        // ── incidents (mutations) ──
+        .route("/services/:id/incidents", post(incidents::create_incident))
+        .route("/incidents/:id", patch(incidents::update_incident).delete(incidents::delete_incident))
+        .route("/incidents/:id/updates", post(incidents::create_incident_update))
+        // ── webhooks (mutations) ──
+        .route("/services/:id/webhooks", post(webhooks::create_webhook))
+        .route("/webhooks/:id", patch(webhooks::patch_webhook).delete(webhooks::delete_webhook))
+        .route("/webhooks/:id/test", post(webhooks::test_webhook))
+        // ── load testing (mutations) ──
+        .route("/services/:id/load-tests", post(loadtest::create_load_test))
+        .route("/load-tests/:id", delete(loadtest::delete_load_test))
+        // ── marketplace (mutations) ──
+        .route("/marketplace/plugins", post(marketplace::install_plugin))
+        // ── cluster management (mutations) ──
+        .route("/cluster/nodes/:id/drain", post(cluster_mgmt::drain_node))
+        .route("/cluster/nodes/:id", delete(cluster_mgmt::remove_node))
+        // ── rate limit simulator (mutations) ──
+        .route("/services/:id/rate-limit-sim", post(ratelimit_sim::run_simulation))
+        // ── PKI / certificates (mutations) ──
+        .route("/certificates", post(pki::create_certificate))
+        .route("/certificates/:id", delete(pki::delete_certificate))
+        // ── circuit breaker per-service (mutations) ──
+        .route("/services/:id/circuit-breaker", patch(routes::patch_service_circuit_breaker))
         .route_layer(middleware::from_fn(operator));
 
     // ---- token management (admin) ----

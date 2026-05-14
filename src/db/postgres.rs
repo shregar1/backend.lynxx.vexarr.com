@@ -8,9 +8,12 @@ use crate::db::{AdminTokenPatch, NewAdminToken, Repository};
 use crate::error::GatewayError;
 use crate::db::LogFilter;
 use crate::models::{
-    AlertEvent, AlertRule, Consumer, ConsumerGroup, ConsumerGroupMember, ErrorPage,
-    GeoBucket, IpRule, LogEntry, MetricBucket, PluginInstance, Probe, ProbeResult,
-    Project, RateLimitBucket, Route, Service, Snapshot, Target,
+    AlertEvent, AlertRule, ApiVersion, CacheEntry, CacheStats, Certificate,
+    ClusterNode, Consumer, ConsumerGroup, ConsumerGroupMember, CostRecord, ErrorPage,
+    GeoBucket, Incident, IncidentUpdate, IpRule, LoadTest, LogEntry, MarketplacePlugin,
+    MetricBucket, PluginInstance, Probe, ProbeResult, Project, RateLimitBucket,
+    RateLimitSimulation, Route, Service, Snapshot, SpanRecord, Target, TraceRecord,
+    TransformRule, Webhook, WebhookDelivery,
 };
 use crate::recording::{RecordingFilter, RecordingIndexRow};
 use async_trait::async_trait;
@@ -1625,6 +1628,975 @@ impl Repository for PostgresRepository {
             .execute(&self.pool).await?;
         Ok(r.rows_affected() > 0)
     }
+
+    // ── Cache ──
+
+    async fn list_cache_entries(&self, service_id: &Uuid) -> Result<Vec<CacheEntry>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, service_id, cache_key, content_hash, size_bytes, ttl_seconds, hits, created_at, expires_at \
+             FROM cache_entries WHERE service_id = $1 AND is_deleted = FALSE ORDER BY created_at DESC",
+        )
+        .bind(service_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_cache_entry).collect()
+    }
+
+    async fn get_cache_entry(&self, id: &Uuid) -> Result<Option<CacheEntry>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, service_id, cache_key, content_hash, size_bytes, ttl_seconds, hits, created_at, expires_at \
+             FROM cache_entries WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_cache_entry).transpose()
+    }
+
+    async fn upsert_cache_entry(&self, entry: &CacheEntry) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO cache_entries (id, service_id, cache_key, content_hash, size_bytes, ttl_seconds, hits, created_at, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+             ON CONFLICT (id) DO UPDATE SET \
+               content_hash = EXCLUDED.content_hash, \
+               size_bytes = EXCLUDED.size_bytes, \
+               ttl_seconds = EXCLUDED.ttl_seconds, \
+               hits = EXCLUDED.hits, \
+               expires_at = EXCLUDED.expires_at",
+        )
+        .bind(entry.id)
+        .bind(entry.service_id)
+        .bind(&entry.cache_key)
+        .bind(&entry.content_hash)
+        .bind(entry.size_bytes)
+        .bind(entry.ttl_seconds)
+        .bind(entry.hits)
+        .bind(entry.created_at)
+        .bind(entry.expires_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_cache_entry(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let result = sqlx::query(
+            "UPDATE cache_entries SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn purge_cache(&self, service_id: &Uuid) -> Result<u64, GatewayError> {
+        let result = sqlx::query(
+            "UPDATE cache_entries SET is_deleted = TRUE WHERE service_id = $1 AND is_deleted = FALSE",
+        )
+        .bind(service_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn cache_stats(&self, service_id: &Uuid) -> Result<CacheStats, GatewayError> {
+        let row = sqlx::query(
+            "SELECT \
+               COALESCE(COUNT(*), 0) AS total_entries, \
+               COALESCE(SUM(size_bytes), 0) AS total_size_bytes, \
+               COALESCE(SUM(hits), 0) AS hit_count \
+             FROM cache_entries WHERE service_id = $1 AND is_deleted = FALSE",
+        )
+        .bind(service_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let total_entries: i64 = row.try_get("total_entries")?;
+        let total_size_bytes: i64 = row.try_get("total_size_bytes")?;
+        let hit_count: i64 = row.try_get("hit_count")?;
+        Ok(CacheStats {
+            service_id: *service_id,
+            total_entries,
+            total_size_bytes,
+            hit_count,
+            miss_count: 0,
+            hit_rate: 0.0,
+            eviction_count: 0,
+        })
+    }
+
+    // ── Tracing ──
+
+    async fn list_traces(&self, service_id: &Uuid, limit: u32) -> Result<Vec<TraceRecord>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, trace_id, service_id, route_id, method, path, status, duration_ms, span_count, has_errors, metadata, started_at \
+             FROM traces WHERE service_id = $1 AND is_deleted = FALSE ORDER BY started_at DESC LIMIT $2",
+        )
+        .bind(service_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_trace).collect()
+    }
+
+    async fn get_trace(&self, id: &Uuid) -> Result<Option<TraceRecord>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, trace_id, service_id, route_id, method, path, status, duration_ms, span_count, has_errors, metadata, started_at \
+             FROM traces WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_trace).transpose()
+    }
+
+    async fn create_trace(&self, trace: &TraceRecord) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO traces (id, trace_id, service_id, route_id, method, path, status, duration_ms, span_count, has_errors, metadata, started_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        )
+        .bind(trace.id)
+        .bind(&trace.trace_id)
+        .bind(trace.service_id)
+        .bind(trace.route_id)
+        .bind(&trace.method)
+        .bind(&trace.path)
+        .bind(trace.status)
+        .bind(trace.duration_ms)
+        .bind(trace.span_count)
+        .bind(trace.has_errors)
+        .bind(&trace.metadata)
+        .bind(trace.started_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_spans(&self, trace_id: &str) -> Result<Vec<SpanRecord>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, trace_id, span_id, parent_span_id, operation, service_name, status, duration_ms, tags, logs, started_at \
+             FROM spans WHERE trace_id = $1 ORDER BY started_at",
+        )
+        .bind(trace_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_span).collect()
+    }
+
+    async fn create_span(&self, span: &SpanRecord) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO spans (id, trace_id, span_id, parent_span_id, operation, service_name, status, duration_ms, tags, logs, started_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(span.id)
+        .bind(&span.trace_id)
+        .bind(&span.span_id)
+        .bind(span.parent_span_id.as_deref())
+        .bind(&span.operation)
+        .bind(&span.service_name)
+        .bind(&span.status)
+        .bind(span.duration_ms)
+        .bind(&span.tags)
+        .bind(&span.logs)
+        .bind(span.started_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // ── Transforms ──
+
+    async fn list_transform_rules(&self, service_id: &Uuid) -> Result<Vec<TransformRule>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, service_id, route_id, name, phase, action, target, value, condition, priority, enabled, created_at, updated_at \
+             FROM transform_rules WHERE service_id = $1 AND is_deleted = FALSE ORDER BY priority, created_at",
+        )
+        .bind(service_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_transform_rule).collect()
+    }
+
+    async fn get_transform_rule(&self, id: &Uuid) -> Result<Option<TransformRule>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, service_id, route_id, name, phase, action, target, value, condition, priority, enabled, created_at, updated_at \
+             FROM transform_rules WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_transform_rule).transpose()
+    }
+
+    async fn create_transform_rule(&self, rule: &TransformRule) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO transform_rules (id, service_id, route_id, name, phase, action, target, value, condition, priority, enabled, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+        )
+        .bind(rule.id)
+        .bind(rule.service_id)
+        .bind(rule.route_id)
+        .bind(&rule.name)
+        .bind(&rule.phase)
+        .bind(&rule.action)
+        .bind(&rule.target)
+        .bind(&rule.value)
+        .bind(rule.condition.as_deref())
+        .bind(rule.priority)
+        .bind(rule.enabled)
+        .bind(rule.created_at)
+        .bind(rule.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn update_transform_rule(&self, id: &Uuid, rule: &TransformRule) -> Result<(), GatewayError> {
+        sqlx::query(
+            "UPDATE transform_rules SET name = $1, phase = $2, action = $3, target = $4, value = $5, \
+             condition = $6, priority = $7, enabled = $8, updated_at = $9 \
+             WHERE id = $10 AND is_deleted = FALSE",
+        )
+        .bind(&rule.name)
+        .bind(&rule.phase)
+        .bind(&rule.action)
+        .bind(&rule.target)
+        .bind(&rule.value)
+        .bind(rule.condition.as_deref())
+        .bind(rule.priority)
+        .bind(rule.enabled)
+        .bind(rule.updated_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_transform_rule(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let result = sqlx::query(
+            "UPDATE transform_rules SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ── API Versions ──
+
+    async fn list_api_versions(&self, service_id: &Uuid) -> Result<Vec<ApiVersion>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, service_id, version, base_path, upstream_path, status, deprecated_at, sunset_at, created_at, updated_at \
+             FROM api_versions WHERE service_id = $1 AND is_deleted = FALSE ORDER BY created_at",
+        )
+        .bind(service_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_api_version).collect()
+    }
+
+    async fn get_api_version(&self, id: &Uuid) -> Result<Option<ApiVersion>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, service_id, version, base_path, upstream_path, status, deprecated_at, sunset_at, created_at, updated_at \
+             FROM api_versions WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_api_version).transpose()
+    }
+
+    async fn create_api_version(&self, version: &ApiVersion) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO api_versions (id, service_id, version, base_path, upstream_path, status, deprecated_at, sunset_at, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(version.id)
+        .bind(version.service_id)
+        .bind(&version.version)
+        .bind(&version.base_path)
+        .bind(&version.upstream_path)
+        .bind(&version.status)
+        .bind(version.deprecated_at)
+        .bind(version.sunset_at)
+        .bind(version.created_at)
+        .bind(version.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn update_api_version(&self, id: &Uuid, version: &ApiVersion) -> Result<(), GatewayError> {
+        sqlx::query(
+            "UPDATE api_versions SET version = $1, base_path = $2, upstream_path = $3, status = $4, \
+             deprecated_at = $5, sunset_at = $6, updated_at = $7 \
+             WHERE id = $8 AND is_deleted = FALSE",
+        )
+        .bind(&version.version)
+        .bind(&version.base_path)
+        .bind(&version.upstream_path)
+        .bind(&version.status)
+        .bind(version.deprecated_at)
+        .bind(version.sunset_at)
+        .bind(version.updated_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_api_version(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let result = sqlx::query(
+            "UPDATE api_versions SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ── Incidents ──
+
+    async fn list_incidents(&self, service_id: &Uuid) -> Result<Vec<Incident>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, service_id, title, severity, status, description, started_at, resolved_at, created_at, updated_at \
+             FROM incidents WHERE service_id = $1 AND is_deleted = FALSE ORDER BY created_at DESC",
+        )
+        .bind(service_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_incident).collect()
+    }
+
+    async fn get_incident(&self, id: &Uuid) -> Result<Option<Incident>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, service_id, title, severity, status, description, started_at, resolved_at, created_at, updated_at \
+             FROM incidents WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_incident).transpose()
+    }
+
+    async fn create_incident(&self, incident: &Incident) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO incidents (id, service_id, title, severity, status, description, started_at, resolved_at, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(incident.id)
+        .bind(incident.service_id)
+        .bind(&incident.title)
+        .bind(&incident.severity)
+        .bind(&incident.status)
+        .bind(&incident.description)
+        .bind(incident.started_at)
+        .bind(incident.resolved_at)
+        .bind(incident.created_at)
+        .bind(incident.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn update_incident(&self, id: &Uuid, incident: &Incident) -> Result<(), GatewayError> {
+        sqlx::query(
+            "UPDATE incidents SET title = $1, severity = $2, status = $3, description = $4, \
+             started_at = $5, resolved_at = $6, updated_at = $7 \
+             WHERE id = $8 AND is_deleted = FALSE",
+        )
+        .bind(&incident.title)
+        .bind(&incident.severity)
+        .bind(&incident.status)
+        .bind(&incident.description)
+        .bind(incident.started_at)
+        .bind(incident.resolved_at)
+        .bind(incident.updated_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_incident(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let result = sqlx::query(
+            "UPDATE incidents SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn list_incident_updates(&self, incident_id: &Uuid) -> Result<Vec<IncidentUpdate>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, incident_id, status, message, created_at \
+             FROM incident_updates WHERE incident_id = $1 ORDER BY created_at",
+        )
+        .bind(incident_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_incident_update).collect()
+    }
+
+    async fn create_incident_update(&self, update: &IncidentUpdate) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO incident_updates (id, incident_id, status, message, created_at) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(update.id)
+        .bind(update.incident_id)
+        .bind(&update.status)
+        .bind(&update.message)
+        .bind(update.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // ── Webhooks ──
+
+    async fn list_webhooks(&self, service_id: &Uuid) -> Result<Vec<Webhook>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, service_id, name, url, events, secret, enabled, retry_count, timeout_ms, created_at, updated_at \
+             FROM webhooks WHERE service_id = $1 AND is_deleted = FALSE ORDER BY created_at",
+        )
+        .bind(service_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_webhook).collect()
+    }
+
+    async fn get_webhook(&self, id: &Uuid) -> Result<Option<Webhook>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, service_id, name, url, events, secret, enabled, retry_count, timeout_ms, created_at, updated_at \
+             FROM webhooks WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_webhook).transpose()
+    }
+
+    async fn create_webhook(&self, webhook: &Webhook) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO webhooks (id, service_id, name, url, events, secret, enabled, retry_count, timeout_ms, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(webhook.id)
+        .bind(webhook.service_id)
+        .bind(&webhook.name)
+        .bind(&webhook.url)
+        .bind(&webhook.events)
+        .bind(webhook.secret.as_deref())
+        .bind(webhook.enabled)
+        .bind(webhook.retry_count)
+        .bind(webhook.timeout_ms)
+        .bind(webhook.created_at)
+        .bind(webhook.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn update_webhook(&self, id: &Uuid, webhook: &Webhook) -> Result<(), GatewayError> {
+        sqlx::query(
+            "UPDATE webhooks SET name = $1, url = $2, events = $3, secret = $4, enabled = $5, \
+             retry_count = $6, timeout_ms = $7, updated_at = $8 \
+             WHERE id = $9 AND is_deleted = FALSE",
+        )
+        .bind(&webhook.name)
+        .bind(&webhook.url)
+        .bind(&webhook.events)
+        .bind(webhook.secret.as_deref())
+        .bind(webhook.enabled)
+        .bind(webhook.retry_count)
+        .bind(webhook.timeout_ms)
+        .bind(webhook.updated_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_webhook(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let result = sqlx::query(
+            "UPDATE webhooks SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn list_webhook_deliveries(&self, webhook_id: &Uuid, limit: u32) -> Result<Vec<WebhookDelivery>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, webhook_id, event_type, payload, response_status, response_body, success, attempts, delivered_at \
+             FROM webhook_deliveries WHERE webhook_id = $1 ORDER BY delivered_at DESC LIMIT $2",
+        )
+        .bind(webhook_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_webhook_delivery).collect()
+    }
+
+    async fn create_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO webhook_deliveries (id, webhook_id, event_type, payload, response_status, response_body, success, attempts, delivered_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(delivery.id)
+        .bind(delivery.webhook_id)
+        .bind(&delivery.event_type)
+        .bind(&delivery.payload)
+        .bind(delivery.response_status)
+        .bind(delivery.response_body.as_deref())
+        .bind(delivery.success)
+        .bind(delivery.attempts)
+        .bind(delivery.delivered_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // ── Load Tests ──
+
+    async fn list_load_tests(&self, service_id: &Uuid) -> Result<Vec<LoadTest>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, service_id, name, target_rps, duration_seconds, concurrent_users, method, path, \
+             headers, body, status, result, started_at, completed_at, created_at \
+             FROM load_tests WHERE service_id = $1 AND is_deleted = FALSE ORDER BY created_at DESC",
+        )
+        .bind(service_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_load_test).collect()
+    }
+
+    async fn get_load_test(&self, id: &Uuid) -> Result<Option<LoadTest>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, service_id, name, target_rps, duration_seconds, concurrent_users, method, path, \
+             headers, body, status, result, started_at, completed_at, created_at \
+             FROM load_tests WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_load_test).transpose()
+    }
+
+    async fn create_load_test(&self, test: &LoadTest) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO load_tests (id, service_id, name, target_rps, duration_seconds, concurrent_users, method, path, \
+             headers, body, status, result, started_at, completed_at, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+        )
+        .bind(test.id)
+        .bind(test.service_id)
+        .bind(&test.name)
+        .bind(test.target_rps)
+        .bind(test.duration_seconds)
+        .bind(test.concurrent_users)
+        .bind(&test.method)
+        .bind(&test.path)
+        .bind(&test.headers)
+        .bind(test.body.as_deref())
+        .bind(&test.status)
+        .bind(&test.result)
+        .bind(test.started_at)
+        .bind(test.completed_at)
+        .bind(test.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn update_load_test(&self, id: &Uuid, test: &LoadTest) -> Result<(), GatewayError> {
+        sqlx::query(
+            "UPDATE load_tests SET name = $1, target_rps = $2, duration_seconds = $3, concurrent_users = $4, \
+             method = $5, path = $6, headers = $7, body = $8, status = $9, result = $10, \
+             started_at = $11, completed_at = $12 \
+             WHERE id = $13 AND is_deleted = FALSE",
+        )
+        .bind(&test.name)
+        .bind(test.target_rps)
+        .bind(test.duration_seconds)
+        .bind(test.concurrent_users)
+        .bind(&test.method)
+        .bind(&test.path)
+        .bind(&test.headers)
+        .bind(test.body.as_deref())
+        .bind(&test.status)
+        .bind(&test.result)
+        .bind(test.started_at)
+        .bind(test.completed_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_load_test(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let result = sqlx::query(
+            "UPDATE load_tests SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ── Marketplace ──
+
+    async fn list_marketplace_plugins(&self) -> Result<Vec<MarketplacePlugin>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, name, display_name, description, version, author, category, schema, readme, \
+             downloads, rating, verified, created_at, updated_at \
+             FROM marketplace_plugins WHERE is_deleted = FALSE ORDER BY downloads DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_marketplace_plugin).collect()
+    }
+
+    async fn get_marketplace_plugin(&self, id: &Uuid) -> Result<Option<MarketplacePlugin>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, name, display_name, description, version, author, category, schema, readme, \
+             downloads, rating, verified, created_at, updated_at \
+             FROM marketplace_plugins WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_marketplace_plugin).transpose()
+    }
+
+    async fn create_marketplace_plugin(&self, plugin: &MarketplacePlugin) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO marketplace_plugins (id, name, display_name, description, version, author, category, \
+             schema, readme, downloads, rating, verified, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+        )
+        .bind(plugin.id)
+        .bind(&plugin.name)
+        .bind(&plugin.display_name)
+        .bind(&plugin.description)
+        .bind(&plugin.version)
+        .bind(&plugin.author)
+        .bind(&plugin.category)
+        .bind(&plugin.schema)
+        .bind(&plugin.readme)
+        .bind(plugin.downloads)
+        .bind(plugin.rating)
+        .bind(plugin.verified)
+        .bind(plugin.created_at)
+        .bind(plugin.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn update_marketplace_plugin(&self, id: &Uuid, plugin: &MarketplacePlugin) -> Result<(), GatewayError> {
+        sqlx::query(
+            "UPDATE marketplace_plugins SET name = $1, display_name = $2, description = $3, version = $4, \
+             author = $5, category = $6, schema = $7, readme = $8, downloads = $9, rating = $10, \
+             verified = $11, updated_at = $12 \
+             WHERE id = $13 AND is_deleted = FALSE",
+        )
+        .bind(&plugin.name)
+        .bind(&plugin.display_name)
+        .bind(&plugin.description)
+        .bind(&plugin.version)
+        .bind(&plugin.author)
+        .bind(&plugin.category)
+        .bind(&plugin.schema)
+        .bind(&plugin.readme)
+        .bind(plugin.downloads)
+        .bind(plugin.rating)
+        .bind(plugin.verified)
+        .bind(plugin.updated_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_marketplace_plugin(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let result = sqlx::query(
+            "UPDATE marketplace_plugins SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ── Cost Analytics ──
+
+    async fn list_cost_records(&self, service_id: &Uuid, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<CostRecord>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, service_id, bucket_ts, compute_cost, bandwidth_cost, storage_cost, total_cost, \
+             currency, requests, bytes_transferred \
+             FROM cost_records WHERE service_id = $1 AND bucket_ts >= $2 AND bucket_ts <= $3 AND is_deleted = FALSE \
+             ORDER BY bucket_ts",
+        )
+        .bind(service_id)
+        .bind(from)
+        .bind(to)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_cost_record).collect()
+    }
+
+    async fn upsert_cost_record(&self, record: &CostRecord) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO cost_records (id, service_id, bucket_ts, compute_cost, bandwidth_cost, storage_cost, \
+             total_cost, currency, requests, bytes_transferred) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+             ON CONFLICT (id) DO UPDATE SET \
+               compute_cost = EXCLUDED.compute_cost, \
+               bandwidth_cost = EXCLUDED.bandwidth_cost, \
+               storage_cost = EXCLUDED.storage_cost, \
+               total_cost = EXCLUDED.total_cost, \
+               requests = EXCLUDED.requests, \
+               bytes_transferred = EXCLUDED.bytes_transferred",
+        )
+        .bind(record.id)
+        .bind(record.service_id)
+        .bind(record.bucket_ts)
+        .bind(record.compute_cost)
+        .bind(record.bandwidth_cost)
+        .bind(record.storage_cost)
+        .bind(record.total_cost)
+        .bind(&record.currency)
+        .bind(record.requests)
+        .bind(record.bytes_transferred)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // ── Cluster ──
+
+    async fn list_cluster_nodes(&self) -> Result<Vec<ClusterNode>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, name, address, port, role, status, version, cpu_usage, memory_usage, \
+             active_connections, last_heartbeat, joined_at \
+             FROM cluster_nodes WHERE is_deleted = FALSE ORDER BY joined_at",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_cluster_node).collect()
+    }
+
+    async fn get_cluster_node(&self, id: &Uuid) -> Result<Option<ClusterNode>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, name, address, port, role, status, version, cpu_usage, memory_usage, \
+             active_connections, last_heartbeat, joined_at \
+             FROM cluster_nodes WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_cluster_node).transpose()
+    }
+
+    async fn upsert_cluster_node(&self, node: &ClusterNode) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO cluster_nodes (id, name, address, port, role, status, version, cpu_usage, memory_usage, \
+             active_connections, last_heartbeat, joined_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+             ON CONFLICT (id) DO UPDATE SET \
+               name = EXCLUDED.name, \
+               address = EXCLUDED.address, \
+               port = EXCLUDED.port, \
+               role = EXCLUDED.role, \
+               status = EXCLUDED.status, \
+               version = EXCLUDED.version, \
+               cpu_usage = EXCLUDED.cpu_usage, \
+               memory_usage = EXCLUDED.memory_usage, \
+               active_connections = EXCLUDED.active_connections, \
+               last_heartbeat = EXCLUDED.last_heartbeat",
+        )
+        .bind(node.id)
+        .bind(&node.name)
+        .bind(&node.address)
+        .bind(node.port)
+        .bind(&node.role)
+        .bind(&node.status)
+        .bind(&node.version)
+        .bind(node.cpu_usage)
+        .bind(node.memory_usage)
+        .bind(node.active_connections)
+        .bind(node.last_heartbeat)
+        .bind(node.joined_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_cluster_node(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let result = sqlx::query(
+            "UPDATE cluster_nodes SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ── Rate Limit Simulator ──
+
+    async fn list_rate_limit_simulations(&self, service_id: &Uuid) -> Result<Vec<RateLimitSimulation>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT id, service_id, consumer_id, requests_per_second, duration_seconds, \
+             \"limit\", window_seconds, burst, result, created_at \
+             FROM rate_limit_simulations WHERE service_id = $1 ORDER BY created_at DESC",
+        )
+        .bind(service_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_rate_limit_simulation).collect()
+    }
+
+    async fn create_rate_limit_simulation(&self, sim: &RateLimitSimulation) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO rate_limit_simulations (id, service_id, consumer_id, requests_per_second, duration_seconds, \
+             \"limit\", window_seconds, burst, result, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(sim.id)
+        .bind(sim.service_id)
+        .bind(sim.consumer_id)
+        .bind(sim.requests_per_second)
+        .bind(sim.duration_seconds)
+        .bind(sim.limit)
+        .bind(sim.window_seconds)
+        .bind(sim.burst)
+        .bind(&sim.result)
+        .bind(sim.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_rate_limit_simulation(&self, id: &Uuid) -> Result<Option<RateLimitSimulation>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, service_id, consumer_id, requests_per_second, duration_seconds, \
+             \"limit\", window_seconds, burst, result, created_at \
+             FROM rate_limit_simulations WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_rate_limit_simulation).transpose()
+    }
+
+    // ── PKI / Certificates ──
+
+    async fn list_certificates(&self, service_id: Option<&Uuid>) -> Result<Vec<Certificate>, GatewayError> {
+        let rows = if let Some(sid) = service_id {
+            sqlx::query(
+                "SELECT id, service_id, domain, issuer, serial_number, not_before, not_after, \
+                 fingerprint_sha256, auto_renew, status, created_at, updated_at \
+                 FROM certificates WHERE service_id = $1 AND is_deleted = FALSE ORDER BY created_at DESC",
+            )
+            .bind(sid)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT id, service_id, domain, issuer, serial_number, not_before, not_after, \
+                 fingerprint_sha256, auto_renew, status, created_at, updated_at \
+                 FROM certificates WHERE is_deleted = FALSE ORDER BY created_at DESC",
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+        rows.into_iter().map(row_to_certificate).collect()
+    }
+
+    async fn get_certificate(&self, id: &Uuid) -> Result<Option<Certificate>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT id, service_id, domain, issuer, serial_number, not_before, not_after, \
+             fingerprint_sha256, auto_renew, status, created_at, updated_at \
+             FROM certificates WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_certificate).transpose()
+    }
+
+    async fn create_certificate(&self, cert: &Certificate) -> Result<(), GatewayError> {
+        sqlx::query(
+            "INSERT INTO certificates (id, service_id, domain, issuer, serial_number, not_before, not_after, \
+             fingerprint_sha256, auto_renew, status, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        )
+        .bind(cert.id)
+        .bind(cert.service_id)
+        .bind(&cert.domain)
+        .bind(&cert.issuer)
+        .bind(&cert.serial_number)
+        .bind(cert.not_before)
+        .bind(cert.not_after)
+        .bind(&cert.fingerprint_sha256)
+        .bind(cert.auto_renew)
+        .bind(&cert.status)
+        .bind(cert.created_at)
+        .bind(cert.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn update_certificate(&self, id: &Uuid, cert: &Certificate) -> Result<(), GatewayError> {
+        sqlx::query(
+            "UPDATE certificates SET domain = $1, issuer = $2, serial_number = $3, not_before = $4, \
+             not_after = $5, fingerprint_sha256 = $6, auto_renew = $7, status = $8, updated_at = $9 \
+             WHERE id = $10 AND is_deleted = FALSE",
+        )
+        .bind(&cert.domain)
+        .bind(&cert.issuer)
+        .bind(&cert.serial_number)
+        .bind(cert.not_before)
+        .bind(cert.not_after)
+        .bind(&cert.fingerprint_sha256)
+        .bind(cert.auto_renew)
+        .bind(&cert.status)
+        .bind(cert.updated_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_certificate(&self, id: &Uuid) -> Result<bool, GatewayError> {
+        let result = sqlx::query(
+            "UPDATE certificates SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ── Consumer key regeneration ──
+
+    async fn update_consumer(&self, id: &Uuid, consumer: &Consumer) -> Result<(), GatewayError> {
+        sqlx::query(
+            "UPDATE consumers SET username = $1, custom_id = $2, api_key = $3, updated_at = $4 \
+             WHERE id = $5 AND is_deleted = FALSE",
+        )
+        .bind(&consumer.username)
+        .bind(consumer.custom_id.as_deref())
+        .bind(consumer.api_key.as_deref())
+        .bind(consumer.updated_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 // ---------- row mappers ----------
@@ -2119,5 +3091,243 @@ fn row_to_consumer_group_member(row: sqlx::postgres::PgRow) -> Result<ConsumerGr
         group_id: row.try_get("group_id")?,
         consumer_id: row.try_get("consumer_id")?,
         joined_at: row.try_get("joined_at")?,
+    })
+}
+
+fn row_to_cache_entry(row: sqlx::postgres::PgRow) -> Result<CacheEntry, GatewayError> {
+    Ok(CacheEntry {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        cache_key: row.try_get("cache_key")?,
+        content_hash: row.try_get("content_hash")?,
+        size_bytes: row.try_get("size_bytes")?,
+        ttl_seconds: row.try_get("ttl_seconds")?,
+        hits: row.try_get("hits")?,
+        created_at: row.try_get("created_at")?,
+        expires_at: row.try_get("expires_at")?,
+    })
+}
+
+fn row_to_trace(row: sqlx::postgres::PgRow) -> Result<TraceRecord, GatewayError> {
+    Ok(TraceRecord {
+        id: row.try_get("id")?,
+        trace_id: row.try_get("trace_id")?,
+        service_id: row.try_get("service_id")?,
+        route_id: row.try_get("route_id")?,
+        method: row.try_get("method")?,
+        path: row.try_get("path")?,
+        status: row.try_get("status")?,
+        duration_ms: row.try_get("duration_ms")?,
+        span_count: row.try_get("span_count")?,
+        has_errors: row.try_get("has_errors")?,
+        metadata: row.try_get("metadata")?,
+        started_at: row.try_get("started_at")?,
+    })
+}
+
+fn row_to_span(row: sqlx::postgres::PgRow) -> Result<SpanRecord, GatewayError> {
+    Ok(SpanRecord {
+        id: row.try_get("id")?,
+        trace_id: row.try_get("trace_id")?,
+        span_id: row.try_get("span_id")?,
+        parent_span_id: row.try_get("parent_span_id")?,
+        operation: row.try_get("operation")?,
+        service_name: row.try_get("service_name")?,
+        status: row.try_get("status")?,
+        duration_ms: row.try_get("duration_ms")?,
+        tags: row.try_get("tags")?,
+        logs: row.try_get("logs")?,
+        started_at: row.try_get("started_at")?,
+    })
+}
+
+fn row_to_transform_rule(row: sqlx::postgres::PgRow) -> Result<TransformRule, GatewayError> {
+    Ok(TransformRule {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        route_id: row.try_get("route_id")?,
+        name: row.try_get("name")?,
+        phase: row.try_get("phase")?,
+        action: row.try_get("action")?,
+        target: row.try_get("target")?,
+        value: row.try_get("value")?,
+        condition: row.try_get("condition")?,
+        priority: row.try_get("priority")?,
+        enabled: row.try_get("enabled")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn row_to_api_version(row: sqlx::postgres::PgRow) -> Result<ApiVersion, GatewayError> {
+    Ok(ApiVersion {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        version: row.try_get("version")?,
+        base_path: row.try_get("base_path")?,
+        upstream_path: row.try_get("upstream_path")?,
+        status: row.try_get("status")?,
+        deprecated_at: row.try_get("deprecated_at")?,
+        sunset_at: row.try_get("sunset_at")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn row_to_incident(row: sqlx::postgres::PgRow) -> Result<Incident, GatewayError> {
+    Ok(Incident {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        title: row.try_get("title")?,
+        severity: row.try_get("severity")?,
+        status: row.try_get("status")?,
+        description: row.try_get("description")?,
+        started_at: row.try_get("started_at")?,
+        resolved_at: row.try_get("resolved_at")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn row_to_incident_update(row: sqlx::postgres::PgRow) -> Result<IncidentUpdate, GatewayError> {
+    Ok(IncidentUpdate {
+        id: row.try_get("id")?,
+        incident_id: row.try_get("incident_id")?,
+        status: row.try_get("status")?,
+        message: row.try_get("message")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn row_to_webhook(row: sqlx::postgres::PgRow) -> Result<Webhook, GatewayError> {
+    Ok(Webhook {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        name: row.try_get("name")?,
+        url: row.try_get("url")?,
+        events: row.try_get("events")?,
+        secret: row.try_get("secret")?,
+        enabled: row.try_get("enabled")?,
+        retry_count: row.try_get("retry_count")?,
+        timeout_ms: row.try_get("timeout_ms")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn row_to_webhook_delivery(row: sqlx::postgres::PgRow) -> Result<WebhookDelivery, GatewayError> {
+    Ok(WebhookDelivery {
+        id: row.try_get("id")?,
+        webhook_id: row.try_get("webhook_id")?,
+        event_type: row.try_get("event_type")?,
+        payload: row.try_get("payload")?,
+        response_status: row.try_get("response_status")?,
+        response_body: row.try_get("response_body")?,
+        success: row.try_get("success")?,
+        attempts: row.try_get("attempts")?,
+        delivered_at: row.try_get("delivered_at")?,
+    })
+}
+
+fn row_to_load_test(row: sqlx::postgres::PgRow) -> Result<LoadTest, GatewayError> {
+    Ok(LoadTest {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        name: row.try_get("name")?,
+        target_rps: row.try_get("target_rps")?,
+        duration_seconds: row.try_get("duration_seconds")?,
+        concurrent_users: row.try_get("concurrent_users")?,
+        method: row.try_get("method")?,
+        path: row.try_get("path")?,
+        headers: row.try_get("headers")?,
+        body: row.try_get("body")?,
+        status: row.try_get("status")?,
+        result: row.try_get("result")?,
+        started_at: row.try_get("started_at")?,
+        completed_at: row.try_get("completed_at")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn row_to_marketplace_plugin(row: sqlx::postgres::PgRow) -> Result<MarketplacePlugin, GatewayError> {
+    Ok(MarketplacePlugin {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        display_name: row.try_get("display_name")?,
+        description: row.try_get("description")?,
+        version: row.try_get("version")?,
+        author: row.try_get("author")?,
+        category: row.try_get("category")?,
+        schema: row.try_get("schema")?,
+        readme: row.try_get("readme")?,
+        downloads: row.try_get("downloads")?,
+        rating: row.try_get("rating")?,
+        verified: row.try_get("verified")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn row_to_cost_record(row: sqlx::postgres::PgRow) -> Result<CostRecord, GatewayError> {
+    Ok(CostRecord {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        bucket_ts: row.try_get("bucket_ts")?,
+        compute_cost: row.try_get("compute_cost")?,
+        bandwidth_cost: row.try_get("bandwidth_cost")?,
+        storage_cost: row.try_get("storage_cost")?,
+        total_cost: row.try_get("total_cost")?,
+        currency: row.try_get("currency")?,
+        requests: row.try_get("requests")?,
+        bytes_transferred: row.try_get("bytes_transferred")?,
+    })
+}
+
+fn row_to_cluster_node(row: sqlx::postgres::PgRow) -> Result<ClusterNode, GatewayError> {
+    Ok(ClusterNode {
+        id: row.try_get("id")?,
+        name: row.try_get("name")?,
+        address: row.try_get("address")?,
+        port: row.try_get("port")?,
+        role: row.try_get("role")?,
+        status: row.try_get("status")?,
+        version: row.try_get("version")?,
+        cpu_usage: row.try_get("cpu_usage")?,
+        memory_usage: row.try_get("memory_usage")?,
+        active_connections: row.try_get("active_connections")?,
+        last_heartbeat: row.try_get("last_heartbeat")?,
+        joined_at: row.try_get("joined_at")?,
+    })
+}
+
+fn row_to_rate_limit_simulation(row: sqlx::postgres::PgRow) -> Result<RateLimitSimulation, GatewayError> {
+    Ok(RateLimitSimulation {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        consumer_id: row.try_get("consumer_id")?,
+        requests_per_second: row.try_get("requests_per_second")?,
+        duration_seconds: row.try_get("duration_seconds")?,
+        limit: row.try_get("limit")?,
+        window_seconds: row.try_get("window_seconds")?,
+        burst: row.try_get("burst")?,
+        result: row.try_get("result")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn row_to_certificate(row: sqlx::postgres::PgRow) -> Result<Certificate, GatewayError> {
+    Ok(Certificate {
+        id: row.try_get("id")?,
+        service_id: row.try_get("service_id")?,
+        domain: row.try_get("domain")?,
+        issuer: row.try_get("issuer")?,
+        serial_number: row.try_get("serial_number")?,
+        not_before: row.try_get("not_before")?,
+        not_after: row.try_get("not_after")?,
+        fingerprint_sha256: row.try_get("fingerprint_sha256")?,
+        auto_renew: row.try_get("auto_renew")?,
+        status: row.try_get("status")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }

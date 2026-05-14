@@ -654,6 +654,264 @@ pub struct ErrorPage {
     pub updated_at: DateTime<Utc>,
 }
 
+// ── Cache ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheEntry {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub cache_key: String,
+    pub content_hash: String,
+    pub size_bytes: i64,
+    pub ttl_seconds: i32,
+    pub hits: i64,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheStats {
+    pub service_id: Uuid,
+    pub total_entries: i64,
+    pub total_size_bytes: i64,
+    pub hit_count: i64,
+    pub miss_count: i64,
+    pub hit_rate: f64,
+    pub eviction_count: i64,
+}
+
+// ── Distributed Tracing ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceRecord {
+    pub id: Uuid,
+    pub trace_id: String,
+    pub service_id: Uuid,
+    pub route_id: Option<Uuid>,
+    pub method: String,
+    pub path: String,
+    pub status: i32,
+    pub duration_ms: i64,
+    pub span_count: i32,
+    pub has_errors: bool,
+    pub metadata: Option<serde_json::Value>,
+    pub started_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpanRecord {
+    pub id: Uuid,
+    pub trace_id: String,
+    pub span_id: String,
+    pub parent_span_id: Option<String>,
+    pub operation: String,
+    pub service_name: String,
+    pub status: String,
+    pub duration_ms: i64,
+    pub tags: Option<serde_json::Value>,
+    pub logs: Option<serde_json::Value>,
+    pub started_at: DateTime<Utc>,
+}
+
+// ── Request/Response Transforms ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransformRule {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub route_id: Option<Uuid>,
+    pub name: String,
+    pub phase: String,
+    pub action: String,
+    pub target: String,
+    pub value: String,
+    pub condition: Option<String>,
+    pub priority: i32,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+// ── API Versioning ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiVersion {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub version: String,
+    pub base_path: String,
+    pub upstream_path: String,
+    pub status: String,
+    pub deprecated_at: Option<DateTime<Utc>>,
+    pub sunset_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+// ── Incidents ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Incident {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub title: String,
+    pub severity: String,
+    pub status: String,
+    pub description: String,
+    pub started_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncidentUpdate {
+    pub id: Uuid,
+    pub incident_id: Uuid,
+    pub status: String,
+    pub message: String,
+    pub created_at: DateTime<Utc>,
+}
+
+// ── Webhooks ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Webhook {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub name: String,
+    pub url: String,
+    pub events: serde_json::Value,
+    pub secret: Option<String>,
+    pub enabled: bool,
+    pub retry_count: i32,
+    pub timeout_ms: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookDelivery {
+    pub id: Uuid,
+    pub webhook_id: Uuid,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    pub response_status: Option<i32>,
+    pub response_body: Option<String>,
+    pub success: bool,
+    pub attempts: i32,
+    pub delivered_at: DateTime<Utc>,
+}
+
+// ── Load Testing ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadTest {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub name: String,
+    pub target_rps: i32,
+    pub duration_seconds: i32,
+    pub concurrent_users: i32,
+    pub method: String,
+    pub path: String,
+    pub headers: Option<serde_json::Value>,
+    pub body: Option<String>,
+    pub status: String,
+    pub result: Option<serde_json::Value>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+// ── Plugin Marketplace ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketplacePlugin {
+    pub id: Uuid,
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub version: String,
+    pub author: String,
+    pub category: String,
+    pub schema: serde_json::Value,
+    pub readme: String,
+    pub downloads: i64,
+    pub rating: f64,
+    pub verified: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+// ── Cost Analytics ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CostRecord {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub bucket_ts: DateTime<Utc>,
+    pub compute_cost: f64,
+    pub bandwidth_cost: f64,
+    pub storage_cost: f64,
+    pub total_cost: f64,
+    pub currency: String,
+    pub requests: i64,
+    pub bytes_transferred: i64,
+}
+
+// ── Cluster Management ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterNode {
+    pub id: Uuid,
+    pub name: String,
+    pub address: String,
+    pub port: i32,
+    pub role: String,
+    pub status: String,
+    pub version: String,
+    pub cpu_usage: f64,
+    pub memory_usage: f64,
+    pub active_connections: i64,
+    pub last_heartbeat: DateTime<Utc>,
+    pub joined_at: DateTime<Utc>,
+}
+
+// ── Rate Limit Simulator ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitSimulation {
+    pub id: Uuid,
+    pub service_id: Uuid,
+    pub consumer_id: Option<Uuid>,
+    pub requests_per_second: i32,
+    pub duration_seconds: i32,
+    pub limit: i32,
+    pub window_seconds: i32,
+    pub burst: i32,
+    pub result: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
+// ── PKI / Certificates ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Certificate {
+    pub id: Uuid,
+    pub service_id: Option<Uuid>,
+    pub domain: String,
+    pub issuer: String,
+    pub serial_number: String,
+    pub not_before: DateTime<Utc>,
+    pub not_after: DateTime<Utc>,
+    pub fingerprint_sha256: String,
+    pub auto_renew: bool,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 // ── Consumer Groups ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
