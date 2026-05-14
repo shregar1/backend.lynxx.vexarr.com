@@ -987,10 +987,11 @@ impl AcmeManager {
                         )
                     })?;
                     let fqdn = dns_challenge::build_acme_dns_name(auth_domain);
+                    let dns_value = key_auth.dns_value();
                     let _record_id = provider
-                        .set_txt_record(&fqdn, key_auth.as_str())
+                        .set_txt_record(&fqdn, &dns_value)
                         .await?;
-                    dns_challenge::wait_for_propagation(&fqdn, key_auth.as_str())
+                    dns_challenge::wait_for_propagation(&fqdn, &dns_value)
                         .await?;
                 }
                 _ => {
