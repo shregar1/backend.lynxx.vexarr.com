@@ -418,6 +418,37 @@ async fn async_main() -> anyhow::Result<()> {
     );
     crate::license::spawn_license_refresher(license_state.clone(), Some(quota.clone()));
 
+    // Node lifecycle: register with the billing API, then start the
+    // heartbeat + usage reporter loops. Registration failure is logged
+    // as a warning — the licence itself is already verified, so the
+    // gateway should continue to serve traffic even if billing-side
+    // node accounting is degraded.
+    if !license_api_key.trim().is_empty() {
+        match crate::license::register_node(&license_api_key, &lynxx_base_url).await {
+            Ok(()) => {}
+            Err(crate::license::NodeError::LimitReached { active, max }) => {
+                tracing::warn!(
+                    active,
+                    max,
+                    "node limit reached on billing service; this gateway is running but will not be counted — upgrade plan to add more nodes"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "node registration failed; continuing without billing-side node accounting"
+                );
+            }
+        }
+        crate::license::spawn_node_heartbeat(license_api_key.clone(), lynxx_base_url.clone());
+        crate::license::spawn_usage_reporter(
+            license_api_key.clone(),
+            lynxx_base_url.clone(),
+            quota.clone(),
+            license_state.clone(),
+        );
+    }
+
 
     let trusted_proxies: Vec<ipnet::IpNet> = config
         .gateway
@@ -991,6 +1022,13 @@ async fn async_main() -> anyhow::Result<()> {
 
     if let Some(h) = acme_http_handle {
         h.abort();
+    }
+
+    // Best-effort deregister from the billing service so the node
+    // shows offline immediately instead of waiting for the heartbeat
+    // grace window to elapse. Tolerates network failure.
+    if !license_api_key.trim().is_empty() {
+        crate::license::deregister_node(&license_api_key, &lynxx_base_url).await;
     }
 
     // Flush any pending OTel spans before exit.
