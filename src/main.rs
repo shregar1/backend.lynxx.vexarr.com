@@ -21,6 +21,7 @@ mod discovery;
 mod dtos;
 mod error;
 mod health;
+mod kernel_tuning;
 mod license;
 mod logging;
 mod logs;
@@ -101,6 +102,11 @@ struct Args {
     /// Secondary confirmation (2FA) flag required when passing --reset-admin.
     #[arg(long)]
     force: bool,
+
+    /// Fail immediately if the configured port is unavailable instead of
+    /// retrying or falling back to an OS-assigned port.
+    #[arg(long, env = "LYNXX_STRICT_PORT")]
+    strict_port: bool,
 }
 
 /// Apply CLI overrides on top of the loaded TOML config. Each `Some` value
@@ -128,6 +134,10 @@ fn apply_cli_overrides(config: &mut GatewayConfig, args: &Args) {
     if args.no_seed {
         tracing::info!("--no-seed: disabling seed_from_config");
         config.gateway.seed_from_config = false;
+    }
+    if args.strict_port {
+        tracing::info!("--strict-port: port fallback disabled");
+        config.gateway.strict_port = true;
     }
 }
 
@@ -240,6 +250,10 @@ async fn async_main() -> anyhow::Result<()> {
 
     let metrics_handle = metrics::install();
     metrics::describe();
+
+    if config.gateway.auto_tune_kernel {
+        kernel_tuning::apply_kernel_tuning();
+    }
 
     // ---------- licence gate ----------
     // Verify the subscription API key before doing any other startup
@@ -648,6 +662,26 @@ async fn async_main() -> anyhow::Result<()> {
         .build()
         .expect("reqwest client builds");
 
+    let start_time = chrono::Utc::now();
+    let initial_status = health::status_cache::build_status(
+        &route_table,
+        &repo,
+        &Some(license_state.clone()),
+        &license_api_key,
+        start_time,
+    )
+    .await;
+    let status_cache = health::StatusCache::new(initial_status);
+    health::status_cache::spawn_status_updater(
+        status_cache.clone(),
+        route_table.clone(),
+        repo.clone(),
+        Some(license_state.clone()),
+        license_api_key.clone(),
+        start_time,
+        5_000,
+    );
+
     let admin_app = admin::admin_router(
         route_table,
         repo,
@@ -669,16 +703,31 @@ async fn async_main() -> anyhow::Result<()> {
         Some(license_state),
         config.clone(),
         deploy_registry,
+        status_cache,
     );
 
-    let proxy_addr = format!("0.0.0.0:{}", config.gateway.proxy_port);
-    let admin_addr = format!("0.0.0.0:{}", config.gateway.admin_port);
+    let bind_addr = config.gateway.bind_address.clone();
+    let strict_port = config.gateway.strict_port;
 
     let admin_tls_enabled = config.gateway.admin_tls.enabled;
-    let admin_listener = TcpListener::bind(&admin_addr).await?;
+    let admin_bind = utilities::resilient_bind(
+        &utilities::BindConfig::new(&bind_addr, config.gateway.admin_port, strict_port),
+    )
+    .await?;
+    let actual_admin_port = admin_bind.port;
+    let admin_listener = admin_bind.listener;
+    if actual_admin_port != config.gateway.admin_port {
+        tracing::warn!(
+            configured = config.gateway.admin_port,
+            actual = actual_admin_port,
+            "admin port changed due to fallback"
+        );
+        config.gateway.admin_port = actual_admin_port;
+    }
+    let admin_addr = format!("{}:{}", bind_addr, actual_admin_port);
     let admin_scheme = if admin_tls_enabled { "https" } else { "http" };
     tracing::info!(addr = %admin_addr, tls = admin_tls_enabled, "admin API listening");
-    tracing::info!("Dashboard available at {admin_scheme}://localhost:{}", config.gateway.admin_port);
+    tracing::info!("Dashboard available at {admin_scheme}://localhost:{actual_admin_port}");
     tracing::info!("admin listening on {admin_addr}");
 
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
@@ -783,9 +832,23 @@ async fn async_main() -> anyhow::Result<()> {
     };
 
     // ---------- Proxy Listener ----------
-    // Branch on TLS termination. HTTPS uses axum-server's bind_rustls.
-    // The admin port stays plain HTTP.
-    let proxy_addr_socket: std::net::SocketAddr = proxy_addr.parse()?;
+    // Pre-bind the proxy socket with resilient_bind (SO_REUSEADDR, retry,
+    // fallback) so all TLS/non-TLS branches share the same listener.
+    let proxy_bind = utilities::resilient_bind(
+        &utilities::BindConfig::new(&bind_addr, config.gateway.proxy_port, strict_port),
+    )
+    .await?;
+    let actual_proxy_port = proxy_bind.port;
+    let proxy_listener = proxy_bind.listener;
+    if actual_proxy_port != config.gateway.proxy_port {
+        tracing::warn!(
+            configured = config.gateway.proxy_port,
+            actual = actual_proxy_port,
+            "proxy port changed due to fallback"
+        );
+        config.gateway.proxy_port = actual_proxy_port;
+    }
+    let proxy_addr = format!("{}:{}", bind_addr, actual_proxy_port);
 
     let acme_has_cert = if let Some(ref mgr) = acme_manager {
         mgr.has_cert().await
@@ -894,12 +957,11 @@ async fn async_main() -> anyhow::Result<()> {
             config.gateway.acme.domains
         );
         let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(server_config);
-        // Register the live TLS config handle so cert reloads push
-        // directly into the running listener (hot-reload).
         mgr.set_tls_reload_handle(rustls_cfg.clone()).await;
         let handle = axum_server::Handle::new();
         let shutdown_handle = handle.clone();
-        let serve = axum_server::bind_rustls(proxy_addr_socket, rustls_cfg)
+        let std_listener = proxy_listener.into_std()?;
+        let serve = axum_server::from_tcp_rustls(std_listener, rustls_cfg)
             .handle(handle)
             .serve(proxy_app.into_make_service());
         run_select!(serve, Some(shutdown_handle));
@@ -912,17 +974,16 @@ async fn async_main() -> anyhow::Result<()> {
         let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
         let handle = axum_server::Handle::new();
         let shutdown_handle = handle.clone();
-        let serve = axum_server::bind_rustls(proxy_addr_socket, rustls_cfg)
+        let std_listener = proxy_listener.into_std()?;
+        let serve = axum_server::from_tcp_rustls(std_listener, rustls_cfg)
             .handle(handle)
             .serve(proxy_app.into_make_service());
         run_select!(serve, Some(shutdown_handle));
     } else if config.gateway.acme.enabled {
         tracing::warn!("ACME enabled but no certificate available; waiting for background provisioning...");
-        let proxy_listener = TcpListener::bind(&proxy_addr).await?;
         let proxy_serve = axum::serve(proxy_listener, proxy_app);
         run_select!(proxy_serve, None::<axum_server::Handle>);
     } else {
-        let proxy_listener = TcpListener::bind(&proxy_addr).await?;
         tracing::info!("proxy listening on {proxy_addr}");
         let proxy_serve = axum::serve(proxy_listener, proxy_app);
         run_select!(proxy_serve, None::<axum_server::Handle>);
@@ -993,10 +1054,17 @@ async fn apply_remote_event(
         ChangeEvent::ServiceCreated { id, .. } | ChangeEvent::ServiceUpdated { id, .. } => {
             match repo.get_service(&id).await? {
                 Some(svc) => {
-                    let is_new = route_table.get_service(&id).is_none();
+                    let old_svc = route_table.get_service(&id);
+                    let is_new = old_svc.is_none();
+                    let url_changed = old_svc
+                        .as_ref()
+                        .map(|old| old.url != svc.url)
+                        .unwrap_or(false);
                     route_table.add_service(svc.clone());
                     if is_new {
                         health.register(svc.id);
+                    } else if url_changed {
+                        health.reset_on_upstream_change(&svc.id, &svc.name, "upstream URL changed");
                     }
                     // Drop any cached per-service TLS client. The pool
                     // rebuilds on the next request using the fresh row.
@@ -1043,6 +1111,7 @@ async fn apply_remote_event(
                         LbStrategy::from_str(&svc.lb_strategy),
                         targets,
                     );
+                    health.reset_on_upstream_change(&service_id, &svc.name, "targets changed");
                 }
                 None => {
                     tracing::warn!(

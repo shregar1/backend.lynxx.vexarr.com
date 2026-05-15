@@ -76,6 +76,12 @@ pub struct GatewaySettings {
     pub proxy_port: u16,
     #[serde(default = "default_admin_port")]
     pub admin_port: u16,
+
+    /// When true, the gateway will fail immediately if the configured port
+    /// is unavailable instead of retrying or falling back to an OS-assigned
+    /// port. Default: false (self-healing mode).
+    #[serde(default)]
+    pub strict_port: bool,
     #[serde(default = "default_database_url")]
     pub database_url: String,
     #[serde(default)]
@@ -281,6 +287,12 @@ pub struct GatewaySettings {
     /// UDP L4 routing configuration.
     #[serde(default)]
     pub udp: UdpConfig,
+
+    /// When true, apply Linux sysctl tuning (TCP buffers, fd limits,
+    /// backlog, TIME_WAIT) at startup for high-throughput proxy workloads.
+    /// No-op on non-Linux. Default: true.
+    #[serde(default = "default_true_bool")]
+    pub auto_tune_kernel: bool,
 
     #[serde(default = "default_drain_timeout")]
     pub default_drain_timeout_ms: u64,
@@ -1024,6 +1036,7 @@ fn default_gateway() -> GatewaySettings {
     GatewaySettings {
         proxy_port: 8000,
         admin_port: 8001,
+        strict_port: false,
         database_url: default_database_url(),
         seed_from_config: false,
         health_check_interval_ms: default_hc_interval(),
@@ -1066,6 +1079,7 @@ fn default_gateway() -> GatewaySettings {
         filesystems: HashMap::new(),
         tcp: TcpConfig::default(),
         udp: UdpConfig::default(),
+        auto_tune_kernel: true,
         default_drain_timeout_ms: default_drain_timeout(),
         deploy_health_check_interval_ms: default_deploy_hc_interval(),
         deploy_health_check_timeout_ms: default_deploy_hc_timeout(),

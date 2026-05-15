@@ -199,6 +199,28 @@ impl HealthRegistry {
         Some(())
     }
 
+    /// Reset a circuit breaker when the upstream configuration has changed
+    /// (URL, targets, etc.). Returns true if a reset actually happened
+    /// (i.e. the circuit was not already Closed with zero failures).
+    pub fn reset_on_upstream_change(&self, service_id: &Uuid, service_name: &str, reason: &str) -> bool {
+        let needs_reset = self.entries.get(service_id).map(|e| {
+            e.circuit != CircuitState::Closed
+                || e.consecutive_failures > 0
+                || e.status == HealthStatus::Unhealthy
+        }).unwrap_or(false);
+
+        if needs_reset {
+            self.reset_circuit(service_id);
+            tracing::info!(
+                service_id = %service_id,
+                service = service_name,
+                reason,
+                "circuit breaker auto-reset"
+            );
+        }
+        needs_reset
+    }
+
     pub fn should_allow_request(&self, service_id: &Uuid, open_duration_ms: u64) -> bool {
         let mut entry = match self.entries.get_mut(service_id) {
             Some(e) => e,
@@ -232,5 +254,181 @@ impl HealthRegistry {
 impl Default for HealthRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registry_with_threshold(fail: u32, success: u32) -> HealthRegistry {
+        HealthRegistry::with_config(HealthConfig {
+            failure_threshold: fail,
+            success_threshold: success,
+            open_duration_ms: 30_000,
+        })
+    }
+
+    fn trip_circuit(registry: &HealthRegistry, id: &Uuid, name: &str) {
+        let threshold = registry.config().failure_threshold;
+        for _ in 0..threshold {
+            registry.record_failure(id, name, "test error".into());
+        }
+        assert_eq!(registry.get(id).unwrap().circuit, CircuitState::Open);
+    }
+
+    // --- reset_circuit ---
+
+    #[test]
+    fn reset_circuit_clears_open_state() {
+        let reg = registry_with_threshold(2, 1);
+        let id = Uuid::new_v4();
+        reg.register(id);
+        trip_circuit(&reg, &id, "svc");
+
+        reg.reset_circuit(&id);
+        let h = reg.get(&id).unwrap();
+        assert_eq!(h.circuit, CircuitState::Closed);
+        assert_eq!(h.consecutive_failures, 0);
+        assert_eq!(h.consecutive_successes, 0);
+        assert!(h.opened_at.is_none());
+        assert_eq!(h.status, HealthStatus::Unknown);
+    }
+
+    #[test]
+    fn reset_circuit_returns_none_for_unknown_service() {
+        let reg = HealthRegistry::new();
+        assert!(reg.reset_circuit(&Uuid::new_v4()).is_none());
+    }
+
+    // --- reset_on_upstream_change ---
+
+    #[test]
+    fn reset_on_upstream_change_resets_open_circuit() {
+        let reg = registry_with_threshold(2, 1);
+        let id = Uuid::new_v4();
+        reg.register(id);
+        trip_circuit(&reg, &id, "svc");
+
+        let did_reset = reg.reset_on_upstream_change(&id, "svc", "url changed");
+        assert!(did_reset);
+        assert_eq!(reg.get(&id).unwrap().circuit, CircuitState::Closed);
+    }
+
+    #[test]
+    fn reset_on_upstream_change_resets_unhealthy_closed_circuit() {
+        let reg = registry_with_threshold(3, 1);
+        let id = Uuid::new_v4();
+        reg.register(id);
+        // 1 failure — not enough to open, but service is unhealthy
+        reg.record_failure(&id, "svc", "err".into());
+        assert_eq!(reg.get(&id).unwrap().circuit, CircuitState::Closed);
+        assert_eq!(reg.get(&id).unwrap().consecutive_failures, 1);
+
+        let did_reset = reg.reset_on_upstream_change(&id, "svc", "url changed");
+        assert!(did_reset);
+        assert_eq!(reg.get(&id).unwrap().consecutive_failures, 0);
+        assert_eq!(reg.get(&id).unwrap().status, HealthStatus::Unknown);
+    }
+
+    #[test]
+    fn reset_on_upstream_change_skips_healthy_closed_circuit() {
+        let reg = HealthRegistry::new();
+        let id = Uuid::new_v4();
+        reg.register(id);
+
+        let did_reset = reg.reset_on_upstream_change(&id, "svc", "url changed");
+        assert!(!did_reset);
+    }
+
+    #[test]
+    fn reset_on_upstream_change_returns_false_for_unknown_service() {
+        let reg = HealthRegistry::new();
+        let did_reset = reg.reset_on_upstream_change(&Uuid::new_v4(), "x", "test");
+        assert!(!did_reset);
+    }
+
+    // --- state machine transitions ---
+
+    #[test]
+    fn closed_to_open_on_threshold() {
+        let reg = registry_with_threshold(3, 1);
+        let id = Uuid::new_v4();
+        reg.register(id);
+
+        reg.record_failure(&id, "svc", "e1".into());
+        assert_eq!(reg.get(&id).unwrap().circuit, CircuitState::Closed);
+        reg.record_failure(&id, "svc", "e2".into());
+        assert_eq!(reg.get(&id).unwrap().circuit, CircuitState::Closed);
+        reg.record_failure(&id, "svc", "e3".into());
+        assert_eq!(reg.get(&id).unwrap().circuit, CircuitState::Open);
+    }
+
+    #[test]
+    fn success_resets_failure_count() {
+        let reg = registry_with_threshold(3, 1);
+        let id = Uuid::new_v4();
+        reg.register(id);
+
+        reg.record_failure(&id, "svc", "e".into());
+        reg.record_failure(&id, "svc", "e".into());
+        reg.record_success(&id, "svc");
+        assert_eq!(reg.get(&id).unwrap().consecutive_failures, 0);
+        // One more failure shouldn't trip it since counter was reset
+        reg.record_failure(&id, "svc", "e".into());
+        assert_eq!(reg.get(&id).unwrap().circuit, CircuitState::Closed);
+    }
+
+    #[test]
+    fn half_open_closes_on_success_threshold() {
+        let reg = registry_with_threshold(1, 2);
+        let id = Uuid::new_v4();
+        reg.register(id);
+
+        trip_circuit(&reg, &id, "svc");
+        // Force half-open by manipulating opened_at far in the past
+        {
+            let mut entry = reg.entries.get_mut(&id).unwrap();
+            entry.circuit = CircuitState::HalfOpen;
+            entry.consecutive_successes = 0;
+        }
+
+        reg.record_success(&id, "svc");
+        assert_eq!(reg.get(&id).unwrap().circuit, CircuitState::HalfOpen);
+        reg.record_success(&id, "svc");
+        assert_eq!(reg.get(&id).unwrap().circuit, CircuitState::Closed);
+    }
+
+    #[test]
+    fn half_open_reopens_on_failure() {
+        let reg = registry_with_threshold(1, 2);
+        let id = Uuid::new_v4();
+        reg.register(id);
+
+        trip_circuit(&reg, &id, "svc");
+        {
+            let mut entry = reg.entries.get_mut(&id).unwrap();
+            entry.circuit = CircuitState::HalfOpen;
+        }
+
+        reg.record_failure(&id, "svc", "still broken".into());
+        assert_eq!(reg.get(&id).unwrap().circuit, CircuitState::Open);
+    }
+
+    #[test]
+    fn should_allow_request_blocks_when_open() {
+        let reg = registry_with_threshold(1, 1);
+        let id = Uuid::new_v4();
+        reg.register(id);
+        trip_circuit(&reg, &id, "svc");
+
+        // Open with recent opened_at — should block
+        assert!(!reg.should_allow_request(&id, 60_000));
+    }
+
+    #[test]
+    fn should_allow_request_allows_unknown_service() {
+        let reg = HealthRegistry::new();
+        assert!(reg.should_allow_request(&Uuid::new_v4(), 30_000));
     }
 }

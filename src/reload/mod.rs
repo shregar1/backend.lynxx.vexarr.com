@@ -188,6 +188,7 @@ async fn diff_services(
                     || cur.retries != svc_cfg.retries
                     || cur.connect_timeout_ms != svc_cfg.connect_timeout_ms
                 {
+                    let url_changed = cur.url != svc_cfg.url;
                     let updated = Service {
                         id: cur.id,
                         name: cur.name.clone(),
@@ -219,6 +220,9 @@ async fn diff_services(
                     match repo.update_service(&cur.id, &updated).await {
                         Ok(_) => {
                             route_table.update_service(&cur.id, updated);
+                            if url_changed {
+                                health.reset_on_upstream_change(&cur.id, &cur.name, "upstream URL changed");
+                            }
                             result.updated_services += 1;
                         }
                         Err(e) => result

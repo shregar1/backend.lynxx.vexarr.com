@@ -1830,14 +1830,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_init_no_domains_fails() {
+    async fn test_init_no_domains_returns_false() {
         let config = AcmeConfig {
             enabled: true,
             domains: vec![],
             ..AcmeConfig::default()
         };
         let mgr = AcmeManager::new(config);
-        assert!(mgr.init().await.is_err());
+        let result = mgr.init().await.expect("empty domains should not error");
+        assert!(!result, "init with no domains should return false (no cert loaded)");
     }
 
     #[tokio::test]

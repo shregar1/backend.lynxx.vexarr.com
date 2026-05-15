@@ -81,6 +81,7 @@ pub fn admin_router(
     license_state: Option<crate::license::LicenseState>,
     gateway_config: GatewayConfig,
     deploy_registry: deploy::DeployRegistry,
+    status_cache: crate::health::StatusCache,
 ) -> Router {
     let audit = AuditLog::new(repo.clone());
     let state = AdminState {
@@ -105,6 +106,7 @@ pub fn admin_router(
         license_api_key,
         license_state,
         deploy_registry: Some(deploy_registry),
+        status_cache,
     };
 
     // Routes that mutate live state require Operator or higher; token

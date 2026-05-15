@@ -4,7 +4,7 @@ use crate::auth::{generate_token, hash_token, AdminToken, Role};
 use crate::cluster::{ChangeEvent, ClusterBus};
 use crate::db::{AdminTokenPatch, LogFilter, NewAdminToken, Repository};
 use crate::error::GatewayError;
-use crate::health::{HealthRegistry, ServiceHealth};
+use crate::health::{HealthRegistry, ServiceHealth, StatusCache};
 use crate::models::{Consumer, LogEntry, PluginInstance, Project, Route, Service, Target};
 use crate::plugins::PluginExecutor;
 use crate::proxy::http_client::ProxyClientPool;
@@ -71,6 +71,7 @@ pub struct AdminState {
     pub license_api_key: String,
     pub license_state: Option<crate::license::LicenseState>,
     pub deploy_registry: Option<crate::admin::deploy::DeployRegistry>,
+    pub status_cache: StatusCache,
 }
 
 /// Convenience: extract the optional actor from request extensions.
@@ -294,7 +295,7 @@ pub struct CreateConsumer {
     pub custom_id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct StatusResponse {
     pub status: String,
     pub version: String,
@@ -456,9 +457,13 @@ pub async fn update_service(
         updated_at: now,
     };
 
+    let url_changed = existing.url != updated.url;
     state.repo.update_service(&id, &updated).await?;
     state.route_table.update_service(&id, updated.clone());
     state.client_pool.invalidate(&id);
+    if url_changed {
+        state.health.reset_on_upstream_change(&id, &updated.name, "upstream URL changed");
+    }
 
     if strategy_changed {
         let targets = state.repo.list_targets_for_service(&id).await?;
@@ -866,9 +871,13 @@ pub async fn patch_service(
         updated_at: now,
     };
 
+    let url_changed = existing.url != updated.url;
     state.repo.update_service(&id, &updated).await?;
     state.route_table.update_service(&id, updated.clone());
     state.client_pool.invalidate(&id);
+    if url_changed {
+        state.health.reset_on_upstream_change(&id, &updated.name, "upstream URL changed");
+    }
 
     if strategy_changed {
         let targets = state.repo.list_targets_for_service(&id).await?;
@@ -1820,10 +1829,8 @@ pub async fn gateway_status(
     }))
 }
 
-pub async fn healthz(
-    State(state): State<AdminState>,
-) -> Result<Json<StatusResponse>, GatewayError> {
-    gateway_status(State(state)).await
+pub async fn healthz(State(state): State<AdminState>) -> Json<StatusResponse> {
+    Json(state.status_cache.get().await)
 }
 
 // ---------- circuit breakers ----------
