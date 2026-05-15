@@ -407,8 +407,12 @@ impl AcmeManager {
             ));
         }
 
-        let cert_path = self.cert_path().unwrap();
-        let key_path = self.key_path().unwrap();
+        let cert_path = self.cert_path().ok_or_else(|| {
+            GatewayError::ConfigError("acme.domains is empty; no cert path".into())
+        })?;
+        let key_path = self.key_path().ok_or_else(|| {
+            GatewayError::ConfigError("acme.domains is empty; no key path".into())
+        })?;
 
         generate_self_signed_cert(domains, &cert_path, &key_path)?;
 
