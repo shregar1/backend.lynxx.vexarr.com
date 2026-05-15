@@ -402,7 +402,7 @@ async fn verify_online(api_key: &str, url: &str) -> Result<VerifyResponse, Licen
 
     let resp = client
         .get(url)
-        .query(&[("key", api_key)])
+        .bearer_auth(api_key)
         .send()
         .await
         .map_err(|e| LicenseError::Offline(e.to_string()))?;
