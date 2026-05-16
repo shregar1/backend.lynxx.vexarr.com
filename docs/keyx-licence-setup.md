@@ -1,7 +1,10 @@
 # keyx licence setup
 
-How to point lynxx-gateway at a keyx-issued licence bundle instead of
-the legacy billing-server flow.
+Lynxx-gateway verifies its licence by asking keyx whether a signed
+bundle (`payload` + `signature`) is still valid against an active
+signing key. Without `[keyx]` configured, the gateway runs in
+**unverified** mode — Enterprise tier, no kill-switch — which is
+appropriate for self-host and dev deployments.
 
 ---
 
@@ -79,20 +82,6 @@ up to **7 days** before refusing to start.
    restarts the gateway — or hot-reloads config if their deployment
    supports it.
 
-## Differences from the legacy flow
-
-| | Legacy (`LYNXX_API_KEY`) | keyx |
-|---|---|---|
-| Server | Vexarr billing | api.keyx.vexarr.com |
-| Auth surface | `lnx_live_...` opaque key | URN + service token + signed bundle |
-| Network calls per boot | 1 verify + 1 register | 1 verify (no register) |
-| Node accounting | Yes — `register_node` + heartbeat + usage reporter | **No** — Phase 1 keyx doesn't ship those; per-tenant quotas live in the signed payload |
-| Cache | `~/.lynxx/license.cache.json`, 7-day grace | same path, same grace |
-| Revocation latency | 6 h (re-verify interval) | 6 h (re-verify interval) |
-| Tier / quota update | Live — picked up on next re-verify | Requires a new signed bundle + restart |
-| `LYNXX_API_KEY` env | Required | Ignored |
-| Sample `.env` | [`.env.example`](../.env.example) | [`.env.example`](../.env.example) |
-
 ## Troubleshooting
 
 **`licence verification failed: keyx rejected the licence signature`**
@@ -102,12 +91,11 @@ the signing key. Confirm the `payload` + `signature` are exactly what
 ops sent (a single base64 token each, no embedded newlines). If the
 bytes are clean, contact ops to confirm the URN is still active.
 
-**`licence verification failed: keyx not configured`**
-At least one of `KEYX_BASE_URL`, `KEYX_SERVICE_TOKEN`,
-`KEYX_LICENSE_URN`, `[license].payload`, `[license].signature` is
-empty or unset. The gateway will fall back to legacy mode in this
-case — set `LYNXX_API_KEY` to a valid `lnx_live_…` key, or finish
-filling the keyx fields.
+**`licence verification failed: [license].payload + [license].signature required when [keyx] is configured`**
+You've configured `[keyx]` but haven't pasted the signed bundle.
+Either fill `[license].payload` + `[license].signature` from the
+`keyx license issue` output, or unset the `[keyx]` block to run in
+unverified mode.
 
 **`licence verification failed: keyx request failed: ...`**
 Transport error reaching keyx. Check egress: lynxx needs outbound
@@ -263,31 +251,10 @@ Two ways to wire the keyx client behind that URN:
 - Without `keyx_urn`, the plugin behaves exactly as before (local
   consumer secret, computed in-process)
 
-## Heads-up: legacy mode is deprecated
+## Running without a licence
 
-The first time a gateway boots in legacy mode (LYNXX_API_KEY against
-the billing server) it logs:
-
-```
-WARN  DEPRECATED: legacy licence mode active … will be removed in a
-      future major version. Migrate to keyx — see
-      docs/keyx-licence-setup.md.
-```
-
-The path still works exactly as before; the warning fires once per
-process so it doesn't spam every re-verify cycle. Plan to cut over
-before the next major release.
-
-## Reverting to legacy mode
-
-Remove all four of these from your config / env:
-
-```
-KEYX_BASE_URL, KEYX_SERVICE_TOKEN, KEYX_LICENSE_URN
-[license].payload, [license].signature
-```
-
-…and put `LYNXX_API_KEY=lnx_live_…` back. The gateway picks the
-legacy code path on the next start. No data migration; the
-`~/.lynxx/license.cache.json` from keyx mode is keyed by signature
-and is simply ignored.
+`[keyx]` is optional. When unset, `License::load` returns a
+permissive default (Enterprise tier, no quotas, no kill-switch) and
+the gateway runs without contacting any licence service. This is the
+right mode for self-hosted / internal-only / dev deployments. The
+admin `/status` endpoint reports `"licence_mode": "unverified"`.

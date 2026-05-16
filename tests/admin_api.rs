@@ -159,9 +159,10 @@ async fn launch_gateway(db_url: &str) -> (GatewayGuard, u16) {
     let bin = env!("CARGO_BIN_EXE_lynxx-gateway");
     let child = Command::new(bin)
         .env("LYNXX_CONFIG", &config)
-        // Debug builds accept `lnx_dev_*` without hitting the licence server
-        // (see `license::try_dev_key`). Required since startup verifies a key.
-        .env("LYNXX_API_KEY", "lnx_dev_pro")
+        // `[keyx]` is unset here, so licence defaults to "unverified"
+        // (Enterprise tier, no kill-switch). LYNXX_API_KEY just acts
+        // as a master admin token shortcut for the admin API.
+        .env("LYNXX_API_KEY", "admin-test-token")
         .env("RUST_LOG", "lynxx_gateway=warn")
         .current_dir(&dir_path)
         .stdout(Stdio::null())

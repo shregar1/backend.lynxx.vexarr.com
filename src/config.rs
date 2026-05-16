@@ -44,10 +44,11 @@ pub struct GatewayConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct LicenseSettings {
-    /// API key issued by the legacy licence server (e.g. `lnx_live_…`).
-    /// May also be set via `LYNXX_API_KEY` env var, which wins on
-    /// conflict. Unused when `[keyx]` is configured and a signed
-    /// `payload` / `signature` are present below.
+    /// DEPRECATED, unused. Was the API key for the retired
+    /// `/v1/license/verify` billing endpoint. Field kept (with
+    /// `#[serde(default)]`) so existing config.toml files don't fail
+    /// to parse; ignored at runtime. Licence verification is now
+    /// keyx-only — see `[keyx]` + `payload` / `signature` below.
     #[serde(default)]
     pub api_key: String,
     /// Base64-encoded JSON licence payload (used with keyx). The JSON

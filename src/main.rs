@@ -21,7 +21,6 @@ mod discovery;
 mod dtos;
 mod error;
 mod health;
-mod install;
 mod integrations;
 mod kernel_tuning;
 mod license;
@@ -415,30 +414,29 @@ async fn async_main() -> anyhow::Result<()> {
     quota.set_allow_overage(license.allow_overage);
     crate::quota::spawn_quota_flusher(quota.clone());
 
-    // Live licence state + periodic re-verifier. The startup verify
-    // above is hard-fail; this background loop catches mid-run
-    // cancellations within REVERIFY_INTERVAL_SECS instead of waiting
-    // for the offline cache to expire (7 days).
+    // Live licence state + periodic re-verifier.
     //
-    // Two modes:
-    //   * keyx — the signed bundle is re-verified against keyx; no
-    //     billing-server URL or API key. Node accounting / heartbeats
-    //     / usage reporting are skipped (those are billing concerns,
-    //     not licence concerns; will move under a Phase 2 keyx path).
-    //   * legacy — current billing-server flow.
-    let keyx_mode = config.keyx.is_configured() && !config.license.payload.trim().is_empty();
+    // When [keyx] is configured AND a signed bundle is provided, build
+    // a keyx-backed LicenseState — the background refresher hits keyx
+    // every REVERIFY_INTERVAL_SECS and flips a kill-switch on a
+    // confirmed `valid: false`. Otherwise the unverified default state
+    // (no refresher, no kill-switch) is used — appropriate for
+    // self-host / dev / internal deployments.
+    //
+    // `license_api_key` is still resolved here: it's the master admin
+    // token bootstrap shortcut for the admin API (handy for operators
+    // who want a single bearer they can use everywhere). It is no
+    // longer used for licence verification.
+    let license_api_key = std::env::var("LYNXX_API_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_default();
 
-    // These two stay declared in the outer scope because downstream
-    // code (admin status cache) still expects them. In keyx mode they
-    // hold empty strings and the legacy-only branches just skip.
-    let lynxx_base_url;
-    let license_api_key;
-
-    let license_state = if keyx_mode {
+    let license_state = if config.keyx.is_configured()
+        && !config.license.payload.trim().is_empty()
+    {
         use base64::engine::general_purpose::STANDARD as B64;
         use base64::Engine;
-        lynxx_base_url = String::new();
-        license_api_key = String::new();
         let payload = B64
             .decode(config.license.payload.trim())
             .map_err(|e| anyhow::anyhow!("license.payload is not valid base64: {e}"))?;
@@ -453,58 +451,10 @@ async fn async_main() -> anyhow::Result<()> {
             license.max_nodes,
         )?
     } else {
-        let base = std::env::var("LYNXX_BASE_URL")
-            .or_else(|_| {
-                std::env::var("LYNXX_LICENSE_VERIFY_URL")
-                    .map(|u| u.trim_end_matches("/v1/license/verify").to_string())
-            })
-            .unwrap_or_else(|_| "https://api.lynxx.vexarr.com".to_string());
-        lynxx_base_url = base.trim_end_matches('/').to_string();
-        license_api_key = std::env::var("LYNXX_API_KEY")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| config.license.api_key.clone());
-        let license_verify_url = format!("{}/v1/license/verify", lynxx_base_url);
-        crate::license::LicenseState::new(
-            license_api_key.clone(),
-            license_verify_url,
-            plan_tier,
-            license.active_nodes,
-            license.max_nodes,
-        )
+        tracing::info!("licence: unverified mode (no [keyx] config)");
+        crate::license::LicenseState::unverified(plan_tier)
     };
     crate::license::spawn_license_refresher(license_state.clone(), Some(quota.clone()));
-
-    // Node lifecycle: register with the billing API, then start the
-    // heartbeat + usage reporter loops. Registration failure is logged
-    // as a warning — the licence itself is already verified, so the
-    // gateway should continue to serve traffic even if billing-side
-    // node accounting is degraded. Skipped entirely in keyx mode.
-    if !keyx_mode && !license_api_key.trim().is_empty() {
-        match crate::license::register_node(&license_api_key, &lynxx_base_url).await {
-            Ok(()) => {}
-            Err(crate::license::NodeError::LimitReached { active, max }) => {
-                tracing::warn!(
-                    active,
-                    max,
-                    "node limit reached on billing service; this gateway is running but will not be counted — upgrade plan to add more nodes"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "node registration failed; continuing without billing-side node accounting"
-                );
-            }
-        }
-        crate::license::spawn_node_heartbeat(license_api_key.clone(), lynxx_base_url.clone());
-        crate::license::spawn_usage_reporter(
-            license_api_key.clone(),
-            lynxx_base_url.clone(),
-            quota.clone(),
-            license_state.clone(),
-        );
-    }
 
 
     let trusted_proxies: Vec<ipnet::IpNet> = config
@@ -1104,13 +1054,6 @@ async fn async_main() -> anyhow::Result<()> {
 
     if let Some(h) = acme_http_handle {
         h.abort();
-    }
-
-    // Best-effort deregister from the billing service so the node
-    // shows offline immediately instead of waiting for the heartbeat
-    // grace window to elapse. Tolerates network failure.
-    if !license_api_key.trim().is_empty() {
-        crate::license::deregister_node(&license_api_key, &lynxx_base_url).await;
     }
 
     // Flush any pending OTel spans before exit.
