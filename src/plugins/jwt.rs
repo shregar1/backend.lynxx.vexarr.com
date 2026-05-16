@@ -3,15 +3,39 @@ use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
 use axum::http::header::{HeaderName, HeaderValue};
 use axum::http::{Request, Response};
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
 use std::str::FromStr;
+use std::time::Duration;
+use tokio::sync::OnceCell;
 
-/// Real JWT verification. Supports HS256 (with `secret`) and RS256 (with
-/// `public_key`). On success, injects the verified claims as a JSON-encoded
+const JWKS_FETCH_TIMEOUT_SECS: u64 = 10;
+
+/// Source of the verification key.
+enum KeySource {
+    /// Built once at plugin init from `secret` (HS*) or `public_key` PEM (RS*).
+    Static(DecodingKey),
+    /// JWKS endpoint — fetched lazily on first request, cached for the
+    /// plugin's lifetime. Each request decodes the JWT header's `kid` and
+    /// looks up the matching JWK in the cached set, then builds a
+    /// per-token DecodingKey. Re-fetch the JWKS by reloading the plugin
+    /// (admin API → PluginExecutor::rebuild).
+    Jwks {
+        url: String,
+        cache: OnceCell<JwkSet>,
+    },
+}
+
+/// Real JWT verification. Three key sources, in priority order:
+///   * `jwks_url`   — JWKS endpoint (e.g. keyx `/v1/jwks.json`); per-token
+///                    `kid` resolves to a JWK, no key rotation friction
+///   * `public_key` — PEM (RS\*); static single-key verification
+///   * `secret`     — shared secret (HS\*)
+///
+/// On success, injects the verified claims as a JSON-encoded
 /// `X-Jwt-Claims` header so downstream services can consume them without
 /// re-verifying.
 pub struct JwtPlugin {
-    decoding_key: DecodingKey,
+    key: KeySource,
     validation: Validation,
     header_name: HeaderName,
     scheme: String,
@@ -49,15 +73,27 @@ impl JwtPlugin {
             }
         };
 
-        // RS* uses public_key (PEM); HS* uses secret bytes. If `public_key` is
-        // present we treat it as RS256 by default unless the caller asked for
-        // an explicit RS variant.
-        let decoding_key = if let Some(pk) = cfg.get("public_key").and_then(|v| v.as_str()) {
-            DecodingKey::from_rsa_pem(pk.as_bytes())
-                .map_err(|e| GatewayError::BadRequest(format!("invalid jwt public_key PEM: {e}")))?
+
+
+        let key = if let Some(url) = cfg
+            .get("jwks_url")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            KeySource::Jwks {
+                url: url.to_string(),
+                cache: OnceCell::new(),
+            }
+        } else if let Some(pk) = cfg.get("public_key").and_then(|v| v.as_str()) {
+            // Static PEM. RS\* path.
+            KeySource::Static(
+                DecodingKey::from_rsa_pem(pk.as_bytes())
+                    .map_err(|e| GatewayError::BadRequest(format!("invalid jwt public_key PEM: {e}")))?,
+            )
         } else {
+            // Static secret. HS\* path.
             let secret = cfg.get("secret").and_then(|v| v.as_str()).unwrap_or("");
-            DecodingKey::from_secret(secret.as_bytes())
+            KeySource::Static(DecodingKey::from_secret(secret.as_bytes()))
         };
 
         let mut validation = Validation::new(algorithm);
@@ -77,12 +113,37 @@ impl JwtPlugin {
             .unwrap_or_else(|| vec!["sub".into(), "exp".into()]);
 
         Ok(Self {
-            decoding_key,
+            key,
             validation,
             header_name,
             scheme,
             claims_required,
         })
+    }
+
+    /// Resolve the JWKS-mode per-token DecodingKey. Fetches the JWKS on
+    /// first call (cached for the plugin's lifetime), then matches the
+    /// JWT header's `kid` against the set.
+    async fn resolve_jwks_key(
+        url: &str,
+        cache: &OnceCell<JwkSet>,
+        token: &str,
+    ) -> Result<DecodingKey, PluginError> {
+        let jwks = cache
+            .get_or_try_init(|| fetch_jwks(url))
+            .await
+            .map_err(|e| PluginError::Unauthorized(format!("JWKS fetch failed: {e}")))?;
+
+        let header = decode_header(token)
+            .map_err(|e| PluginError::Unauthorized(format!("JWT header parse: {e}")))?;
+        let kid = header
+            .kid
+            .ok_or_else(|| PluginError::Unauthorized("JWT missing `kid` (required in JWKS mode)".into()))?;
+        let jwk = jwks
+            .find(&kid)
+            .ok_or_else(|| PluginError::Unauthorized(format!("kid `{kid}` not in JWKS")))?;
+        DecodingKey::from_jwk(jwk)
+            .map_err(|e| PluginError::Unauthorized(format!("JWK→DecodingKey: {e}")))
     }
 
     fn extract_token<'a>(&self, raw: &'a str) -> Option<&'a str> {
@@ -110,8 +171,15 @@ impl Plugin for JwtPlugin {
             .extract_token(raw)
             .ok_or_else(|| PluginError::Unauthorized("malformed JWT header".into()))?;
 
-        let data = decode::<serde_json::Value>(token, &self.decoding_key, &self.validation)
-            .map_err(|e| PluginError::Unauthorized(format!("invalid JWT: {e}")))?;
+        let data = match &self.key {
+            KeySource::Static(k) => decode::<serde_json::Value>(token, k, &self.validation)
+                .map_err(|e| PluginError::Unauthorized(format!("invalid JWT: {e}")))?,
+            KeySource::Jwks { url, cache } => {
+                let dk = Self::resolve_jwks_key(url, cache, token).await?;
+                decode::<serde_json::Value>(token, &dk, &self.validation)
+                    .map_err(|e| PluginError::Unauthorized(format!("invalid JWT: {e}")))?
+            }
+        };
 
         for claim in &self.claims_required {
             if data.claims.get(claim).is_none() {
@@ -131,5 +199,189 @@ impl Plugin for JwtPlugin {
 
     async fn on_response(&self, _resp: &mut Response<BoxBody>) -> Result<(), PluginError> {
         Ok(())
+    }
+}
+
+async fn fetch_jwks(url: &str) -> Result<JwkSet, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(JWKS_FETCH_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+    resp.json::<JwkSet>().await.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Symmetric HS256 keypair-equivalent (just a shared secret) wrapped
+    /// as a JWK so we don't need RSA material in tests. The `kid`
+    /// matches what the test JWTs carry in their header.
+    fn oct_jwks(kid: &str, secret: &str) -> serde_json::Value {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        serde_json::json!({
+            "keys": [{
+                "kty": "oct",
+                "alg": "HS256",
+                "kid": kid,
+                "k":   URL_SAFE_NO_PAD.encode(secret.as_bytes()),
+            }]
+        })
+    }
+
+    fn sign_token(kid: &str, secret: &str, sub: &str) -> String {
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(kid.into());
+        let claims = serde_json::json!({
+            "sub": sub,
+            "exp": (chrono::Utc::now() + chrono::Duration::seconds(60)).timestamp(),
+        });
+        encode(
+            &header,
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap()
+    }
+
+    fn req_with_bearer(token: &str) -> Request<Body> {
+        Request::builder()
+            .header("Authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn jwks_mode_verifies_token_signed_by_published_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(oct_jwks("k1", "shared-secret-bytes-do-not-leak")),
+            )
+            .mount(&server)
+            .await;
+
+        let plugin = JwtPlugin::from_config(&serde_json::json!({
+            "algorithm": "HS256",
+            "jwks_url": format!("{}/jwks.json", server.uri()),
+        }))
+        .unwrap();
+
+        let token = sign_token("k1", "shared-secret-bytes-do-not-leak", "alice");
+        let mut req = req_with_bearer(&token);
+        plugin.on_request(&mut req).await.unwrap();
+        assert!(req.headers().get("x-jwt-claims").is_some());
+    }
+
+    #[tokio::test]
+    async fn jwks_mode_rejects_token_with_unknown_kid() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks.json"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(oct_jwks("k1", "secret")),
+            )
+            .mount(&server)
+            .await;
+
+        let plugin = JwtPlugin::from_config(&serde_json::json!({
+            "algorithm": "HS256",
+            "jwks_url": format!("{}/jwks.json", server.uri()),
+        }))
+        .unwrap();
+
+        let token = sign_token("rotated-kid", "secret", "alice");
+        let mut req = req_with_bearer(&token);
+        let err = plugin.on_request(&mut req).await.unwrap_err();
+        match err {
+            PluginError::Unauthorized(msg) => assert!(
+                msg.contains("not in JWKS"),
+                "want 'not in JWKS', got {msg}"
+            ),
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn jwks_mode_rejects_token_missing_kid() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks.json"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(oct_jwks("k1", "secret")),
+            )
+            .mount(&server)
+            .await;
+
+        let plugin = JwtPlugin::from_config(&serde_json::json!({
+            "algorithm": "HS256",
+            "jwks_url": format!("{}/jwks.json", server.uri()),
+        }))
+        .unwrap();
+
+        // Sign WITHOUT a kid in the header.
+        let header = Header::new(Algorithm::HS256);
+        let claims = serde_json::json!({
+            "sub": "alice",
+            "exp": (chrono::Utc::now() + chrono::Duration::seconds(60)).timestamp(),
+        });
+        let token = encode(&header, &claims, &EncodingKey::from_secret(b"secret")).unwrap();
+
+        let mut req = req_with_bearer(&token);
+        let err = plugin.on_request(&mut req).await.unwrap_err();
+        match err {
+            PluginError::Unauthorized(msg) => assert!(msg.contains("missing `kid`")),
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn jwks_mode_propagates_fetch_failure() {
+        // Point at a port that's almost certainly closed.
+        let plugin = JwtPlugin::from_config(&serde_json::json!({
+            "algorithm": "HS256",
+            "jwks_url": "http://127.0.0.1:1/nope",
+        }))
+        .unwrap();
+
+        let token = sign_token("k1", "secret", "alice");
+        let mut req = req_with_bearer(&token);
+        let err = plugin.on_request(&mut req).await.unwrap_err();
+        assert!(matches!(err, PluginError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn static_secret_path_still_works() {
+        let plugin = JwtPlugin::from_config(&serde_json::json!({
+            "algorithm": "HS256",
+            "secret": "shared-secret",
+        }))
+        .unwrap();
+        let header = Header::new(Algorithm::HS256);
+        let claims = serde_json::json!({
+            "sub": "alice",
+            "exp": (chrono::Utc::now() + chrono::Duration::seconds(60)).timestamp(),
+        });
+        let token = encode(
+            &header,
+            &claims,
+            &EncodingKey::from_secret(b"shared-secret"),
+        )
+        .unwrap();
+        let mut req = req_with_bearer(&token);
+        plugin.on_request(&mut req).await.unwrap();
+        assert!(req.headers().get("x-jwt-claims").is_some());
     }
 }

@@ -120,6 +120,35 @@ Restart the gateway — the payload is parsed once at boot. The 6-hour
 re-verifier only flips the kill switch on revocation; it doesn't
 re-parse a swapped-in bundle.
 
+## Bonus: route-level JWT verification via keyx JWKS
+
+If your upstream services already accept keyx-signed JWTs (issued via
+`POST /v1/keys/{urn}/issue-jwt`), the gateway's JWT plugin can verify
+them at the edge by pointing at the same tenant's JWKS endpoint:
+
+```toml
+[[plugins]]
+name = "jwt"
+enabled = true
+
+  [plugins.config]
+  algorithm = "RS256"
+  jwks_url  = "https://api.keyx.vexarr.com/v1/jwks.json"
+```
+
+Behaviour:
+- The JWKS is fetched once on plugin load (or admin-reload) and cached
+  for the plugin's lifetime
+- Each request decodes the JWT header's `kid` and looks it up in the
+  cached JWKS — automatic rotation as long as the old `kid` stays
+  published during the overlap window
+- Tokens missing a `kid`, or with a `kid` not in the JWKS, are rejected
+- JWKS fetch failures are NOT silently fallthrough — the plugin
+  refuses the request rather than letting an unverified token pass
+
+Static `public_key` (PEM) and `secret` (HS\*) modes still work for
+non-keyx setups.
+
 ## Reverting to legacy mode
 
 Remove all four of these from your config / env:
