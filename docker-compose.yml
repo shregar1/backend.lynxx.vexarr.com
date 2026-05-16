@@ -21,14 +21,16 @@ services:
       target: gateway
     environment:
       LYNXX_CONFIG: /etc/lynxx/config.toml
+      LYNXX_PROXY_PORT: ${LYNXX_PROXY_PORT:-28080}
+      LYNXX_ADMIN_PORT: ${LYNXX_ADMIN_PORT:-28081}
       DATABASE_URL: postgres://lynxx:lynxx@postgres:5432/lynxx
       # Fluxx telemetry (OTel → local agent); remove to disable.
       FLUXX_OTEL_ENDPOINT: http://127.0.0.1:4318
       OTEL_SERVICE_NAME: lynxx-gateway
       OTEL_RESOURCE_ATTRIBUTES: deployment.environment=production
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${LYNXX_PROXY_PORT:-28080}:${LYNXX_PROXY_PORT:-28080}"
+      - "${LYNXX_ADMIN_PORT:-28081}:${LYNXX_ADMIN_PORT:-28081}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -40,13 +42,15 @@ services:
       target: gateway
     environment:
       LYNXX_CONFIG: /etc/lynxx/config.toml
+      LYNXX_PROXY_PORT: ${LYNXX_PROXY_PORT:-28080}
+      LYNXX_ADMIN_PORT: ${LYNXX_ADMIN_PORT:-28081}
       DATABASE_URL: postgres://lynxx:lynxx@postgres:5432/lynxx
       FLUXX_OTEL_ENDPOINT: http://127.0.0.1:4318
       OTEL_SERVICE_NAME: lynxx-gateway
       OTEL_RESOURCE_ATTRIBUTES: deployment.environment=production
     ports:
-      - "9100:9000"
-      - "9101:9001"
+      - "28180:${LYNXX_PROXY_PORT:-28080}"
+      - "28181:${LYNXX_ADMIN_PORT:-28081}"
     depends_on:
       postgres:
         condition: service_healthy

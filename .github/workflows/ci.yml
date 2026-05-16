@@ -179,8 +179,8 @@ jobs:
         run: |
           cat > /tmp/lynxx-smoke.toml <<'EOF'
           [gateway]
-          proxy_port = 9000
-          admin_port = 9001
+          proxy_port = 28080
+          admin_port = 28081
           database_url = "sqlite:///tmp/lynxx-smoke.db?mode=rwc"
           seed_from_config = true
           health_check_interval_ms = 60000
@@ -204,13 +204,13 @@ jobs:
           LYNXX_CONFIG=/tmp/lynxx-smoke.toml \
             nohup ./target/release/lynxx-gateway >/tmp/gw.log 2>&1 &
           for i in $(seq 1 60); do
-            curl -fsS http://127.0.0.1:9001/status && break || sleep 1
+            curl -fsS http://127.0.0.1:28081/status && break || sleep 1
           done
 
       - name: Run bench smoke
         run: |
           ./target/release/lynxx-bench \
-            --target http://127.0.0.1:9000/smoke \
+            --target http://127.0.0.1:28080/smoke \
             --rps 1000 --duration-secs 5 --connections 32 \
             | tee /tmp/bench.out
           # Trivial assertion: at least some measured requests, no all-error run.

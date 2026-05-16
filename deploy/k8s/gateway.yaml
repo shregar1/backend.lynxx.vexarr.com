@@ -28,9 +28,9 @@ spec:
           command: ["lynxx-gateway"]
           ports:
             - name: proxy
-              containerPort: 8000
+              containerPort: 28080
             - name: admin
-              containerPort: 9001
+              containerPort: 28081
           env:
             - name: RUST_LOG
               value: "info"
@@ -66,6 +66,6 @@ spec:
       port: 80
       targetPort: proxy
     - name: admin
-      port: 9001
+      port: 28081
       targetPort: admin
   type: ClusterIP

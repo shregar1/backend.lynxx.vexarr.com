@@ -1,6 +1,6 @@
 [gateway]
-proxy_port = 9000
-admin_port = 9001
+proxy_port = 28080
+admin_port = 28081
 database_url = "sqlite://lynxx.db?mode=rwc"
 seed_from_config = true
 health_check_interval_ms = 10000

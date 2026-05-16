@@ -2,6 +2,11 @@
 
 Single VM deployment to your GCE instance.
 
+> All ports / URLs / credentials in this guide can be overridden via env vars.
+> See [`.env.example`](.env.example) for the full list (`LYNXX_PROXY_PORT`,
+> `LYNXX_ADMIN_PORT`, `LYNXX_API_KEY`, `DATABASE_URL`, `FLUXX_OTEL_ENDPOINT`,
+> `LYNXX_GCS_BUCKET`, `LYNXX_VM_NAME`, `LYNXX_VM_ZONE`, …).
+
 ## First-time provisioning
 
 Run once on a fresh VM to install deps, config, and the systemd service:
@@ -33,8 +38,8 @@ sudo chmod +x /usr/local/bin/lynxx-gateway
 # Write config
 sudo tee /etc/lynxx/config.toml > /dev/null <<TOML
 [gateway]
-proxy_port = 9000
-admin_port = 9001
+proxy_port = 28080
+admin_port = 28081
 database_url = "sqlite:///var/lib/lynxx/lynxx.db?mode=rwc"
 seed_from_config = true
 health_check_interval_ms = 10000
@@ -60,11 +65,11 @@ Restart=on-failure
 RestartSec=3
 LimitNOFILE=65536
 
-# Port forwarding: 443->9000, 80->9000
-ExecStartPost=/sbin/iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 9000
-ExecStartPost=/sbin/iptables -t nat -A PREROUTING -p tcp --dport 80  -j REDIRECT --to-port 9000
-ExecStopPost=/sbin/iptables  -t nat -D PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 9000
-ExecStopPost=/sbin/iptables  -t nat -D PREROUTING -p tcp --dport 80  -j REDIRECT --to-port 9000
+# Port forwarding: 443->28080, 80->28080
+ExecStartPost=/sbin/iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 28080
+ExecStartPost=/sbin/iptables -t nat -A PREROUTING -p tcp --dport 80  -j REDIRECT --to-port 28080
+ExecStopPost=/sbin/iptables  -t nat -D PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 28080
+ExecStopPost=/sbin/iptables  -t nat -D PREROUTING -p tcp --dport 80  -j REDIRECT --to-port 28080
 
 [Install]
 WantedBy=multi-user.target
@@ -107,7 +112,7 @@ gcloud compute ssh $VM_NAME --zone=$ZONE
 
 # Check status
 sudo systemctl status lynxx.service
-curl -s http://localhost:9001/healthz
+curl -s http://localhost:28081/healthz
 
 # View logs
 sudo journalctl -u lynxx.service -f

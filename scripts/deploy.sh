@@ -6,6 +6,7 @@ TARGET="x86_64-unknown-linux-gnu"
 VM_NAME="${LYNXX_VM_NAME:-your-vm-name}"
 VM_ZONE="${LYNXX_VM_ZONE:-us-central1-a}"
 BINARY_NAME="lynxx-gateway"
+ADMIN_PORT="${LYNXX_ADMIN_PORT:-28081}"
 
 VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 GIT_HASH=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")
@@ -65,11 +66,11 @@ if [[ "${1:-}" == "--deploy" ]]; then
             exit 1
         fi
 
-        echo "[5/7] Redirecting traffic via iptables (443→18080, 9001→18443)"
+        echo "[5/7] Redirecting traffic via iptables (443→18080, '"${ADMIN_PORT}"'→18443)"
         sudo iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 18080
         sudo iptables -t nat -A OUTPUT -p tcp --dport 443 -o lo -j REDIRECT --to-port 18080
-        sudo iptables -t nat -A PREROUTING -p tcp --dport 9001 -j REDIRECT --to-port 18443
-        sudo iptables -t nat -A OUTPUT -p tcp --dport 9001 -o lo -j REDIRECT --to-port 18443
+        sudo iptables -t nat -A PREROUTING -p tcp --dport '"${ADMIN_PORT}"' -j REDIRECT --to-port 18443
+        sudo iptables -t nat -A OUTPUT -p tcp --dport '"${ADMIN_PORT}"' -o lo -j REDIRECT --to-port 18443
         sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 18080 2>/dev/null || true
         sudo iptables -t nat -A OUTPUT -p tcp --dport 80 -o lo -j REDIRECT --to-port 18080 2>/dev/null || true
 
@@ -98,15 +99,15 @@ if [[ "${1:-}" == "--deploy" ]]; then
         echo "[7/7] Cutting over: removing iptables, stopping staging"
         sudo iptables -t nat -D PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 18080 2>/dev/null || true
         sudo iptables -t nat -D OUTPUT -p tcp --dport 443 -o lo -j REDIRECT --to-port 18080 2>/dev/null || true
-        sudo iptables -t nat -D PREROUTING -p tcp --dport 9001 -j REDIRECT --to-port 18443 2>/dev/null || true
-        sudo iptables -t nat -D OUTPUT -p tcp --dport 9001 -o lo -j REDIRECT --to-port 18443 2>/dev/null || true
+        sudo iptables -t nat -D PREROUTING -p tcp --dport '"${ADMIN_PORT}"' -j REDIRECT --to-port 18443 2>/dev/null || true
+        sudo iptables -t nat -D OUTPUT -p tcp --dport '"${ADMIN_PORT}"' -o lo -j REDIRECT --to-port 18443 2>/dev/null || true
         sudo iptables -t nat -D PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 18080 2>/dev/null || true
         sudo iptables -t nat -D OUTPUT -p tcp --dport 80 -o lo -j REDIRECT --to-port 18080 2>/dev/null || true
         sudo kill ${STAGING_PID} 2>/dev/null || true
 
         sleep 1
         echo "--- Status ---"
-        curl -s http://localhost:9001/healthz
+        curl -s http://localhost:'"${ADMIN_PORT}"'/healthz
     '
     echo ""
     echo "==> Deployed ${BUILD_TAG} (zero-downtime)"
@@ -150,8 +151,8 @@ elif [[ "${1:-}" == "--rollback" ]]; then
 
         sudo iptables -t nat -A PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 18080
         sudo iptables -t nat -A OUTPUT -p tcp --dport 443 -o lo -j REDIRECT --to-port 18080
-        sudo iptables -t nat -A PREROUTING -p tcp --dport 9001 -j REDIRECT --to-port 18443
-        sudo iptables -t nat -A OUTPUT -p tcp --dport 9001 -o lo -j REDIRECT --to-port 18443
+        sudo iptables -t nat -A PREROUTING -p tcp --dport '"${ADMIN_PORT}"' -j REDIRECT --to-port 18443
+        sudo iptables -t nat -A OUTPUT -p tcp --dport '"${ADMIN_PORT}"' -o lo -j REDIRECT --to-port 18443
 
         sudo systemctl stop lynxx.service
 
@@ -169,12 +170,12 @@ elif [[ "${1:-}" == "--rollback" ]]; then
 
         sudo iptables -t nat -D PREROUTING -p tcp --dport 443 -j REDIRECT --to-port 18080 2>/dev/null || true
         sudo iptables -t nat -D OUTPUT -p tcp --dport 443 -o lo -j REDIRECT --to-port 18080 2>/dev/null || true
-        sudo iptables -t nat -D PREROUTING -p tcp --dport 9001 -j REDIRECT --to-port 18443 2>/dev/null || true
-        sudo iptables -t nat -D OUTPUT -p tcp --dport 9001 -o lo -j REDIRECT --to-port 18443 2>/dev/null || true
+        sudo iptables -t nat -D PREROUTING -p tcp --dport '"${ADMIN_PORT}"' -j REDIRECT --to-port 18443 2>/dev/null || true
+        sudo iptables -t nat -D OUTPUT -p tcp --dport '"${ADMIN_PORT}"' -o lo -j REDIRECT --to-port 18443 2>/dev/null || true
         sudo kill ${STAGING_PID} 2>/dev/null || true
 
         sleep 1
-        curl -s http://localhost:9001/healthz
+        curl -s http://localhost:'"${ADMIN_PORT}"'/healthz
     '
     echo ""
     echo "==> Rolled back to ${ROLLBACK_TO} (zero-downtime)"

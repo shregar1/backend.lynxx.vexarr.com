@@ -50,7 +50,7 @@ COPY --from=builder /build/migrations /etc/lynxx/migrations
 COPY config.toml /etc/lynxx/config.toml
 USER lynxx
 WORKDIR /etc/lynxx
-EXPOSE 9000 9001
+EXPOSE 28080 28081
 ENTRYPOINT ["/usr/local/bin/lynxx-gateway"]
 
 # ---- Ingress controller image ----------------------------------------------

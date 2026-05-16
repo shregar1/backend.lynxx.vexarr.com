@@ -4,12 +4,17 @@ Open-loop load generator for the Lynxx gateway. Records per-request latency
 into an `HdrHistogram` and reports p50/p95/p99/p99.9 + RPS + errors. Supports
 side-by-side runs against multiple targets via `--compare`.
 
+> Target URLs default to `http://127.0.0.1:28080` (proxy) and
+> `http://127.0.0.1:28081` (admin). Override per-invocation with `--target` /
+> `--proxy` / `--admin`, or set `LYNXX_PROXY_PORT` / `LYNXX_ADMIN_PORT` /
+> `LYNXX_ADMIN_TOKEN` in your `.env` — see [`../.env.example`](../.env.example).
+
 ## Usage
 
 ```bash
 cargo build --release -p lynxx-bench
 ./target/release/lynxx-bench \
-  --target http://localhost:9000/bench \
+  --target http://localhost:28080/bench \
   --rps 2000 --duration-secs 30 --connections 64 \
   --compare kong=http://localhost:18000/bench \
   --compare direct=http://localhost:18080/
@@ -198,8 +203,8 @@ cargo build --release -p lynxx-bench
 ./target/release/lynxx-mock-upstream --port 19090 --status-distribution 80,15,5
 
 # in another terminal (gateway must already be running):
-./target/release/lynxx-chaos --proxy http://127.0.0.1:9000 \
-    --admin http://127.0.0.1:9001 --admin-token "$LYNXX_ADMIN_TOKEN" \
+./target/release/lynxx-chaos --proxy http://127.0.0.1:28080 \
+    --admin http://127.0.0.1:28081 --admin-token "$LYNXX_ADMIN_TOKEN" \
     --mock-upstream http://127.0.0.1:19090 \
     all
 ```

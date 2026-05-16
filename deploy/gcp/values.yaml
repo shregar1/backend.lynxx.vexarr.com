@@ -57,7 +57,7 @@ gateway:
 
   # Annotate pods so GCP LB NEG health checks are routed correctly.
   podAnnotations:
-    cloud.google.com/neg: '{"exposed_ports": {"9000": {}}}'
+    cloud.google.com/neg: '{"exposed_ports": {"28080": {}}}'
 
 controller:
   replicas: 1
@@ -74,7 +74,7 @@ postgres:
   enabled: false
 
 config:
-  proxyPort: 9000
-  adminPort: 9001
+  proxyPort: 28080
+  adminPort: 28081
   healthCheckIntervalMs: 10000
   seedFromConfig: false

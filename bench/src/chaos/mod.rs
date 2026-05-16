@@ -32,9 +32,9 @@ use uuid::Uuid;
 /// and merge with this in `lynxx-chaos.rs`.
 #[derive(Debug, Clone)]
 pub struct Args {
-    /// Proxy listener (where data-plane traffic goes), e.g. `http://127.0.0.1:9000`.
+    /// Proxy listener (where data-plane traffic goes), e.g. `http://127.0.0.1:28080`.
     pub proxy_url: String,
-    /// Admin API base, e.g. `http://127.0.0.1:9001`.
+    /// Admin API base, e.g. `http://127.0.0.1:28081`.
     pub admin_url: String,
     /// Optional admin token for the `Authorization: Bearer ...` header.
     pub admin_token: Option<String>,

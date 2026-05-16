@@ -33,7 +33,7 @@ postgres:
     database: lynxx
 
 config:
-  proxyPort: 9000
-  adminPort: 9001
+  proxyPort: 28080
+  adminPort: 28081
   healthCheckIntervalMs: 10000
   seedFromConfig: false

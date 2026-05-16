@@ -19,7 +19,7 @@ rule_files:
 
 scrape_configs:
   # ----------------------------------------------------------------------
-  # Lynxx gateway replicas. The admin port (9001) is the metrics surface.
+  # Lynxx gateway replicas. The admin port (28081) is the metrics surface.
   # ----------------------------------------------------------------------
   - job_name: lynxx-gateway
     metrics_path: /metrics
@@ -27,9 +27,9 @@ scrape_configs:
     scrape_timeout:  4s
     static_configs:
       - targets:
-          - lynxx-gateway-1:9001
-          - lynxx-gateway-2:9001
-          - lynxx-gateway-3:9001
+          - lynxx-gateway-1:28081
+          - lynxx-gateway-2:28081
+          - lynxx-gateway-3:28081
     relabel_configs:
       - source_labels: [__address__]
         regex: 'lynxx-gateway-([0-9]+):.*'

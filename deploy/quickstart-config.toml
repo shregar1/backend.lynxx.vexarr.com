@@ -1,11 +1,11 @@
 # Lynxx quickstart config — single-node SQLite mode.
 #
 # This is the minimal config for a working gateway. Add services and
-# routes via the admin API (port 9001) or the CLI (`lynxx`).
+# routes via the admin API (port 28081) or the CLI (`lynxx`).
 
 [gateway]
-proxy_port = 9000
-admin_port = 9001
+proxy_port = 28080
+admin_port = 28081
 # SQLite — no Postgres required. Data lives in /var/lib/lynxx/.
 database_url = "sqlite:///var/lib/lynxx/lynxx.db?mode=rwc"
 seed_from_config = false

@@ -530,13 +530,13 @@ mod tests {
     fn parse_global_block() {
         let input = r#"
 {
-    proxy_port 9000
-    admin_port 9001
+    proxy_port 28080
+    admin_port 28081
 }
 "#;
         let config = parse_lynxfile(input).unwrap();
-        assert_eq!(config.gateway.proxy_port, 9000);
-        assert_eq!(config.gateway.admin_port, 9001);
+        assert_eq!(config.gateway.proxy_port, 28080);
+        assert_eq!(config.gateway.admin_port, 28081);
     }
 
     #[test]

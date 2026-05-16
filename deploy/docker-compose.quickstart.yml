@@ -18,17 +18,19 @@ services:
     restart: unless-stopped
     environment:
       LYNXX_CONFIG: /etc/lynxx/config.toml
+      LYNXX_PROXY_PORT: ${LYNXX_PROXY_PORT:-28080}
+      LYNXX_ADMIN_PORT: ${LYNXX_ADMIN_PORT:-28081}
       RUST_LOG: ${RUST_LOG:-info}
     ports:
       - "80:80"
       - "443:443"
-      - "9000:9000"
-      - "9001:9001"
+      - "${LYNXX_PROXY_PORT:-28080}:${LYNXX_PROXY_PORT:-28080}"
+      - "${LYNXX_ADMIN_PORT:-28081}:${LYNXX_ADMIN_PORT:-28081}"
     volumes:
       - lynxx-data:/var/lib/lynxx
       - ./quickstart-config.toml:/etc/lynxx/config.toml:ro
     healthcheck:
-      test: ["CMD", "/usr/local/bin/lynxx-gateway", "healthcheck", "--addr", "127.0.0.1:9001"]
+      test: ["CMD", "sh", "-c", "/usr/local/bin/lynxx-gateway healthcheck --addr 127.0.0.1:${LYNXX_ADMIN_PORT:-28081}"]
       interval: 10s
       timeout: 3s
       retries: 5

@@ -25,11 +25,11 @@ use lynxx_bench::chaos::{
 )]
 struct Cli {
     /// Proxy listener URL (data plane).
-    #[arg(long, default_value = "http://127.0.0.1:9000", global = true)]
+    #[arg(long, default_value = "http://127.0.0.1:28080", global = true)]
     proxy: String,
 
     /// Admin API URL.
-    #[arg(long, default_value = "http://127.0.0.1:9001", global = true)]
+    #[arg(long, default_value = "http://127.0.0.1:28081", global = true)]
     admin: String,
 
     /// Optional admin token (`Authorization: Bearer ...`).
