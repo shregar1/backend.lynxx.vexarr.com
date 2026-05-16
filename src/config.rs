@@ -16,6 +16,11 @@ pub struct GatewayConfig {
     /// gateway refuses to start. See `src/license/mod.rs`.
     #[serde(default)]
     pub license: LicenseSettings,
+    /// keyx integration. When populated alongside a signed `[license]`
+    /// bundle, licence verification routes through keyx instead of the
+    /// legacy billing endpoint.
+    #[serde(default)]
+    pub keyx: KeyxSettings,
     /// OpenTelemetry export. Env vars `LYNXX_TELEMETRY_URL` and
     /// `LYNXX_TELEMETRY_API_KEY` override the TOML values.
     #[serde(default)]
@@ -39,10 +44,53 @@ pub struct GatewayConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct LicenseSettings {
-    /// API key issued by the licence server (e.g. `lnx_live_…`). May
-    /// also be set via `LYNXX_API_KEY` env var, which wins on conflict.
+    /// API key issued by the legacy licence server (e.g. `lnx_live_…`).
+    /// May also be set via `LYNXX_API_KEY` env var, which wins on
+    /// conflict. Unused when `[keyx]` is configured and a signed
+    /// `payload` / `signature` are present below.
     #[serde(default)]
     pub api_key: String,
+    /// Base64-encoded JSON licence payload (used with keyx). The JSON
+    /// schema matches the legacy `VerifyResponse` (customer_urn, tier,
+    /// expires_at, max_nodes, monthly_call_limit, allow_overage).
+    #[serde(default)]
+    pub payload: String,
+    /// Ed25519 signature over `payload`, produced by keyx
+    /// `POST /v1/keys/{urn}/sign-license`. Base64-encoded.
+    #[serde(default)]
+    pub signature: String,
+}
+
+/// Settings for the keyx integration (api.keyx.vexarr.com).
+///
+/// Every field is overridable from the environment:
+///   * `KEYX_BASE_URL`       → `base_url`
+///   * `KEYX_SERVICE_TOKEN`  → `service_token`
+///   * `KEYX_LICENSE_URN`    → `license_urn`
+///
+/// Tenant isn't a separate field: keyx resolves the owning tenant
+/// from the licence URN itself on URN-routed endpoints.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct KeyxSettings {
+    /// Root URL of the keyx API, e.g. `https://api.keyx.vexarr.com`.
+    #[serde(default)]
+    pub base_url: String,
+    /// Bearer token issued to this lynxx node for calling keyx.
+    /// Treated as a secret — keep it in env, not TOML.
+    #[serde(default)]
+    pub service_token: String,
+    /// URN of the keyx signing key that issued this gateway's licence.
+    #[serde(default)]
+    pub license_urn: String,
+}
+
+impl KeyxSettings {
+    /// True once every field the keyx client needs is populated.
+    pub fn is_configured(&self) -> bool {
+        !self.base_url.trim().is_empty()
+            && !self.service_token.trim().is_empty()
+            && !self.license_urn.trim().is_empty()
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -1024,6 +1072,7 @@ impl Default for GatewayConfig {
             routes: Vec::new(),
             plugins: Vec::new(),
             license: LicenseSettings::default(),
+            keyx: KeyxSettings::default(),
             telemetry: TelemetrySettings::default(),
             named_matchers: Vec::new(),
             snippets: HashMap::new(),
@@ -1621,6 +1670,21 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
     if let Ok(url) = std::env::var("FLUXX_OTEL_ENDPOINT") {
         if !url.is_empty() {
             config.telemetry.fluxx_endpoint = url;
+        }
+    }
+    if let Ok(url) = std::env::var("KEYX_BASE_URL") {
+        if !url.is_empty() {
+            config.keyx.base_url = url;
+        }
+    }
+    if let Ok(tok) = std::env::var("KEYX_SERVICE_TOKEN") {
+        if !tok.is_empty() {
+            config.keyx.service_token = tok;
+        }
+    }
+    if let Ok(urn) = std::env::var("KEYX_LICENSE_URN") {
+        if !urn.is_empty() {
+            config.keyx.license_urn = urn;
         }
     }
 }

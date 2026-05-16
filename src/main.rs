@@ -21,6 +21,7 @@ mod discovery;
 mod dtos;
 mod error;
 mod health;
+mod integrations;
 mod kernel_tuning;
 mod license;
 mod logging;
@@ -260,7 +261,7 @@ async fn async_main() -> anyhow::Result<()> {
     // work. Calls the licence server; on success the result is cached
     // locally so later restarts work offline for up to 7 days. The
     // server-reported tier overrides config.gateway.plan_tier.
-    let license = match crate::license::License::load(Some(&config.license.api_key)).await {
+    let license = match crate::license::License::load(&config.license, &config.keyx).await {
         Ok(lic) => {
             tracing::info!(
                 customer_id = %lic.customer_id,
@@ -398,32 +399,68 @@ async fn async_main() -> anyhow::Result<()> {
     // above is hard-fail; this background loop catches mid-run
     // cancellations within REVERIFY_INTERVAL_SECS instead of waiting
     // for the offline cache to expire (7 days).
-    let lynxx_base_url = std::env::var("LYNXX_BASE_URL")
-        .or_else(|_| std::env::var("LYNXX_LICENSE_VERIFY_URL").map(|u| {
-            u.trim_end_matches("/v1/license/verify").to_string()
-        }))
-        .unwrap_or_else(|_| "https://api.lynxx.vexarr.com".to_string());
-    let lynxx_base_url = lynxx_base_url.trim_end_matches('/').to_string();
-    let license_api_key = std::env::var("LYNXX_API_KEY")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| config.license.api_key.clone());
-    let license_verify_url = format!("{}/v1/license/verify", lynxx_base_url);
-    let license_state = crate::license::LicenseState::new(
-        license_api_key.clone(),
-        license_verify_url,
-        plan_tier,
-        license.active_nodes,
-        license.max_nodes,
-    );
+    //
+    // Two modes:
+    //   * keyx — the signed bundle is re-verified against keyx; no
+    //     billing-server URL or API key. Node accounting / heartbeats
+    //     / usage reporting are skipped (those are billing concerns,
+    //     not licence concerns; will move under a Phase 2 keyx path).
+    //   * legacy — current billing-server flow.
+    let keyx_mode = config.keyx.is_configured() && !config.license.payload.trim().is_empty();
+
+    // These two stay declared in the outer scope because downstream
+    // code (admin status cache) still expects them. In keyx mode they
+    // hold empty strings and the legacy-only branches just skip.
+    let lynxx_base_url;
+    let license_api_key;
+
+    let license_state = if keyx_mode {
+        use base64::engine::general_purpose::STANDARD as B64;
+        use base64::Engine;
+        lynxx_base_url = String::new();
+        license_api_key = String::new();
+        let payload = B64
+            .decode(config.license.payload.trim())
+            .map_err(|e| anyhow::anyhow!("license.payload is not valid base64: {e}"))?;
+        let signature = config.license.signature.trim().to_string();
+        tracing::info!("licence re-verifier in keyx mode");
+        crate::license::LicenseState::new_keyx(
+            &config.keyx,
+            payload,
+            signature,
+            plan_tier,
+            license.active_nodes,
+            license.max_nodes,
+        )?
+    } else {
+        let base = std::env::var("LYNXX_BASE_URL")
+            .or_else(|_| {
+                std::env::var("LYNXX_LICENSE_VERIFY_URL")
+                    .map(|u| u.trim_end_matches("/v1/license/verify").to_string())
+            })
+            .unwrap_or_else(|_| "https://api.lynxx.vexarr.com".to_string());
+        lynxx_base_url = base.trim_end_matches('/').to_string();
+        license_api_key = std::env::var("LYNXX_API_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| config.license.api_key.clone());
+        let license_verify_url = format!("{}/v1/license/verify", lynxx_base_url);
+        crate::license::LicenseState::new(
+            license_api_key.clone(),
+            license_verify_url,
+            plan_tier,
+            license.active_nodes,
+            license.max_nodes,
+        )
+    };
     crate::license::spawn_license_refresher(license_state.clone(), Some(quota.clone()));
 
     // Node lifecycle: register with the billing API, then start the
     // heartbeat + usage reporter loops. Registration failure is logged
     // as a warning — the licence itself is already verified, so the
     // gateway should continue to serve traffic even if billing-side
-    // node accounting is degraded.
-    if !license_api_key.trim().is_empty() {
+    // node accounting is degraded. Skipped entirely in keyx mode.
+    if !keyx_mode && !license_api_key.trim().is_empty() {
         match crate::license::register_node(&license_api_key, &lynxx_base_url).await {
             Ok(()) => {}
             Err(crate::license::NodeError::LimitReached { active, max }) => {
@@ -583,11 +620,18 @@ async fn async_main() -> anyhow::Result<()> {
         } else {
             router
         };
-        router
+        let proxy_router = router
             .fallback(proxy_handler)
             .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
             .layer(tower_http::trace::TraceLayer::new_for_http())
-            .with_state(proxy_state)
+            .with_state(proxy_state);
+
+        // Mount the install endpoints. Their routes take precedence over the
+        // proxy fallback because merge() resolves explicit routes before the
+        // fallback runs. Scripts and the /v1/install/binary streamer are
+        // self-contained — they don't share state with the proxy pipeline.
+        let install_state = Arc::new(install::InstallState::new());
+        install::router(install_state).merge(proxy_router)
     };
 
     metrics::spawn_metrics_collector(route_table.clone(), repo.clone(), health.clone(), 5_000);
