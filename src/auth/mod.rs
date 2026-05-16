@@ -110,6 +110,13 @@ pub struct AdminToken {
     pub created_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used_at: Option<DateTime<Utc>>,
+    /// Per-token scopes. Currently populated only for keyx-issued
+    /// tokens (the keyx principal carries `scopes`); local
+    /// `admin_tokens` rows have no scope column today, so the field
+    /// is always empty for them. Persisted-via-serde tolerant via
+    /// `#[serde(default)]`.
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 impl AdminToken {

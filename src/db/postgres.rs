@@ -2785,6 +2785,7 @@ fn row_to_admin_token(row: sqlx::postgres::PgRow) -> Result<AdminToken, GatewayE
         created_at,
         expires_at,
         last_used_at,
+        scopes: Vec::new(),
     })
 }
 

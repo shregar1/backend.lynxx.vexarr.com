@@ -164,6 +164,31 @@ and busted on event.
 unconfigured) and the fallback path is skipped — only local tokens
 work.
 
+**Per-route scope enforcement (optional):** keyx returns `scopes`
+with every validated principal. The `require_scope("...")`
+middleware layer enforces a specific scope on a route:
+
+```rust
+.route(
+    "/admin/v1/services",
+    post(create_service).layer(require_scope("services.write")),
+)
+```
+
+Rules:
+- `Role::Admin` actors satisfy every scope (master keys never need
+  scope config)
+- `"*"` in the actor's scope list satisfies any scope
+- Bootstrap mode (no actor) satisfies any scope
+- Legacy local-DB `admin_tokens` rows carry no scopes — non-Admin
+  legacy tokens cannot satisfy scope checks. Migrate them to keyx
+  for fine-grained access.
+
+The library exposes `require_scope` and `actor_has_scope` but doesn't
+yet apply them to any built-in admin route — operators wire it onto
+routes they specifically want gated. A future increment will move
+scope-required routes into a config-driven table.
+
 ## Bonus: route-level JWT verification via keyx JWKS
 
 If your upstream services already accept keyx-signed JWTs (issued via

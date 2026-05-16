@@ -202,6 +202,7 @@ async fn resolve_actor(
             created_at: chrono::Utc::now(),
             expires_at: None,
             last_used_at: None,
+            scopes: Vec::new(),
         }));
     }
 
@@ -270,6 +271,7 @@ async fn resolve_via_keyx(
                 created_at: Utc::now(),
                 expires_at: None,
                 last_used_at: None,
+                scopes: principal.scopes,
             })),
             None => {
                 tracing::info!(
@@ -303,6 +305,52 @@ fn map_keyx_role(role: &str) -> Option<Role> {
 /// shares [`enforce_role`].
 pub async fn require_viewer(req: Request<axum::body::Body>, next: Next) -> Response {
     enforce_role(Role::Viewer, req, next).await
+}
+
+/// True when the current actor satisfies a scope requirement. Admins
+/// (Role::Admin) implicitly satisfy every scope so the gateway's own
+/// master keys keep working without scope-config churn. Legacy local
+/// `admin_tokens` rows (which today carry no scopes) only satisfy
+/// scopes via the admin shortcut. Keyx-issued tokens satisfy a scope
+/// when their principal carried it OR when they're Admin/Owner-mapped.
+pub fn actor_has_scope(actor: &CurrentActor, scope: &str) -> bool {
+    match actor.0.as_ref() {
+        None => true, // bootstrap / auth-disabled mode
+        Some(t) if t.role == Role::Admin => true,
+        Some(t) => t.scopes.iter().any(|s| s == scope || s == "*"),
+    }
+}
+
+/// Per-route scope guard. Composes like `require_viewer` /
+/// `require_operator`. Use sparingly — most routes are already
+/// well-served by role-based guards. Reach for scope when keyx is the
+/// source of truth for fine-grained per-key permissions.
+pub fn require_scope(
+    scope: &'static str,
+) -> impl Fn(
+    Request<axum::body::Body>,
+    Next,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>>
+       + Clone {
+    move |req, next| {
+        Box::pin(async move {
+            let actor = req
+                .extensions()
+                .get::<CurrentActor>()
+                .cloned()
+                .unwrap_or_default();
+            if actor_has_scope(&actor, scope) {
+                next.run(req).await
+            } else {
+                tracing::info!(
+                    required_scope = scope,
+                    actor_scopes = ?actor.0.as_ref().map(|t| &t.scopes),
+                    "scope check denied"
+                );
+                forbidden(&format!("missing required scope '{scope}'"))
+            }
+        })
+    }
 }
 
 pub async fn require_operator(req: Request<axum::body::Body>, next: Next) -> Response {
@@ -440,6 +488,7 @@ mod tests {
             created_at: Utc::now(),
             expires_at: None,
             last_used_at: None,
+            scopes: Vec::new(),
         }
     }
 
@@ -474,6 +523,55 @@ mod tests {
         cache.insert("h".into(), admin_token_stub(Role::Admin));
         assert_eq!(cache.get("h").unwrap().role, Role::Admin);
         assert_eq!(cache.len(), 1);
+    }
+
+    fn token_with_scopes(role: Role, scopes: Vec<String>) -> AdminToken {
+        AdminToken {
+            id: uuid::Uuid::nil(),
+            name: "t".into(),
+            role,
+            created_at: Utc::now(),
+            expires_at: None,
+            last_used_at: None,
+            scopes,
+        }
+    }
+
+    #[test]
+    fn scope_check_admin_passes_unconditionally() {
+        let actor = CurrentActor(Some(token_with_scopes(Role::Admin, vec![])));
+        assert!(actor_has_scope(&actor, "services.write"));
+    }
+
+    #[test]
+    fn scope_check_wildcard_satisfies_anything() {
+        let actor = CurrentActor(Some(token_with_scopes(
+            Role::Viewer,
+            vec!["*".into()],
+        )));
+        assert!(actor_has_scope(&actor, "anything.at.all"));
+    }
+
+    #[test]
+    fn scope_check_exact_match() {
+        let actor = CurrentActor(Some(token_with_scopes(
+            Role::Viewer,
+            vec!["services.read".into(), "services.write".into()],
+        )));
+        assert!(actor_has_scope(&actor, "services.write"));
+        assert!(!actor_has_scope(&actor, "plugins.write"));
+    }
+
+    #[test]
+    fn scope_check_legacy_token_without_scopes_fails_unless_admin() {
+        let actor = CurrentActor(Some(token_with_scopes(Role::Operator, vec![])));
+        assert!(!actor_has_scope(&actor, "services.write"));
+    }
+
+    #[test]
+    fn scope_check_bootstrap_mode_passes() {
+        let actor = CurrentActor(None);
+        assert!(actor_has_scope(&actor, "services.write"));
     }
 }
 

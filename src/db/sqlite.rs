@@ -3146,6 +3146,7 @@ fn row_to_admin_token(row: sqlx::sqlite::SqliteRow) -> Result<AdminToken, Gatewa
         created_at: parse_dt(&created_at)?,
         expires_at: expires_at.map(|s| parse_dt(&s)).transpose()?,
         last_used_at: last_used_at.map(|s| parse_dt(&s)).transpose()?,
+        scopes: Vec::new(),
     })
 }
 
