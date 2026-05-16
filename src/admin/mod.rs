@@ -82,6 +82,7 @@ pub fn admin_router(
     gateway_config: GatewayConfig,
     deploy_registry: deploy::DeployRegistry,
     status_cache: crate::health::StatusCache,
+    keyx_client: Option<Arc<crate::integrations::keyx::KeyxClient>>,
 ) -> Router {
     let audit = AuditLog::new(repo.clone());
     let state = AdminState {
@@ -107,6 +108,7 @@ pub fn admin_router(
         license_state,
         deploy_registry: Some(deploy_registry),
         status_cache,
+        keyx_client,
     };
 
     // Routes that mutate live state require Operator or higher; token

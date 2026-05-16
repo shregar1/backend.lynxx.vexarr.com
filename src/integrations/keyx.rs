@@ -32,6 +32,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde::Deserialize;
 use std::time::Duration;
+use uuid::Uuid;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 
@@ -80,6 +81,53 @@ impl KeyxClient {
             .build()
             .map_err(|e| KeyxError::Transport(e.to_string()))?;
         Ok(Self { inner, config })
+    }
+
+    /// Validate an arbitrary api-key token against keyx — used by the
+    /// admin-auth middleware to accept keyx-issued tokens alongside the
+    /// local `admin_tokens` table. Returns the keyx principal on
+    /// success (caller maps `role` → lynxx Role); returns
+    /// `KeyxError::Http { status: 401, .. }` when keyx rejects the
+    /// token.
+    pub async fn validate_token(&self, token: &str) -> Result<KeyxPrincipal, KeyxError> {
+        let url = format!(
+            "{}/v1/keys/validate",
+            self.config.base_url.trim_end_matches('/'),
+        );
+        let body = serde_json::json!({ "key": token });
+
+        let resp = self
+            .inner
+            .post(&url)
+            .bearer_auth(&self.config.service_token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| KeyxError::Transport(e.to_string()))?;
+
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| KeyxError::Transport(e.to_string()))?;
+
+        if !status.is_success() {
+            return Err(KeyxError::Http {
+                status: status.as_u16(),
+                body: text,
+            });
+        }
+
+        let envelope: ApiEnvelope<KeyxPrincipal> = serde_json::from_str(&text)
+            .map_err(|e| KeyxError::Malformed(format!("{e}: {text}")))?;
+
+        match envelope.status {
+            EnvelopeStatus::Success => Ok(envelope.data),
+            EnvelopeStatus::Failed => Err(KeyxError::Http {
+                status: status.as_u16(),
+                body: envelope.response_message,
+            }),
+        }
     }
 
     /// Ask keyx whether `signature` is a valid Ed25519 signature over
@@ -156,6 +204,21 @@ struct ApiEnvelope<T> {
 #[derive(Debug, Deserialize)]
 struct ValidPayload {
     valid: bool,
+}
+
+/// Principal returned by `POST /v1/keys/validate`. Only the fields
+/// lynxx needs are decoded — keyx returns more.
+#[derive(Debug, Clone, Deserialize)]
+pub struct KeyxPrincipal {
+    pub tenant_id: i64,
+    pub api_key_urn: Uuid,
+    /// Keyx's role string ("admin" / "owner" / "service" / "pat" / …).
+    /// The caller maps this onto its own role model.
+    pub role: String,
+    pub key_type: String,
+    pub environment: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 #[cfg(test)]
@@ -264,6 +327,48 @@ mod tests {
         let client = KeyxClient::new(cfg(server.uri())).unwrap();
         let err = client.verify_license(b"x", "y").await.unwrap_err();
         assert!(matches!(err, KeyxError::Malformed(_)));
+    }
+
+    #[tokio::test]
+    async fn validate_token_returns_principal_on_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/keys/validate"))
+            .and(header("authorization", "Bearer svc_token"))
+            .and(body_json(serde_json::json!({ "key": "ak_live_xxx" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(envelope(serde_json::json!({
+                    "tenant_id":   42,
+                    "tenant_urn":  "00000000-0000-0000-0000-000000000042",
+                    "api_key_id":  7,
+                    "api_key_urn": "00000000-0000-0000-0000-000000000007",
+                    "role":        "admin",
+                    "key_type":    "admin",
+                    "environment": "live",
+                    "scopes":      ["read", "write"],
+                }))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = KeyxClient::new(cfg(server.uri())).unwrap();
+        let p = client.validate_token("ak_live_xxx").await.unwrap();
+        assert_eq!(p.tenant_id, 42);
+        assert_eq!(p.role, "admin");
+        assert_eq!(p.scopes, vec!["read", "write"]);
+    }
+
+    #[tokio::test]
+    async fn validate_token_propagates_401() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("invalid_key"))
+            .mount(&server)
+            .await;
+        let client = KeyxClient::new(cfg(server.uri())).unwrap();
+        let err = client.validate_token("bad").await.unwrap_err();
+        assert!(matches!(err, KeyxError::Http { status: 401, .. }));
     }
 
     #[tokio::test]

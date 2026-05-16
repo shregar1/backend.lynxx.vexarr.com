@@ -21,6 +21,7 @@ mod discovery;
 mod dtos;
 mod error;
 mod health;
+mod install;
 mod integrations;
 mod kernel_tuning;
 mod license;
@@ -757,6 +758,22 @@ async fn async_main() -> anyhow::Result<()> {
         5_000,
     );
 
+    // If `[keyx]` is configured, build a shared client so the admin-auth
+    // middleware can fall back to `/v1/keys/validate` for tokens not in
+    // the local `admin_tokens` table. Same KeyxClient type as the
+    // licence verifier — separate instance is fine (it's cheap: just a
+    // reqwest::Client wrapper).
+    let admin_keyx_client = if config.keyx.is_configured() {
+        let cfg = crate::integrations::keyx::KeyxConfig {
+            base_url: config.keyx.base_url.clone(),
+            service_token: config.keyx.service_token.clone(),
+            license_urn: config.keyx.license_urn.clone(),
+        };
+        crate::integrations::keyx::KeyxClient::new(cfg).ok().map(Arc::new)
+    } else {
+        None
+    };
+
     let admin_app = admin::admin_router(
         route_table,
         repo,
@@ -779,6 +796,7 @@ async fn async_main() -> anyhow::Result<()> {
         config.clone(),
         deploy_registry,
         status_cache,
+        admin_keyx_client,
     );
 
     let bind_addr = config.gateway.bind_address.clone();

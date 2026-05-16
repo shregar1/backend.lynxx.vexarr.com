@@ -159,11 +159,70 @@ async fn resolve_actor(
                 .into_response()
         })?;
 
-    let token = token.ok_or_else(|| unauthorized("invalid token"))?;
+    let token = match token {
+        Some(t) => t,
+        None => {
+            // Local miss → try keyx if it's wired in.
+            if let Some(client) = state.keyx_client.as_ref() {
+                return resolve_via_keyx(client.as_ref(), raw).await;
+            }
+            return Err(unauthorized("invalid token"));
+        }
+    };
     if token.is_expired(Utc::now()) {
         return Err(unauthorized("token expired"));
     }
     Ok(Some(token))
+}
+
+/// Synthesise an `AdminToken` from a keyx `/v1/keys/validate` response.
+/// Used as the fallback path inside [`resolve_actor`] when the local
+/// `admin_tokens` table doesn't know the bearer the caller presented.
+async fn resolve_via_keyx(
+    client: &crate::integrations::keyx::KeyxClient,
+    raw: &str,
+) -> Result<Option<AdminToken>, Response> {
+    match client.validate_token(raw).await {
+        Ok(principal) => match map_keyx_role(&principal.role) {
+            Some(role) => Ok(Some(AdminToken {
+                id: principal.api_key_urn,
+                // First 8 hex chars are enough for log correlation; the
+                // full URN goes to the audit log on a separate path.
+                name: format!(
+                    "keyx:{}:{}",
+                    principal.role,
+                    &principal.api_key_urn.to_string()[..8]
+                ),
+                role,
+                created_at: Utc::now(),
+                expires_at: None,
+                last_used_at: None,
+            })),
+            None => {
+                tracing::info!(
+                    role = %principal.role,
+                    key_urn = %principal.api_key_urn,
+                    "keyx role not permitted on lynxx admin surface"
+                );
+                Err(unauthorized("token role not permitted on lynxx admin"))
+            }
+        },
+        Err(e) => {
+            tracing::debug!(error = %e, "keyx validate_token failed");
+            Err(unauthorized("invalid token"))
+        }
+    }
+}
+
+/// Map a keyx role string onto a lynxx [`Role`]. Conservative: anything
+/// we don't recognise denies access rather than silently widening.
+fn map_keyx_role(role: &str) -> Option<Role> {
+    match role.to_ascii_lowercase().as_str() {
+        "admin" | "owner" => Some(Role::Admin),
+        "service" => Some(Role::Operator),
+        "pat" | "viewer" => Some(Role::Viewer),
+        _ => None,
+    }
 }
 
 /// Per-role guards. `axum::middleware::from_fn` needs a concrete async fn,
@@ -202,6 +261,102 @@ async fn enforce_role(min: Role, req: Request<axum::body::Body>, next: Next) -> 
                 token.role, min
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::integrations::keyx::{KeyxClient, KeyxConfig};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn keyx_client(uri: String) -> KeyxClient {
+        KeyxClient::new(KeyxConfig {
+            base_url: uri,
+            service_token: "svc".into(),
+            license_urn: "00000000-0000-0000-0000-000000000099".into(),
+        })
+        .unwrap()
+    }
+
+    fn envelope(data: serde_json::Value) -> serde_json::Value {
+        json!({
+            "transactionUrn": "urn:keyx:txn:test",
+            "status": "SUCCESS",
+            "responseMessage": "OK",
+            "responseKey": "SUCCESS",
+            "errors": [],
+            "timestamp": "2026-05-16T00:00:00+00:00",
+            "metadata": {},
+            "data": data,
+        })
+    }
+
+    fn principal(role: &str) -> serde_json::Value {
+        json!({
+            "tenant_id":   1,
+            "tenant_urn":  "00000000-0000-0000-0000-000000000001",
+            "api_key_id":  10,
+            "api_key_urn": "00000000-0000-0000-0000-0000000000aa",
+            "role":        role,
+            "key_type":    role,
+            "environment": "live",
+            "scopes":      [],
+        })
+    }
+
+    #[test]
+    fn role_mapping_is_conservative() {
+        assert_eq!(map_keyx_role("admin"), Some(Role::Admin));
+        assert_eq!(map_keyx_role("OWNER"), Some(Role::Admin));
+        assert_eq!(map_keyx_role("service"), Some(Role::Operator));
+        assert_eq!(map_keyx_role("pat"), Some(Role::Viewer));
+        assert_eq!(map_keyx_role("viewer"), Some(Role::Viewer));
+        assert_eq!(map_keyx_role("publishable"), None);
+        assert_eq!(map_keyx_role("restricted"), None);
+        assert_eq!(map_keyx_role(""), None);
+    }
+
+    #[tokio::test]
+    async fn keyx_fallback_returns_admin_for_admin_role() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/keys/validate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(envelope(principal("admin"))))
+            .mount(&server)
+            .await;
+        let client = keyx_client(server.uri());
+        let out = resolve_via_keyx(&client, "ak_live_xxx").await.unwrap();
+        let tok = out.unwrap();
+        assert_eq!(tok.role, Role::Admin);
+        assert!(tok.name.starts_with("keyx:admin:"));
+    }
+
+    #[tokio::test]
+    async fn keyx_fallback_rejects_unknown_role() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(envelope(principal("publishable"))),
+            )
+            .mount(&server)
+            .await;
+        let client = keyx_client(server.uri());
+        let resp = resolve_via_keyx(&client, "ak_live_xxx").await.unwrap_err();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn keyx_fallback_propagates_keyx_401_as_unauthorized() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("nope"))
+            .mount(&server)
+            .await;
+        let client = keyx_client(server.uri());
+        let resp = resolve_via_keyx(&client, "bad").await.unwrap_err();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }
 

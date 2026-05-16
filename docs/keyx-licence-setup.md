@@ -120,6 +120,40 @@ Restart the gateway — the payload is parsed once at boot. The 6-hour
 re-verifier only flips the kill switch on revocation; it doesn't
 re-parse a swapped-in bundle.
 
+## Bonus: keyx-issued admin tokens on the lynxx admin API
+
+When `[keyx]` is configured, the admin-auth middleware accepts two
+credential shapes on `Authorization: Bearer <token>`:
+
+1. **Local `admin_tokens` table** (legacy) — `lnx_…` tokens created
+   via `POST /admin/v1/tokens`. Hashed at rest, role enforced
+   per-route. Unchanged.
+2. **Keyx-issued tokens** (new) — any `ak_live_…` / `ak_test_…` key
+   keyx returns a valid principal for via
+   `POST /v1/keys/validate`. Role mapping:
+
+   | keyx role | lynxx role |
+   |---|---|
+   | `admin`, `owner`        | `Admin`    |
+   | `service`               | `Operator` |
+   | `pat`, `viewer`         | `Viewer`   |
+   | anything else           | rejected (401) |
+
+The local lookup runs first; keyx is consulted only when the token
+isn't in the local table. Failures (network, 401, unknown role) all
+collapse to 401 — callers can't distinguish "unknown locally" from
+"unknown to keyx" from "wrong tenant".
+
+**Rotation / revocation:** every admin call hits keyx live (no
+cache), so revoking a token in keyx takes effect on the next admin
+request. This is fine for the admin surface — call volume is low and
+latency budget is generous. A short-TTL cache is the obvious
+optimisation when keyx adds real-time revocation events (M4).
+
+**Disabling:** unset `KEYX_*` env vars (or leave `[keyx]`
+unconfigured) and the fallback path is skipped — only local tokens
+work.
+
 ## Bonus: route-level JWT verification via keyx JWKS
 
 If your upstream services already accept keyx-signed JWTs (issued via

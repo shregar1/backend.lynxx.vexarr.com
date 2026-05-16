@@ -72,6 +72,12 @@ pub struct AdminState {
     pub license_state: Option<crate::license::LicenseState>,
     pub deploy_registry: Option<crate::admin::deploy::DeployRegistry>,
     pub status_cache: StatusCache,
+    /// Optional keyx client. When `Some`, the admin-auth middleware
+    /// falls through to keyx `/v1/keys/validate` after the local
+    /// `admin_tokens` table lookup misses, so operators can present
+    /// keyx-issued tokens on the lynxx admin API. `None` keeps the
+    /// legacy local-only flow unchanged.
+    pub keyx_client: Option<std::sync::Arc<crate::integrations::keyx::KeyxClient>>,
 }
 
 /// Convenience: extract the optional actor from request extensions.
