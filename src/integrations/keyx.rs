@@ -130,6 +130,60 @@ impl KeyxClient {
         }
     }
 
+    /// Ask keyx whether `signature` is a valid HMAC-SHA256 of `payload`
+    /// produced by the HMAC secret behind the configured `license_urn`.
+    /// Wire format: keyx accepts `signature` as **hex**, not base64 —
+    /// callers that work with binary or base64 must convert.
+    pub async fn verify_hmac(
+        &self,
+        urn: &str,
+        payload: &[u8],
+        signature_hex: &str,
+    ) -> Result<bool, KeyxError> {
+        let url = format!(
+            "{}/v1/keys/{}/verify-hmac",
+            self.config.base_url.trim_end_matches('/'),
+            urn,
+        );
+        let body = serde_json::json!({
+            "payload":   B64.encode(payload),
+            "signature": signature_hex,
+        });
+
+        let resp = self
+            .inner
+            .post(&url)
+            .bearer_auth(&self.config.service_token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| KeyxError::Transport(e.to_string()))?;
+
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| KeyxError::Transport(e.to_string()))?;
+
+        if !status.is_success() {
+            return Err(KeyxError::Http {
+                status: status.as_u16(),
+                body: text,
+            });
+        }
+
+        let envelope: ApiEnvelope<ValidPayload> = serde_json::from_str(&text)
+            .map_err(|e| KeyxError::Malformed(format!("{e}: {text}")))?;
+
+        match envelope.status {
+            EnvelopeStatus::Success => Ok(envelope.data.valid),
+            EnvelopeStatus::Failed => Err(KeyxError::Http {
+                status: status.as_u16(),
+                body: envelope.response_message,
+            }),
+        }
+    }
+
     /// Ask keyx whether `signature` is a valid Ed25519 signature over
     /// `payload` produced by the signing key behind `license_urn`.
     /// Returns `Ok(true)` on a valid signature for an active key,
@@ -327,6 +381,49 @@ mod tests {
         let client = KeyxClient::new(cfg(server.uri())).unwrap();
         let err = client.verify_license(b"x", "y").await.unwrap_err();
         assert!(matches!(err, KeyxError::Malformed(_)));
+    }
+
+    #[tokio::test]
+    async fn verify_hmac_round_trips_payload_and_hex_signature() {
+        let server = MockServer::start().await;
+        let urn = "00000000-0000-0000-0000-0000000000bb";
+        Mock::given(method("POST"))
+            .and(path(format!("/v1/keys/{urn}/verify-hmac")))
+            .and(header("authorization", "Bearer svc_token"))
+            .and(body_json(serde_json::json!({
+                "payload":   B64.encode(b"date: Mon, 16 May 2026 00:00:00 GMT"),
+                "signature": "deadbeef",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(envelope(serde_json::json!({ "valid": true }))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = KeyxClient::new(cfg(server.uri())).unwrap();
+        let ok = client
+            .verify_hmac(urn, b"date: Mon, 16 May 2026 00:00:00 GMT", "deadbeef")
+            .await
+            .unwrap();
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn verify_hmac_returns_false_when_keyx_says_invalid() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(envelope(serde_json::json!({ "valid": false }))),
+            )
+            .mount(&server)
+            .await;
+        let client = KeyxClient::new(cfg(server.uri())).unwrap();
+        let ok = client
+            .verify_hmac("00000000-0000-0000-0000-0000000000bb", b"x", "00")
+            .await
+            .unwrap();
+        assert!(!ok);
     }
 
     #[tokio::test]

@@ -183,6 +183,16 @@ Behaviour:
 Static `public_key` (PEM) and `secret` (HS\*) modes still work for
 non-keyx setups.
 
+## What's not (yet) wired through
+
+`KeyxClient` now exposes `verify_hmac(urn, payload, signature_hex)` for
+the canonical HMAC-via-keyx flow. The HMAC auth plugin does NOT yet
+call it — plugin integration is a separate, deliberate change that
+needs a design call on how every plugin gets at the shared keyx client
+(self-contain config in each plugin, or thread a `PluginContext`
+through the factory). The client surface is ready; pull it through
+when the plugin-context shape is decided.
+
 ## Reverting to legacy mode
 
 Remove all four of these from your config / env:
