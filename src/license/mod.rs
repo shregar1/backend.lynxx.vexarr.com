@@ -1010,6 +1010,7 @@ mod tests {
             base_url: "http://x".into(),
             service_token: "t".into(),
             license_urn: "00000000-0000-0000-0000-000000000001".into(),
+            ..Default::default()
         };
         let s = LicenseState::new_keyx(&cfg, vec![1, 2], "sig".into(), PlanTier::Pro, 0, None)
             .unwrap();
@@ -1053,6 +1054,7 @@ mod keyx_load_tests {
             base_url: uri,
             service_token: "svc".into(),
             license_urn: URN.into(),
+            ..Default::default()
         }
     }
 

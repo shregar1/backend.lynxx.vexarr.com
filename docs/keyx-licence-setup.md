@@ -144,11 +144,21 @@ isn't in the local table. Failures (network, 401, unknown role) all
 collapse to 401 — callers can't distinguish "unknown locally" from
 "unknown to keyx" from "wrong tenant".
 
-**Rotation / revocation:** every admin call hits keyx live (no
-cache), so revoking a token in keyx takes effect on the next admin
-request. This is fine for the admin surface — call volume is low and
-latency budget is generous. A short-TTL cache is the obvious
-optimisation when keyx adds real-time revocation events (M4).
+**Rotation / revocation:** by default every admin call hits keyx
+live, so revoking a token in keyx takes effect on the next admin
+request. Operators who want to absorb polling bursts (dashboards
+hitting `/status` on a tick) can enable an in-memory cache:
+
+```bash
+# In .env or systemd unit
+KEYX_ADMIN_CACHE_TTL_SECS=60
+```
+
+When set > 0, a successful keyx validate is cached by SHA-256 of the
+raw token (raw tokens are never stored) for the TTL. Cap on
+revocation staleness equals the TTL. Without keyx M4 (real-time
+events) the TTL is the only knob; with M4 the cache can be longer
+and busted on event.
 
 **Disabling:** unset `KEYX_*` env vars (or leave `[keyx]`
 unconfigured) and the fallback path is skipped — only local tokens

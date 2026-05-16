@@ -82,6 +82,15 @@ pub struct KeyxSettings {
     /// URN of the keyx signing key that issued this gateway's licence.
     #[serde(default)]
     pub license_urn: String,
+    /// Seconds to cache the result of a keyx `/v1/keys/validate` call
+    /// for an admin-API token. `0` (default) hits keyx on every admin
+    /// request — instant revocation, more network. Setting to e.g.
+    /// `60` smooths bursts (`/status` polling, dashboards) and caps the
+    /// staleness of a revoked token at the TTL. When keyx grows
+    /// real-time revocation events (M4), this can be raised
+    /// aggressively without trading off staleness.
+    #[serde(default)]
+    pub admin_cache_ttl_secs: u64,
 }
 
 impl KeyxSettings {
@@ -1685,6 +1694,15 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
     if let Ok(urn) = std::env::var("KEYX_LICENSE_URN") {
         if !urn.is_empty() {
             config.keyx.license_urn = urn;
+        }
+    }
+    if let Ok(raw) = std::env::var("KEYX_ADMIN_CACHE_TTL_SECS") {
+        match raw.parse::<u64>() {
+            Ok(n) => config.keyx.admin_cache_ttl_secs = n,
+            Err(e) => tracing::warn!(
+                value = %raw, error = %e,
+                "ignoring invalid KEYX_ADMIN_CACHE_TTL_SECS"
+            ),
         }
     }
 }

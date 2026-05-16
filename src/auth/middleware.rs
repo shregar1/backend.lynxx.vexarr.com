@@ -16,9 +16,69 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::Utc;
+use dashmap::DashMap;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+/// In-memory cache for keyx-validated admin tokens. Optional — when
+/// the cache is `None` (TTL = 0 in config) every admin request hits
+/// keyx. When present, a successful keyx validate populates an entry
+/// keyed by the SHA-256 hash of the raw token (raw tokens are never
+/// stored in memory); subsequent requests reuse it until `ttl`
+/// elapses.
+///
+/// The TTL is also the upper bound on revocation staleness. Without
+/// keyx real-time revocation events, a revoked token keeps working
+/// until the entry expires.
+pub struct KeyxAuthCache {
+    entries: DashMap<String, CachedEntry>,
+    ttl: Duration,
+}
+
+struct CachedEntry {
+    token: AdminToken,
+    expires_at: Instant,
+}
+
+impl KeyxAuthCache {
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            entries: DashMap::new(),
+            ttl,
+        }
+    }
+
+    fn get(&self, token_hash: &str) -> Option<AdminToken> {
+        let e = self.entries.get(token_hash)?;
+        if e.expires_at > Instant::now() {
+            Some(e.token.clone())
+        } else {
+            // Expired entries fall through to a fresh keyx call; we
+            // don't bother removing the row here, the next `insert`
+            // overwrites it and any other expired entries are pruned
+            // opportunistically below.
+            None
+        }
+    }
+
+    fn insert(&self, token_hash: String, token: AdminToken) {
+        self.entries.insert(
+            token_hash,
+            CachedEntry {
+                token,
+                expires_at: Instant::now() + self.ttl,
+            },
+        );
+    }
+
+    /// Cheap: number of live (potentially-stale) entries. Exposed so
+    /// tests can assert cache population.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
 
 /// Wrapper around `Option<AdminToken>` so we can `Extension::<CurrentActor>`
 /// from handlers without colliding with bare `Option<T>`.
@@ -162,9 +222,22 @@ async fn resolve_actor(
     let token = match token {
         Some(t) => t,
         None => {
-            // Local miss → try keyx if it's wired in.
+            // Local miss → cache → keyx.
+            if let Some(cache) = state.keyx_token_cache.as_ref() {
+                if let Some(cached) = cache.get(&hash) {
+                    if !cached.is_expired(Utc::now()) {
+                        return Ok(Some(cached));
+                    }
+                }
+            }
             if let Some(client) = state.keyx_client.as_ref() {
-                return resolve_via_keyx(client.as_ref(), raw).await;
+                let resolved = resolve_via_keyx(client.as_ref(), raw).await?;
+                if let Some(tok) = resolved.as_ref() {
+                    if let Some(cache) = state.keyx_token_cache.as_ref() {
+                        cache.insert(hash.clone(), tok.clone());
+                    }
+                }
+                return Ok(resolved);
             }
             return Err(unauthorized("invalid token"));
         }
@@ -357,6 +430,50 @@ mod tests {
         let client = keyx_client(server.uri());
         let resp = resolve_via_keyx(&client, "bad").await.unwrap_err();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    fn admin_token_stub(role: Role) -> AdminToken {
+        AdminToken {
+            id: uuid::Uuid::nil(),
+            name: "test".into(),
+            role,
+            created_at: Utc::now(),
+            expires_at: None,
+            last_used_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_miss_returns_none() {
+        let cache = KeyxAuthCache::new(Duration::from_secs(60));
+        assert!(cache.get("nope").is_none());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn cache_hit_within_ttl_returns_token() {
+        let cache = KeyxAuthCache::new(Duration::from_secs(60));
+        cache.insert("h".into(), admin_token_stub(Role::Admin));
+        let got = cache.get("h").unwrap();
+        assert_eq!(got.role, Role::Admin);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_get_after_ttl_elapses_returns_none() {
+        let cache = KeyxAuthCache::new(Duration::from_millis(20));
+        cache.insert("h".into(), admin_token_stub(Role::Operator));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(cache.get("h").is_none());
+    }
+
+    #[tokio::test]
+    async fn cache_overwrite_replaces_entry() {
+        let cache = KeyxAuthCache::new(Duration::from_secs(60));
+        cache.insert("h".into(), admin_token_stub(Role::Viewer));
+        cache.insert("h".into(), admin_token_stub(Role::Admin));
+        assert_eq!(cache.get("h").unwrap().role, Role::Admin);
+        assert_eq!(cache.len(), 1);
     }
 }
 

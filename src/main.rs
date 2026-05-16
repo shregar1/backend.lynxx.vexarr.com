@@ -782,6 +782,17 @@ async fn async_main() -> anyhow::Result<()> {
     // fallback, and any plugin (hmac-auth) that opts in.
     let admin_keyx_client = shared_keyx_client.clone();
 
+    // Optional cache for keyx-validated admin tokens. `0` = no cache,
+    // every admin call hits keyx (instant revocation). `> 0` caps
+    // revocation staleness at the TTL and absorbs polling bursts.
+    let admin_keyx_cache = if config.keyx.admin_cache_ttl_secs > 0 {
+        Some(Arc::new(crate::auth::middleware::KeyxAuthCache::new(
+            std::time::Duration::from_secs(config.keyx.admin_cache_ttl_secs),
+        )))
+    } else {
+        None
+    };
+
     let admin_app = admin::admin_router(
         route_table,
         repo,
@@ -805,6 +816,7 @@ async fn async_main() -> anyhow::Result<()> {
         deploy_registry,
         status_cache,
         admin_keyx_client,
+        admin_keyx_cache,
     );
 
     let bind_addr = config.gateway.bind_address.clone();
