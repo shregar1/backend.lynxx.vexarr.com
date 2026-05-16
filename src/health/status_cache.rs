@@ -70,12 +70,17 @@ pub async fn build_status(
     let plugins_count = repo.list_plugins().await.map(|p| p.len()).unwrap_or(0);
     let consumers_count = repo.list_consumers().await.map(|c| c.len()).unwrap_or(0);
 
-    let (tier, active_nodes, max_nodes) = match license_state {
+    let (tier, active_nodes, max_nodes, licence_mode) = match license_state {
         Some(ls) => {
             let t = ls.tier();
-            (t.as_str().to_string(), ls.active_nodes(), ls.max_nodes())
+            (
+                t.as_str().to_string(),
+                ls.active_nodes(),
+                ls.max_nodes(),
+                ls.mode().to_string(),
+            )
         }
-        None => ("unknown".into(), 0, None),
+        None => ("unknown".into(), 0, None, "unknown".into()),
     };
 
     let instance_id = crate::license::compute_instance_id(license_api_key);
@@ -93,5 +98,6 @@ pub async fn build_status(
         active_nodes,
         max_nodes,
         instance_id,
+        licence_mode,
     }
 }

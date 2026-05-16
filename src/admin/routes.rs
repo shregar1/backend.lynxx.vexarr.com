@@ -309,6 +309,10 @@ pub struct StatusResponse {
     pub active_nodes: u32,
     pub max_nodes: Option<u32>,
     pub instance_id: String,
+    /// `"keyx"` or `"legacy"` — which licence-verification path this
+    /// node booted into. Useful as the canonical signal that a keyx
+    /// migration actually took effect.
+    pub licence_mode: String,
 }
 
 pub async fn list_services(State(state): State<AdminState>) -> Json<Vec<Service>> {
@@ -1804,12 +1808,17 @@ pub async fn gateway_status(
     let plugins_count = state.repo.list_plugins().await?.len();
     let consumers_count = state.repo.list_consumers().await?.len();
 
-    let (tier, active_nodes, max_nodes) = match &state.license_state {
+    let (tier, active_nodes, max_nodes, licence_mode) = match &state.license_state {
         Some(ls) => {
             let t = ls.tier();
-            (t.as_str().to_string(), ls.active_nodes(), ls.max_nodes())
+            (
+                t.as_str().to_string(),
+                ls.active_nodes(),
+                ls.max_nodes(),
+                ls.mode().to_string(),
+            )
         }
-        None => ("unknown".into(), 0, None),
+        None => ("unknown".into(), 0, None, "unknown".into()),
     };
     let instance_id = crate::license::compute_instance_id(&state.license_api_key);
 
@@ -1826,6 +1835,7 @@ pub async fn gateway_status(
         active_nodes,
         max_nodes,
         instance_id,
+        licence_mode,
     }))
 }
 

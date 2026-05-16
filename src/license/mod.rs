@@ -370,6 +370,18 @@ impl LicenseState {
         self.inner.active.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// `"keyx"` when this state was built from a signed bundle that's
+    /// re-verified against keyx; `"legacy"` for the original
+    /// billing-server API-key flow. Surfaced on the admin /status
+    /// endpoint so operators can verify their config took.
+    pub fn mode(&self) -> &'static str {
+        if self.inner.keyx_refresh.is_some() {
+            "keyx"
+        } else {
+            "legacy"
+        }
+    }
+
     /// Latest tier from the most recent successful re-verify.
     pub fn tier(&self) -> PlanTier {
         *self.inner.tier.read().expect("tier lock poisoned")
@@ -984,6 +996,24 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(a.len(), 64);
+    }
+
+    #[test]
+    fn license_state_legacy_constructor_reports_legacy_mode() {
+        let s = LicenseState::new("k", "u", PlanTier::Pro, 0, None);
+        assert_eq!(s.mode(), "legacy");
+    }
+
+    #[test]
+    fn license_state_keyx_constructor_reports_keyx_mode() {
+        let cfg = crate::config::KeyxSettings {
+            base_url: "http://x".into(),
+            service_token: "t".into(),
+            license_urn: "00000000-0000-0000-0000-000000000001".into(),
+        };
+        let s = LicenseState::new_keyx(&cfg, vec![1, 2], "sig".into(), PlanTier::Pro, 0, None)
+            .unwrap();
+        assert_eq!(s.mode(), "keyx");
     }
 }
 
