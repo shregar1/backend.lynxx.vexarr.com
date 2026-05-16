@@ -68,14 +68,17 @@ use crate::plugins::websocket_size_limit::WebsocketSizeLimitPlugin;
 use crate::plugins::Plugin;
 use std::sync::Arc;
 
-/// Construct a plugin from its persisted name + config blob. `repo` is
-/// optional and only consulted by plugins that need DB access (e.g. consumer
-/// lookup for `basic-auth` and `key-auth`). Plugins that don't need it just
-/// ignore the parameter.
+/// Construct a plugin from its persisted name + config blob.
+///
+/// * `repo` — optional, consulted by plugins that need DB access (consumer
+///   lookup, etc.). Plugins that don't need it ignore it.
+/// * `ctx` — shared service handles (currently just an optional keyx
+///   client). Plugins that don't need anything from the context ignore it.
 pub fn build(
     name: &str,
     config: &serde_json::Value,
     repo: Option<Arc<dyn Repository>>,
+    ctx: &crate::plugins::PluginContext,
 ) -> Result<Arc<dyn Plugin>, GatewayError> {
     let plugin: Arc<dyn Plugin> = match name {
         "rate-limit" => Arc::new(RateLimitPlugin::from_config(config)?),
@@ -93,7 +96,7 @@ pub fn build(
         "proxy-cache" => Arc::new(ProxyCachePlugin::from_config(config)?),
         "request-termination" => Arc::new(RequestTerminationPlugin::from_config(config)?),
         "oauth2-introspect" => Arc::new(Oauth2IntrospectPlugin::from_config(config, repo)?),
-        "hmac-auth" => Arc::new(HmacAuthPlugin::from_config(config, repo)?),
+        "hmac-auth" => Arc::new(HmacAuthPlugin::from_config(config, repo, ctx)?),
         "acl" => Arc::new(AclPlugin::from_config(config)?),
         "request-validator" => Arc::new(RequestValidatorPlugin::from_config(config, repo)?),
         "session" => Arc::new(SessionPlugin::from_config(config, repo)?),

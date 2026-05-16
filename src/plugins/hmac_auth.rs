@@ -1,6 +1,7 @@
 use crate::db::Repository;
 use crate::error::{GatewayError, PluginError};
-use crate::plugins::{BoxBody, Plugin};
+use crate::integrations::keyx::{KeyxClient, KeyxConfig};
+use crate::plugins::{BoxBody, Plugin, PluginContext};
 use async_trait::async_trait;
 use axum::http::header::HeaderValue;
 use axum::http::{Request, Response};
@@ -19,20 +20,37 @@ type HmacSha256 = Hmac<Sha256>;
 /// `Hmac username="alice", algorithm="hmac-sha256",
 /// headers="date request-line", signature="<b64>"`.
 ///
-/// **v1 caveat:** the consumer's `api_key` field doubles as the HMAC
-/// secret (same convention as basic-auth and key-auth). A real
-/// deployment should add a separate `hmac_secret` column.
+/// Two verification backends:
+///   * **local** (default) — the consumer's `api_key` field doubles as
+///     the HMAC secret (same convention as basic-auth / key-auth);
+///     verified in-process. A real deployment should add a separate
+///     `hmac_secret` column.
+///   * **keyx** — when `keyx_urn` is set in plugin config, the
+///     canonicalised payload + provided signature are POSTed to keyx
+///     `/v1/keys/{urn}/verify-hmac`. Secret lives in keyx; lynxx
+///     never sees it. Two ways to wire the client:
+///       1. `PluginContext.keyx` (preferred — shared across plugins)
+///       2. Self-contained `keyx_base_url` + `keyx_service_token` in
+///          plugin config (fallback for cases where a per-plugin
+///          credential is needed)
 pub struct HmacAuthPlugin {
     repo: Option<Arc<dyn Repository>>,
     algorithms: Vec<String>,
     clock_skew: i64,
     validate_body: bool,
+    keyx: Option<KeyxBackend>,
+}
+
+struct KeyxBackend {
+    client: Arc<KeyxClient>,
+    urn: String,
 }
 
 impl HmacAuthPlugin {
     pub fn from_config(
         cfg: &serde_json::Value,
         repo: Option<Arc<dyn Repository>>,
+        ctx: &PluginContext,
     ) -> Result<Self, GatewayError> {
         let algorithms = cfg
             .get("algorithms")
@@ -56,13 +74,79 @@ impl HmacAuthPlugin {
             .get("validate_request_body")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+        let keyx = build_keyx_backend(cfg, ctx)?;
+
         Ok(Self {
             repo,
             algorithms,
             clock_skew,
             validate_body,
+            keyx,
         })
     }
+}
+
+/// Construct the keyx backend if and only if the plugin config opts in
+/// via `keyx_urn`. When opted in, prefer the shared
+/// `PluginContext.keyx` over a self-contained config.
+fn build_keyx_backend(
+    cfg: &serde_json::Value,
+    ctx: &PluginContext,
+) -> Result<Option<KeyxBackend>, GatewayError> {
+    let urn = match cfg.get("keyx_urn").and_then(|v| v.as_str()) {
+        Some(u) if !u.trim().is_empty() => u.trim().to_string(),
+        _ => return Ok(None),
+    };
+
+    if let Some(client) = ctx.keyx.as_ref() {
+        return Ok(Some(KeyxBackend {
+            client: client.clone(),
+            urn,
+        }));
+    }
+
+    let base = cfg
+        .get("keyx_base_url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty());
+    let token = cfg
+        .get("keyx_service_token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty());
+    let (base, token) = match (base, token) {
+        (Some(b), Some(t)) => (b.trim().to_string(), t.trim().to_string()),
+        _ => {
+            return Err(GatewayError::BadRequest(
+                "hmac-auth: keyx_urn set but no keyx client available — \
+                 wire PluginContext.keyx OR supply keyx_base_url + \
+                 keyx_service_token in plugin config".into(),
+            ));
+        }
+    };
+
+    // The keyx URN field on the client is unused on the verify-hmac path
+    // (each call passes its URN), but KeyxClient::new still requires it
+    // to be non-empty. Reuse the plugin's urn for sensibility.
+    let client = KeyxClient::new(KeyxConfig {
+        base_url: base,
+        service_token: token,
+        license_urn: urn.clone(),
+    })
+    .map_err(|e| GatewayError::BadRequest(format!("hmac-auth: keyx client: {e}")))?;
+    Ok(Some(KeyxBackend {
+        client: Arc::new(client),
+        urn,
+    }))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn unauthorized(msg: impl Into<String>) -> PluginError {
@@ -169,29 +253,54 @@ impl Plugin for HmacAuthPlugin {
             }
         }
 
-        let repo = self
-            .repo
-            .as_ref()
-            .ok_or_else(|| PluginError::Internal("hmac-auth: no repository".into()))?;
-        let consumers = repo
-            .list_consumers()
-            .await
-            .map_err(|e| PluginError::Internal(format!("consumer lookup: {e}")))?;
-        let consumer = consumers
-            .into_iter()
-            .find(|c| &c.username == username)
-            .ok_or_else(|| unauthorized("unknown consumer"))?;
-        let secret = consumer
-            .api_key
-            .as_deref()
-            .ok_or_else(|| unauthorized("consumer has no secret"))?;
-
         let canon = canonicalize(&signed_headers, req)?;
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-            .map_err(|e| PluginError::Internal(format!("hmac key: {e}")))?;
-        mac.update(canon.as_bytes());
-        mac.verify_slice(&provided_sig)
-            .map_err(|_| unauthorized("signature mismatch"))?;
+
+        // Consumer lookup is best-effort in keyx mode (the secret lives
+        // in keyx; the consumer row is only consulted for the downstream
+        // x-consumer-* headers). In local mode it's mandatory — the
+        // consumer's api_key IS the HMAC secret.
+        let consumer = if let Some(repo) = self.repo.as_ref() {
+            repo.list_consumers()
+                .await
+                .map_err(|e| PluginError::Internal(format!("consumer lookup: {e}")))?
+                .into_iter()
+                .find(|c| &c.username == username)
+        } else {
+            None
+        };
+
+        match &self.keyx {
+            Some(backend) => {
+                let sig_hex = hex_encode(&provided_sig);
+                match backend
+                    .client
+                    .verify_hmac(&backend.urn, canon.as_bytes(), &sig_hex)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => return Err(unauthorized("signature mismatch")),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "keyx verify_hmac failed");
+                        return Err(unauthorized("hmac verify backend error"));
+                    }
+                }
+            }
+            None => {
+                // Local mode: consumer + secret are mandatory.
+                let consumer = consumer
+                    .as_ref()
+                    .ok_or_else(|| unauthorized("unknown consumer"))?;
+                let secret = consumer
+                    .api_key
+                    .as_deref()
+                    .ok_or_else(|| unauthorized("consumer has no secret"))?;
+                let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+                    .map_err(|e| PluginError::Internal(format!("hmac key: {e}")))?;
+                mac.update(canon.as_bytes());
+                mac.verify_slice(&provided_sig)
+                    .map_err(|_| unauthorized("signature mismatch"))?;
+            }
+        };
 
         // Optional body integrity check via Digest header.
         if self.validate_body {
@@ -233,16 +342,186 @@ impl Plugin for HmacAuthPlugin {
             }
         }
 
-        if let Ok(v) = HeaderValue::from_str(&consumer.username) {
-            req.headers_mut().insert("x-consumer-username", v);
-        }
-        if let Ok(v) = HeaderValue::from_str(&consumer.id.to_string()) {
-            req.headers_mut().insert("x-consumer-id", v);
+        if let Some(c) = consumer.as_ref() {
+            if let Ok(v) = HeaderValue::from_str(&c.username) {
+                req.headers_mut().insert("x-consumer-username", v);
+            }
+            if let Ok(v) = HeaderValue::from_str(&c.id.to_string()) {
+                req.headers_mut().insert("x-consumer-id", v);
+            }
         }
         Ok(())
     }
 
     async fn on_response(&self, _resp: &mut Response<BoxBody>) -> Result<(), PluginError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use wiremock::matchers::{method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn envelope(valid: bool) -> serde_json::Value {
+        serde_json::json!({
+            "transactionUrn": "urn:keyx:txn:t",
+            "status": "SUCCESS",
+            "responseMessage": "OK",
+            "responseKey": "SUCCESS",
+            "errors": [],
+            "timestamp": "2026-05-16T00:00:00+00:00",
+            "metadata": {},
+            "data": { "valid": valid },
+        })
+    }
+
+    fn keyx_client_arc(uri: String) -> Arc<KeyxClient> {
+        Arc::new(
+            KeyxClient::new(KeyxConfig {
+                base_url: uri,
+                service_token: "svc".into(),
+                license_urn: "00000000-0000-0000-0000-0000000000aa".into(),
+            })
+            .unwrap(),
+        )
+    }
+
+    fn req_with_hmac_header(b64_sig: &str) -> Request<Body> {
+        let date = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        Request::builder()
+            .method("POST")
+            .uri("/v1/things")
+            .header(
+                "Authorization",
+                format!(
+                    "Hmac username=\"alice\", algorithm=\"hmac-sha256\", \
+                     headers=\"date\", signature=\"{b64_sig}\""
+                ),
+            )
+            .header("Date", date)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn cfg_keyx_urn_only() -> serde_json::Value {
+        serde_json::json!({
+            "validate_request_body": false,
+            "keyx_urn": "00000000-0000-0000-0000-0000000000bb",
+        })
+    }
+
+    #[tokio::test]
+    async fn keyx_mode_accepts_when_keyx_says_valid() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/v1/keys/00000000-0000-0000-0000-0000000000bb/verify-hmac"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(envelope(true)))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let ctx = PluginContext {
+            keyx: Some(keyx_client_arc(server.uri())),
+        };
+        let plugin = HmacAuthPlugin::from_config(&cfg_keyx_urn_only(), None, &ctx).unwrap();
+        let sig_b64 = B64.encode(b"any-binary-sig");
+        let mut req = req_with_hmac_header(&sig_b64);
+        plugin.on_request(&mut req).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn keyx_mode_rejects_when_keyx_says_invalid() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(envelope(false)))
+            .mount(&server)
+            .await;
+
+        let ctx = PluginContext {
+            keyx: Some(keyx_client_arc(server.uri())),
+        };
+        let plugin = HmacAuthPlugin::from_config(&cfg_keyx_urn_only(), None, &ctx).unwrap();
+        let mut req = req_with_hmac_header(&B64.encode(b"tampered"));
+        let err = plugin.on_request(&mut req).await.unwrap_err();
+        assert!(matches!(err, PluginError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn keyx_mode_falls_back_to_unauthorized_on_transport_failure() {
+        // Server doesn't exist on this port — transport-level fail.
+        let ctx = PluginContext {
+            keyx: Some(keyx_client_arc("http://127.0.0.1:1".into())),
+        };
+        let plugin = HmacAuthPlugin::from_config(&cfg_keyx_urn_only(), None, &ctx).unwrap();
+        let mut req = req_with_hmac_header(&B64.encode(b"x"));
+        let err = plugin.on_request(&mut req).await.unwrap_err();
+        assert!(matches!(err, PluginError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn self_contained_keyx_config_works_without_context_client() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(envelope(true)))
+            .mount(&server)
+            .await;
+        let cfg = serde_json::json!({
+            "validate_request_body": false,
+            "keyx_urn": "00000000-0000-0000-0000-0000000000bb",
+            "keyx_base_url": server.uri(),
+            "keyx_service_token": "svc",
+        });
+        // No keyx in context — plugin should construct its own client.
+        let plugin = HmacAuthPlugin::from_config(&cfg, None, &PluginContext::default()).unwrap();
+        let mut req = req_with_hmac_header(&B64.encode(b"x"));
+        plugin.on_request(&mut req).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn keyx_urn_with_no_client_or_self_contained_config_errors() {
+        let res = HmacAuthPlugin::from_config(
+            &cfg_keyx_urn_only(),
+            None,
+            &PluginContext::default(),
+        );
+        match res {
+            Ok(_) => panic!("expected an error when keyx_urn is set without a client"),
+            Err(e) => {
+                let msg = format!("{e}");
+                assert!(
+                    msg.contains("keyx"),
+                    "expected error to mention keyx, got: {msg}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn local_mode_unchanged_when_no_keyx_urn() {
+        // Without keyx_urn, the plugin builds in local mode and behaves
+        // exactly as before — unknown username = 401.
+        let plugin = HmacAuthPlugin::from_config(
+            &serde_json::json!({ "validate_request_body": false }),
+            None,
+            &PluginContext::default(),
+        )
+        .unwrap();
+        assert!(plugin.keyx.is_none());
+        let mut req = req_with_hmac_header(&B64.encode(b"x"));
+        let err = plugin.on_request(&mut req).await.unwrap_err();
+        // Local mode without repo = "no repository" internal error path,
+        // not a signature failure — that's fine, we're just asserting
+        // the keyx branch wasn't taken.
+        assert!(matches!(err, PluginError::Internal(_) | PluginError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn hex_encode_matches_known_value() {
+        assert_eq!(hex_encode(b""), "");
+        assert_eq!(hex_encode(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+        assert_eq!(hex_encode(&[0x00, 0xff]), "00ff");
     }
 }

@@ -317,7 +317,26 @@ async fn async_main() -> anyhow::Result<()> {
         "loaded persisted state"
     );
 
-    let plugin_exec = Arc::new(PluginExecutor::new(license.tier));
+    // Build a single keyx client up-front when [keyx] is configured —
+    // shared by the plugin executor (so plugins like hmac-auth can route
+    // verification through keyx) AND the admin-auth middleware (Phase 2).
+    // Cheap: just a reqwest::Client wrapper. License::load constructs its
+    // own internally on a narrower scope; that one is short-lived.
+    let shared_keyx_client = if config.keyx.is_configured() {
+        let cfg = crate::integrations::keyx::KeyxConfig {
+            base_url: config.keyx.base_url.clone(),
+            service_token: config.keyx.service_token.clone(),
+            license_urn: config.keyx.license_urn.clone(),
+        };
+        crate::integrations::keyx::KeyxClient::new(cfg).ok().map(Arc::new)
+    } else {
+        None
+    };
+
+    let plugin_ctx = crate::plugins::PluginContext {
+        keyx: shared_keyx_client.clone(),
+    };
+    let plugin_exec = Arc::new(PluginExecutor::new_with_context(license.tier, plugin_ctx));
     plugin_exec.rebuild(&repo).await?;
     tracing::info!("plugin executor ready");
 
@@ -758,21 +777,10 @@ async fn async_main() -> anyhow::Result<()> {
         5_000,
     );
 
-    // If `[keyx]` is configured, build a shared client so the admin-auth
-    // middleware can fall back to `/v1/keys/validate` for tokens not in
-    // the local `admin_tokens` table. Same KeyxClient type as the
-    // licence verifier — separate instance is fine (it's cheap: just a
-    // reqwest::Client wrapper).
-    let admin_keyx_client = if config.keyx.is_configured() {
-        let cfg = crate::integrations::keyx::KeyxConfig {
-            base_url: config.keyx.base_url.clone(),
-            service_token: config.keyx.service_token.clone(),
-            license_urn: config.keyx.license_urn.clone(),
-        };
-        crate::integrations::keyx::KeyxClient::new(cfg).ok().map(Arc::new)
-    } else {
-        None
-    };
+    // Same client the plugin executor already holds — shared so a single
+    // configured keyx instance powers licence verification, admin-auth
+    // fallback, and any plugin (hmac-auth) that opts in.
+    let admin_keyx_client = shared_keyx_client.clone();
 
     let admin_app = admin::admin_router(
         route_table,

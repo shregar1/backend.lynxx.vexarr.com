@@ -114,6 +114,17 @@ const CORE_PLUGINS: &[&str] = &[
     "response_compression",
 ];
 
+/// Shared services that the plugin factory can hand to individual
+/// plugins at construction time. Currently carries the optional keyx
+/// client; future shared deps (cluster bus, metrics handle, …) belong
+/// here too rather than as additional factory parameters.
+///
+/// Plugins that don't need anything from the context just ignore it.
+#[derive(Clone, Default)]
+pub struct PluginContext {
+    pub keyx: Option<Arc<crate::integrations::keyx::KeyxClient>>,
+}
+
 pub struct PluginExecutor {
     built: RwLock<HashMap<Uuid, Arc<dyn Plugin>>>,
     index: RwLock<PluginIndex>,
@@ -136,10 +147,18 @@ pub struct PluginExecutor {
     /// this list run first; unlisted plugins run after all listed ones
     /// in their natural (creation) order.
     order: RwLock<Vec<String>>,
+    /// Shared service handles handed to every plugin at construction
+    /// (via [`PluginContext`]). Wired in `new_with_context`; default
+    /// `new()` leaves it empty for tests / harnesses that don't care.
+    context: PluginContext,
 }
 
 impl PluginExecutor {
     pub fn new(tier: PlanTier) -> Self {
+        Self::new_with_context(tier, PluginContext::default())
+    }
+
+    pub fn new_with_context(tier: PlanTier, context: PluginContext) -> Self {
         let reload_signal = Arc::new(Notify::new());
         let wasm_watcher = wasm::watcher::WasmWatcher::new();
 
@@ -159,6 +178,7 @@ impl PluginExecutor {
             reload_signal,
             tier,
             order: RwLock::new(Vec::new()),
+            context,
         }
     }
 
@@ -174,6 +194,14 @@ impl PluginExecutor {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.is_empty.load(Ordering::Acquire)
+    }
+
+    /// Shared services available to plugin construction. Used by the
+    /// admin API's plugin-validate endpoints so they build under the
+    /// same context as production (matters for plugins like hmac-auth
+    /// that branch on the presence of a keyx client).
+    pub fn context(&self) -> &PluginContext {
+        &self.context
     }
 
     /// Re-fetch all plugin rows from the DB and (re)build every enabled plugin.
@@ -198,7 +226,12 @@ impl PluginExecutor {
                 );
                 continue;
             }
-            let plugin = match factory::build(&row.name, &row.config, Some(repo.clone())) {
+            let plugin = match factory::build(
+                &row.name,
+                &row.config,
+                Some(repo.clone()),
+                &self.context,
+            ) {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!(

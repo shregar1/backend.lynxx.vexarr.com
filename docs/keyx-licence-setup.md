@@ -183,15 +183,50 @@ Behaviour:
 Static `public_key` (PEM) and `secret` (HS\*) modes still work for
 non-keyx setups.
 
-## What's not (yet) wired through
+## Bonus: HMAC verification via keyx
 
-`KeyxClient` now exposes `verify_hmac(urn, payload, signature_hex)` for
-the canonical HMAC-via-keyx flow. The HMAC auth plugin does NOT yet
-call it — plugin integration is a separate, deliberate change that
-needs a design call on how every plugin gets at the shared keyx client
-(self-contain config in each plugin, or thread a `PluginContext`
-through the factory). The client surface is ready; pull it through
-when the plugin-context shape is decided.
+The `hmac-auth` plugin can route signature verification through keyx
+instead of comparing against a locally-stored consumer secret:
+
+```toml
+[[plugins]]
+name = "hmac-auth"
+enabled = true
+
+  [plugins.config]
+  algorithms = ["hmac-sha256"]
+  validate_request_body = true
+  # Opt-in: which keyx signing key holds the HMAC secret
+  keyx_urn = "00000000-0000-0000-0000-000000000099"
+```
+
+Two ways to wire the keyx client behind that URN:
+
+1. **Shared (preferred)** — when `[keyx]` is configured globally, the
+   plugin executor builds one `KeyxClient` at startup and threads it
+   to every plugin via a `PluginContext`. Just set `keyx_urn` in the
+   plugin config; the URL + service token come from the global block.
+2. **Per-plugin (escape hatch)** — when you need a different keyx
+   instance for a specific plugin, supply it inline:
+   ```toml
+   [plugins.config]
+   keyx_urn           = "<uuid>"
+   keyx_base_url      = "https://keyx-other.example/"
+   keyx_service_token = "<bearer>"
+   ```
+
+**Behaviour:**
+- Local consumer lookup is best-effort in keyx mode — the `username`
+  in the Authorization header still resolves to a row in the
+  `consumers` table (for the `x-consumer-username` / `x-consumer-id`
+  downstream headers) but verification doesn't depend on it
+- The canonicalised payload + provided signature are POSTed to
+  `keyx /v1/keys/{urn}/verify-hmac`. Keyx's `verify_hmac` accepts
+  **hex** signatures — the plugin handles the b64-to-hex conversion
+- `valid: false` from keyx → 401 signature mismatch
+- Transport / HTTP errors → 401 (no silent fallthrough)
+- Without `keyx_urn`, the plugin behaves exactly as before (local
+  consumer secret, computed in-process)
 
 ## Reverting to legacy mode
 
