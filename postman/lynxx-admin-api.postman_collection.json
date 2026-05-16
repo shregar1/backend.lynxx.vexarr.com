@@ -2,7 +2,7 @@
   "info": {
     "name": "Lynxx Admin API",
     "_postman_id": "lynxx-admin-api-collection",
-    "description": "Comprehensive collection for the Lynxx API gateway admin API.\n\n- **Base URL**: `http://localhost:9001` (no path prefix; admin API mounted at root on port 9001).\n- **Auth**: `Authorization: Bearer <token>` — token comes from `POST /tokens` (Admin role).\n- **Roles**: Viewer (reads), Operator (mutations), Admin (token mgmt).\n- **Response envelope**: All JSON responses are wrapped by the `api_envelope` middleware into an `ApiEnvelope` struct (`transactionUrn`, `responseStatus`, `data`, `error`, `referenceUrn`, `timestamp`). Set the `adminToken` and `baseUrl` collection variables before firing requests.\n- **Config sub-router**: Live config endpoints live under `/admin/v1/config/*` (nested router).",
+    "description": "Comprehensive collection for the Lynxx API gateway admin API.\n\n- **Base URL**: `http://localhost:9001` (no path prefix; admin API mounted at root on port 9001).\n- **Auth**: `Authorization: Bearer <token>` — token comes from `POST /tokens` (Admin role).\n- **Roles**: Viewer (reads), Operator (mutations), Admin (token mgmt).\n- **Response envelope**: All JSON responses are wrapped by the `api_envelope` middleware into an `ApiEnvelope` struct (`transactionUrn`, `responseStatus`, `data`, `error`, `referenceUrn`, `timestamp`). Set the `adminToken` and `baseUrl` collection variables before firing requests.\n- **Config sub-router**: Live config endpoints live under `/admin/v1/config/*` (nested router).\n- **Proxy responses**: The new `Proxy responses` folder documents what the gateway returns from the *data-plane* port (80/443/9000) — distinct from the admin port (9001). Uses the separate `proxyBaseUrl` variable.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -14,6 +14,11 @@
     {
       "key": "adminToken",
       "value": "",
+      "type": "string"
+    },
+    {
+      "key": "proxyBaseUrl",
+      "value": "https://api.lynxx.dev",
       "type": "string"
     }
   ],
@@ -33,8 +38,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/status",
-              "host": ["{{baseUrl}}"],
-              "path": ["status"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "status"
+              ]
             }
           }
         },
@@ -50,8 +59,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/healthz",
-              "host": ["{{baseUrl}}"],
-              "path": ["healthz"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "healthz"
+              ]
             }
           }
         },
@@ -67,8 +80,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/health",
-              "host": ["{{baseUrl}}"],
-              "path": ["health"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
             }
           }
         },
@@ -84,8 +101,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/health/:service_id",
-              "host": ["{{baseUrl}}"],
-              "path": ["health", ":service_id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health",
+                ":service_id"
+              ],
               "variable": [
                 {
                   "key": "service_id",
@@ -107,8 +129,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/reload",
-              "host": ["{{baseUrl}}"],
-              "path": ["reload"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "reload"
+              ]
             }
           }
         }
@@ -129,8 +155,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/projects",
-              "host": ["{{baseUrl}}"],
-              "path": ["projects"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "projects"
+              ]
             }
           }
         },
@@ -159,8 +189,12 @@
             },
             "url": {
               "raw": "{{baseUrl}}/projects",
-              "host": ["{{baseUrl}}"],
-              "path": ["projects"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "projects"
+              ]
             }
           }
         },
@@ -176,8 +210,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/projects/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["projects", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "projects",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -212,8 +251,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/projects/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["projects", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "projects",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -235,8 +279,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/projects/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["projects", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "projects",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -258,8 +307,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/projects/:id/services",
-              "host": ["{{baseUrl}}"],
-              "path": ["projects", ":id", "services"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "projects",
+                ":id",
+                "services"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -286,8 +341,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services",
-              "host": ["{{baseUrl}}"],
-              "path": ["services"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services"
+              ]
             }
           }
         },
@@ -316,8 +375,12 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services",
-              "host": ["{{baseUrl}}"],
-              "path": ["services"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services"
+              ]
             }
           }
         },
@@ -333,8 +396,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -369,8 +437,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -405,8 +478,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -428,8 +506,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -456,8 +539,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/targets",
-              "host": ["{{baseUrl}}"],
-              "path": ["targets"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "targets"
+              ]
             }
           }
         },
@@ -473,8 +560,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/targets",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "targets"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "targets"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -509,8 +602,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/targets",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "targets"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "targets"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -532,8 +631,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/targets/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["targets", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "targets",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -568,8 +672,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/targets/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["targets", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "targets",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -591,8 +700,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/targets/:id?drain=false&timeout=30",
-              "host": ["{{baseUrl}}"],
-              "path": ["targets", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "targets",
+                ":id"
+              ],
               "query": [
                 {
                   "key": "drain",
@@ -629,8 +743,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/routes",
-              "host": ["{{baseUrl}}"],
-              "path": ["routes"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "routes"
+              ]
             }
           }
         },
@@ -659,8 +777,12 @@
             },
             "url": {
               "raw": "{{baseUrl}}/routes",
-              "host": ["{{baseUrl}}"],
-              "path": ["routes"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "routes"
+              ]
             }
           }
         },
@@ -676,8 +798,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/routes/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["routes", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "routes",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -712,8 +839,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/routes/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["routes", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "routes",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -748,8 +880,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/routes/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["routes", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "routes",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -771,8 +908,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/routes/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["routes", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "routes",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -807,8 +949,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/routes/:id/test",
-              "host": ["{{baseUrl}}"],
-              "path": ["routes", ":id", "test"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "routes",
+                ":id",
+                "test"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -835,8 +983,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/plugins",
-              "host": ["{{baseUrl}}"],
-              "path": ["plugins"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "plugins"
+              ]
             }
           }
         },
@@ -865,8 +1017,12 @@
             },
             "url": {
               "raw": "{{baseUrl}}/plugins",
-              "host": ["{{baseUrl}}"],
-              "path": ["plugins"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "plugins"
+              ]
             }
           }
         },
@@ -882,8 +1038,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/plugins/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["plugins", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "plugins",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -918,8 +1079,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/plugins/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["plugins", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "plugins",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -941,8 +1107,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/plugins/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["plugins", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "plugins",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -969,8 +1140,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/consumers",
-              "host": ["{{baseUrl}}"],
-              "path": ["consumers"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "consumers"
+              ]
             }
           }
         },
@@ -999,8 +1174,12 @@
             },
             "url": {
               "raw": "{{baseUrl}}/consumers",
-              "host": ["{{baseUrl}}"],
-              "path": ["consumers"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "consumers"
+              ]
             }
           }
         },
@@ -1016,8 +1195,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/consumers/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["consumers", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "consumers",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1039,8 +1223,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/consumers/:id/regenerate-key",
-              "host": ["{{baseUrl}}"],
-              "path": ["consumers", ":id", "regenerate-key"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "consumers",
+                ":id",
+                "regenerate-key"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1067,8 +1257,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/tokens",
-              "host": ["{{baseUrl}}"],
-              "path": ["tokens"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "tokens"
+              ]
             }
           }
         },
@@ -1097,8 +1291,12 @@
             },
             "url": {
               "raw": "{{baseUrl}}/tokens",
-              "host": ["{{baseUrl}}"],
-              "path": ["tokens"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "tokens"
+              ]
             }
           }
         },
@@ -1127,8 +1325,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/tokens/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["tokens", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "tokens",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1150,8 +1353,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/tokens/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["tokens", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "tokens",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1178,8 +1386,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/metrics",
-              "host": ["{{baseUrl}}"],
-              "path": ["metrics"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "metrics"
+              ]
             }
           }
         },
@@ -1195,8 +1407,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/quota",
-              "host": ["{{baseUrl}}"],
-              "path": ["quota"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "quota"
+              ]
             }
           }
         }
@@ -1217,8 +1433,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/circuit-breakers",
-              "host": ["{{baseUrl}}"],
-              "path": ["circuit-breakers"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "circuit-breakers"
+              ]
             }
           }
         },
@@ -1234,8 +1454,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/circuit-breakers/:service_id/reset",
-              "host": ["{{baseUrl}}"],
-              "path": ["circuit-breakers", ":service_id", "reset"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "circuit-breakers",
+                ":service_id",
+                "reset"
+              ],
               "variable": [
                 {
                   "key": "service_id",
@@ -1257,8 +1483,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/circuit-breaker",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "circuit-breaker"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "circuit-breaker"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1293,8 +1525,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/circuit-breaker",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "circuit-breaker"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "circuit-breaker"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1321,8 +1559,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/upstreams",
-              "host": ["{{baseUrl}}"],
-              "path": ["upstreams"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "upstreams"
+              ]
             }
           }
         }
@@ -1343,8 +1585,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/debug/pprof/heap",
-              "host": ["{{baseUrl}}"],
-              "path": ["debug", "pprof", "heap"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "debug",
+                "pprof",
+                "heap"
+              ]
             }
           }
         },
@@ -1360,8 +1608,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/debug/pprof/tasks",
-              "host": ["{{baseUrl}}"],
-              "path": ["debug", "pprof", "tasks"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "debug",
+                "pprof",
+                "tasks"
+              ]
             }
           }
         },
@@ -1377,8 +1631,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/debug/pprof/threads",
-              "host": ["{{baseUrl}}"],
-              "path": ["debug", "pprof", "threads"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "debug",
+                "pprof",
+                "threads"
+              ]
             }
           }
         },
@@ -1394,8 +1654,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/debug/pprof/uptime",
-              "host": ["{{baseUrl}}"],
-              "path": ["debug", "pprof", "uptime"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "debug",
+                "pprof",
+                "uptime"
+              ]
             }
           }
         },
@@ -1411,8 +1677,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/debug/pprof/stats",
-              "host": ["{{baseUrl}}"],
-              "path": ["debug", "pprof", "stats"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "debug",
+                "pprof",
+                "stats"
+              ]
             }
           }
         }
@@ -1433,8 +1705,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/logs?service_id=&route_id=&project_id=&level=&search=&limit=100",
-              "host": ["{{baseUrl}}"],
-              "path": ["logs"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "logs"
+              ],
               "query": [
                 {
                   "key": "service_id",
@@ -1481,8 +1757,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/analytics",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "analytics"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "analytics"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1504,8 +1786,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/rate-limits",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "rate-limits"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "rate-limits"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1527,8 +1815,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/rate-limit-stats",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "rate-limit-stats"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "rate-limit-stats"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1550,8 +1844,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/geo",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "geo"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "geo"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1578,8 +1878,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/probes",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "probes"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "probes"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1614,8 +1920,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/probes",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "probes"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "probes"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1650,8 +1962,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/probes/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["probes", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "probes",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1673,8 +1990,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/probes/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["probes", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "probes",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1696,8 +2018,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/probes/:id/results",
-              "host": ["{{baseUrl}}"],
-              "path": ["probes", ":id", "results"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "probes",
+                ":id",
+                "results"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1719,8 +2047,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/probes/:id/stats",
-              "host": ["{{baseUrl}}"],
-              "path": ["probes", ":id", "stats"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "probes",
+                ":id",
+                "stats"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1747,8 +2081,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/snapshots",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "snapshots"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "snapshots"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1783,8 +2123,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/snapshots",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "snapshots"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "snapshots"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1806,8 +2152,16 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/snapshots/:sid/diff",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "snapshots", ":sid", "diff"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "snapshots",
+                ":sid",
+                "diff"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1833,8 +2187,16 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/snapshots/:sid/rollback",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "snapshots", ":sid", "rollback"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "snapshots",
+                ":sid",
+                "rollback"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1860,8 +2222,15 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/snapshots/:sid",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "snapshots", ":sid"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "snapshots",
+                ":sid"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1892,8 +2261,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/alerts",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "alerts"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "alerts"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1928,8 +2303,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/alerts",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "alerts"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "alerts"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1964,8 +2345,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/alerts/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["alerts", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "alerts",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -1987,8 +2373,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/alerts/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["alerts", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "alerts",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2010,8 +2401,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/alerts/:id/test",
-              "host": ["{{baseUrl}}"],
-              "path": ["alerts", ":id", "test"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "alerts",
+                ":id",
+                "test"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2033,8 +2430,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/alert-events",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "alert-events"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "alert-events"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2056,8 +2459,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/alert-events/:id/resolve",
-              "host": ["{{baseUrl}}"],
-              "path": ["alert-events", ":id", "resolve"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "alert-events",
+                ":id",
+                "resolve"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2084,8 +2493,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/ip-rules",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "ip-rules"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "ip-rules"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2120,8 +2535,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/ip-rules",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "ip-rules"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "ip-rules"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2156,8 +2577,15 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/ip-rules/bulk",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "ip-rules", "bulk"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "ip-rules",
+                "bulk"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2192,8 +2620,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/ip-rules/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["ip-rules", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ip-rules",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2215,8 +2648,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/ip-rules/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["ip-rules", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ip-rules",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2243,8 +2681,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/error-pages",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "error-pages"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "error-pages"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2279,8 +2723,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/error-pages",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "error-pages"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "error-pages"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2315,8 +2765,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/error-pages/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["error-pages", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "error-pages",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2338,8 +2793,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/error-pages/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["error-pages", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "error-pages",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2366,8 +2826,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/consumer-groups",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "consumer-groups"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "consumer-groups"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2402,8 +2868,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/consumer-groups",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "consumer-groups"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "consumer-groups"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2438,8 +2910,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/consumer-groups/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["consumer-groups", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "consumer-groups",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2461,8 +2938,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/consumer-groups/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["consumer-groups", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "consumer-groups",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2484,8 +2966,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/consumer-groups/:id/members",
-              "host": ["{{baseUrl}}"],
-              "path": ["consumer-groups", ":id", "members"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "consumer-groups",
+                ":id",
+                "members"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2520,8 +3008,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/consumer-groups/:id/members",
-              "host": ["{{baseUrl}}"],
-              "path": ["consumer-groups", ":id", "members"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "consumer-groups",
+                ":id",
+                "members"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2543,8 +3037,15 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/consumer-groups/:id/members/:cid",
-              "host": ["{{baseUrl}}"],
-              "path": ["consumer-groups", ":id", "members", ":cid"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "consumer-groups",
+                ":id",
+                "members",
+                ":cid"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2570,8 +3071,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/consumer-groups/:id/usage",
-              "host": ["{{baseUrl}}"],
-              "path": ["consumer-groups", ":id", "usage"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "consumer-groups",
+                ":id",
+                "usage"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2598,8 +3105,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/graph",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "graph"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "graph"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2626,8 +3139,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/docs",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "docs"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "docs"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2654,8 +3173,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/cache",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "cache"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "cache"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2677,8 +3202,15 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/cache/stats",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "cache", "stats"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "cache",
+                "stats"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2713,8 +3245,15 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/cache/purge",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "cache", "purge"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "cache",
+                "purge"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2749,8 +3288,15 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/cache/warm",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "cache", "warm"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "cache",
+                "warm"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2777,8 +3323,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/traces?limit=100",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "traces"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "traces"
+              ],
               "query": [
                 {
                   "key": "limit",
@@ -2806,8 +3358,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/traces/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["traces", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "traces",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2829,8 +3386,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/traces/:id/spans",
-              "host": ["{{baseUrl}}"],
-              "path": ["traces", ":id", "spans"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "traces",
+                ":id",
+                "spans"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2865,8 +3428,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/traces",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "traces"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "traces"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2893,8 +3462,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/transforms",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "transforms"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "transforms"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2929,8 +3504,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/transforms",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "transforms"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "transforms"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2965,8 +3546,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/transforms/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["transforms", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "transforms",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -2988,8 +3574,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/transforms/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["transforms", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "transforms",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3016,8 +3607,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/versions",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "versions"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "versions"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3052,8 +3649,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/versions",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "versions"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "versions"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3088,8 +3691,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/versions/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["versions", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "versions",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3111,8 +3719,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/versions/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["versions", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "versions",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3139,8 +3752,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/incidents",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "incidents"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "incidents"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3162,8 +3781,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/incidents/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["incidents", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "incidents",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3198,8 +3822,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/incidents",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "incidents"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "incidents"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3234,8 +3864,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/incidents/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["incidents", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "incidents",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3257,8 +3892,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/incidents/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["incidents", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "incidents",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3280,8 +3920,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/incidents/:id/updates",
-              "host": ["{{baseUrl}}"],
-              "path": ["incidents", ":id", "updates"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "incidents",
+                ":id",
+                "updates"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3316,8 +3962,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/incidents/:id/updates",
-              "host": ["{{baseUrl}}"],
-              "path": ["incidents", ":id", "updates"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "incidents",
+                ":id",
+                "updates"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3344,8 +3996,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/webhooks",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "webhooks"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "webhooks"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3367,8 +4025,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/webhooks/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["webhooks", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "webhooks",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3403,8 +4066,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/webhooks",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "webhooks"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "webhooks"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3439,8 +4108,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/webhooks/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["webhooks", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "webhooks",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3462,8 +4136,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/webhooks/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["webhooks", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "webhooks",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3485,8 +4164,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/webhooks/:id/deliveries?limit=100",
-              "host": ["{{baseUrl}}"],
-              "path": ["webhooks", ":id", "deliveries"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "webhooks",
+                ":id",
+                "deliveries"
+              ],
               "query": [
                 {
                   "key": "limit",
@@ -3527,8 +4212,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/webhooks/:id/test",
-              "host": ["{{baseUrl}}"],
-              "path": ["webhooks", ":id", "test"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "webhooks",
+                ":id",
+                "test"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3555,8 +4246,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/load-tests",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "load-tests"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "load-tests"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3578,8 +4275,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/load-tests/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["load-tests", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "load-tests",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3614,8 +4316,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/load-tests",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "load-tests"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "load-tests"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3637,8 +4345,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/load-tests/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["load-tests", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "load-tests",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3665,8 +4378,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/marketplace/plugins",
-              "host": ["{{baseUrl}}"],
-              "path": ["marketplace", "plugins"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "marketplace",
+                "plugins"
+              ]
             }
           }
         },
@@ -3682,8 +4400,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/marketplace/plugins/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["marketplace", "plugins", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "marketplace",
+                "plugins",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3718,8 +4442,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/marketplace/plugins",
-              "host": ["{{baseUrl}}"],
-              "path": ["marketplace", "plugins"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "marketplace",
+                "plugins"
+              ]
             }
           }
         }
@@ -3740,8 +4469,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/costs",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "costs"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "costs"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3763,8 +4498,15 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/costs/summary",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "costs", "summary"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "costs",
+                "summary"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3791,8 +4533,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/cluster/nodes",
-              "host": ["{{baseUrl}}"],
-              "path": ["cluster", "nodes"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "cluster",
+                "nodes"
+              ]
             }
           }
         },
@@ -3808,8 +4555,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/cluster/nodes/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["cluster", "nodes", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "cluster",
+                "nodes",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3844,8 +4597,15 @@
             },
             "url": {
               "raw": "{{baseUrl}}/cluster/nodes/:id/drain",
-              "host": ["{{baseUrl}}"],
-              "path": ["cluster", "nodes", ":id", "drain"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "cluster",
+                "nodes",
+                ":id",
+                "drain"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3867,8 +4627,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/cluster/nodes/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["cluster", "nodes", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "cluster",
+                "nodes",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3895,8 +4661,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/rate-limit-sim",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "rate-limit-sim"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "rate-limit-sim"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3918,8 +4690,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/rate-limit-sim/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["rate-limit-sim", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "rate-limit-sim",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3954,8 +4731,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/rate-limit-sim",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "rate-limit-sim"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "rate-limit-sim"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -3982,8 +4765,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/certificates?service_id=",
-              "host": ["{{baseUrl}}"],
-              "path": ["certificates"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "certificates"
+              ],
               "query": [
                 {
                   "key": "service_id",
@@ -4005,8 +4792,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/certificates/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["certificates", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "certificates",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -4041,8 +4833,12 @@
             },
             "url": {
               "raw": "{{baseUrl}}/certificates",
-              "host": ["{{baseUrl}}"],
-              "path": ["certificates"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "certificates"
+              ]
             }
           }
         },
@@ -4058,8 +4854,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/certificates/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["certificates", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "certificates",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -4086,8 +4887,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/audit?actor=&action=&resource_type=&since=&limit=100&include_diff=false",
-              "host": ["{{baseUrl}}"],
-              "path": ["audit"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audit"
+              ],
               "query": [
                 {
                   "key": "actor",
@@ -4129,8 +4934,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/audit/verify",
-              "host": ["{{baseUrl}}"],
-              "path": ["audit", "verify"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "audit",
+                "verify"
+              ]
             }
           }
         }
@@ -4151,8 +4961,12 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/recordings?since=&method=&path_prefix=&status=&service_id=&limit=100",
-              "host": ["{{baseUrl}}"],
-              "path": ["recordings"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "recordings"
+              ],
               "query": [
                 {
                   "key": "since",
@@ -4194,8 +5008,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/recordings/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["recordings", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "recordings",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -4217,8 +5036,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/recordings/:id",
-              "host": ["{{baseUrl}}"],
-              "path": ["recordings", ":id"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "recordings",
+                ":id"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -4253,8 +5077,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/recordings/:id/replay",
-              "host": ["{{baseUrl}}"],
-              "path": ["recordings", ":id", "replay"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "recordings",
+                ":id",
+                "replay"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -4281,8 +5111,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/acme/status",
-              "host": ["{{baseUrl}}"],
-              "path": ["acme", "status"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "acme",
+                "status"
+              ]
             }
           }
         },
@@ -4298,8 +5133,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/acme/renew?force=false",
-              "host": ["{{baseUrl}}"],
-              "path": ["acme", "renew"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "acme",
+                "renew"
+              ],
               "query": [
                 {
                   "key": "force",
@@ -4321,8 +5161,13 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/acme/revoke?reason=superseded",
-              "host": ["{{baseUrl}}"],
-              "path": ["acme", "revoke"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "acme",
+                "revoke"
+              ],
               "query": [
                 {
                   "key": "reason",
@@ -4357,8 +5202,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/acme/http-01-challenges",
-              "host": ["{{baseUrl}}"],
-              "path": ["acme", "http-01-challenges"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "acme",
+                "http-01-challenges"
+              ]
             }
           }
         },
@@ -4374,8 +5224,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/acme/http-01-challenges/:token",
-              "host": ["{{baseUrl}}"],
-              "path": ["acme", "http-01-challenges", ":token"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "acme",
+                "http-01-challenges",
+                ":token"
+              ],
               "variable": [
                 {
                   "key": "token",
@@ -4410,8 +5266,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/acme/tls-alpn-01-challenges",
-              "host": ["{{baseUrl}}"],
-              "path": ["acme", "tls-alpn-01-challenges"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "acme",
+                "tls-alpn-01-challenges"
+              ]
             }
           }
         },
@@ -4427,8 +5288,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/acme/tls-alpn-01-challenges/:domain",
-              "host": ["{{baseUrl}}"],
-              "path": ["acme", "tls-alpn-01-challenges", ":domain"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "acme",
+                "tls-alpn-01-challenges",
+                ":domain"
+              ],
               "variable": [
                 {
                   "key": "domain",
@@ -4468,8 +5335,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/services/:id/deploy",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "deploy"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "deploy"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -4491,8 +5364,15 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/services/:id/deploy/status",
-              "host": ["{{baseUrl}}"],
-              "path": ["services", ":id", "deploy", "status"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "services",
+                ":id",
+                "deploy",
+                "status"
+              ],
               "variable": [
                 {
                   "key": "id",
@@ -4532,8 +5412,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/proxy/try",
-              "host": ["{{baseUrl}}"],
-              "path": ["proxy", "try"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "proxy",
+                "try"
+              ]
             }
           }
         },
@@ -4562,8 +5447,13 @@
             },
             "url": {
               "raw": "{{baseUrl}}/proxy/replay",
-              "host": ["{{baseUrl}}"],
-              "path": ["proxy", "replay"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "proxy",
+                "replay"
+              ]
             }
           }
         }
@@ -4584,8 +5474,14 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/admin/v1/config",
-              "host": ["{{baseUrl}}"],
-              "path": ["admin", "v1", "config"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "config"
+              ]
             }
           }
         },
@@ -4614,8 +5510,14 @@
             },
             "url": {
               "raw": "{{baseUrl}}/admin/v1/config",
-              "host": ["{{baseUrl}}"],
-              "path": ["admin", "v1", "config"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "config"
+              ]
             }
           }
         },
@@ -4644,8 +5546,16 @@
             },
             "url": {
               "raw": "{{baseUrl}}/admin/v1/config/gateway/admin_port",
-              "host": ["{{baseUrl}}"],
-              "path": ["admin", "v1", "config", "gateway", "admin_port"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "config",
+                "gateway",
+                "admin_port"
+              ]
             }
           }
         },
@@ -4674,8 +5584,15 @@
             },
             "url": {
               "raw": "{{baseUrl}}/admin/v1/config/validate",
-              "host": ["{{baseUrl}}"],
-              "path": ["admin", "v1", "config", "validate"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "config",
+                "validate"
+              ]
             }
           }
         },
@@ -4691,8 +5608,15 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/admin/v1/config/history",
-              "host": ["{{baseUrl}}"],
-              "path": ["admin", "v1", "config", "history"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "config",
+                "history"
+              ]
             }
           }
         },
@@ -4708,13 +5632,71 @@
             ],
             "url": {
               "raw": "{{baseUrl}}/admin/v1/config/@id/:tag",
-              "host": ["{{baseUrl}}"],
-              "path": ["admin", "v1", "config", "@id", ":tag"],
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "v1",
+                "config",
+                "@id",
+                ":tag"
+              ],
               "variable": [
                 {
                   "key": "tag",
                   "value": ""
                 }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Proxy responses",
+      "description": "Built-in responses the gateway emits from its data-plane port (80/443/9000). These do NOT hit the admin port (9001). Set `proxyBaseUrl` to your gateway's public URL (e.g. `https://api.lynxx.dev`) before firing.\n\n**Content negotiation**: the gateway's 404 response varies by the request's `Accept` header. Browsers get a branded HTML page; API/SDK callers get a stable JSON envelope.",
+      "item": [
+        {
+          "name": "404 — unmatched route (HTML page for browsers)",
+          "request": {
+            "method": "GET",
+            "description": "Hits a path the gateway can't match. Because `Accept` includes `text/html`, the response is the branded `Route not found` HTML page (dark/light, self-contained, no external assets).\n\n- **Status**: 404\n- **Content-Type**: text/html; charset=utf-8\n- **Cache-Control**: no-store\n- **Body**: full HTML page with the offending path inlined and a CLI snippet for registering the route. Source: `backend.lynxx.vexarr.com/src/proxy/route_not_found.html`.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "text/html,application/xhtml+xml"
+              }
+            ],
+            "url": {
+              "raw": "{{proxyBaseUrl}}/__no_such_route__",
+              "host": [
+                "{{proxyBaseUrl}}"
+              ],
+              "path": [
+                "__no_such_route__"
+              ]
+            }
+          }
+        },
+        {
+          "name": "404 — unmatched route (JSON for API clients)",
+          "request": {
+            "method": "GET",
+            "description": "Same unmatched-path request but with `Accept: application/json`. SDKs and curl callers stay on this path so machine parsers don't break.\n\n- **Status**: 404\n- **Content-Type**: application/json\n- **Body**: `{\"error\":\"route not found: /<path>\"}`\n\nThis is the historical/default response shape — unchanged when the HTML page was added.",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{proxyBaseUrl}}/__no_such_route__",
+              "host": [
+                "{{proxyBaseUrl}}"
+              ],
+              "path": [
+                "__no_such_route__"
               ]
             }
           }
