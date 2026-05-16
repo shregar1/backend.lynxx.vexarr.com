@@ -25,6 +25,7 @@ pub mod discovery;
 pub mod dtos;
 pub mod error;
 pub mod health;
+pub mod install;
 pub mod integrations;
 pub mod kernel_tuning;
 pub mod license;

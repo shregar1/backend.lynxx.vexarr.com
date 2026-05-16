@@ -31,8 +31,8 @@ fi
 sudo useradd -r -u 10001 -m lynxx 2>/dev/null || true
 sudo mkdir -p /etc/lynxx /var/lib/lynxx
 
-# Download latest binary
-sudo gsutil cp gs://$GCS_BUCKET/lynxx/binaries/linux/amd64/lynxx-gateway-latest /usr/local/bin/lynxx-gateway
+# Download latest binary (stable pointer maintained by scripts/deploy.sh)
+sudo gsutil cp gs://lynxx-public/gateway/linux/amd64/lynxx-gateway /usr/local/bin/lynxx-gateway
 sudo chmod +x /usr/local/bin/lynxx-gateway
 
 # Write config
@@ -134,4 +134,4 @@ sudo systemctl restart lynxx.service
 | Binary | `/usr/local/bin/lynxx-gateway` |
 | Config | `/etc/lynxx/config.toml` |
 | Data | `/var/lib/lynxx/` |
-| GCS | `gs://$GCS_BUCKET/lynxx/binaries/linux/amd64/` |
+| GCS | `gs://lynxx-public/gateway/linux/amd64/` |

@@ -21,6 +21,7 @@ mod discovery;
 mod dtos;
 mod error;
 mod health;
+mod install;
 mod integrations;
 mod kernel_tuning;
 mod license;

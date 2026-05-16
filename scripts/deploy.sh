@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-GCS_BUCKET="${LYNXX_GCS_BUCKET:-gs://your-bucket/lynxx/binaries/linux/amd64}"
+GCS_BUCKET="${LYNXX_GCS_BUCKET:-gs://lynxx-public/gateway/linux/amd64}"
 TARGET="x86_64-unknown-linux-gnu"
 VM_NAME="${LYNXX_VM_NAME:-your-vm-name}"
 VM_ZONE="${LYNXX_VM_ZONE:-us-central1-a}"
@@ -22,7 +22,9 @@ echo "==> Binary: ${SIZE}"
 
 echo "==> Uploading ${ARTIFACT} to GCS"
 gsutil cp "${BINARY}" "${GCS_BUCKET}/${ARTIFACT}"
-gsutil cp "${BINARY}" "${GCS_BUCKET}/${BINARY_NAME}-latest"
+# Mutable stable pointer. This is what /v1/install/binary streams to end
+# users, and what first-boot VM provisioning downloads.
+gsutil cp "${BINARY}" "${GCS_BUCKET}/${BINARY_NAME}"
 
 echo "==> Listing recent versions in GCS"
 gsutil ls -l "${GCS_BUCKET}/${BINARY_NAME}-v*" 2>/dev/null | tail -10
