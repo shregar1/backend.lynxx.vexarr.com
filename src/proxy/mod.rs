@@ -3,6 +3,7 @@ pub mod acme_server;
 pub mod cert_store;
 pub mod directives;
 pub mod dns_challenge;
+pub mod error_pages;
 pub mod fastcgi;
 pub mod grpc;
 pub mod h2_push;

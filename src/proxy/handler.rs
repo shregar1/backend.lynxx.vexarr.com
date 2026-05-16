@@ -243,6 +243,12 @@ pub async fn proxy_handler(
             )
             .increment(1);
             state.log_writer.log(&method, &path, &peer_ip_early, None, None, None, None, start.elapsed().as_millis() as i64, "error", "no matching route");
+            // Browsers (Accept: text/html) get a branded page with instructions
+            // for registering the missing route. API/SDK callers fall through
+            // to the existing JSON error body so machine parsers don't break.
+            if crate::proxy::error_pages::wants_html(req.headers()) {
+                return Ok(crate::proxy::error_pages::render_route_not_found(&path));
+            }
             return Err(GatewayError::RouteNotFound(path));
         }
     };
