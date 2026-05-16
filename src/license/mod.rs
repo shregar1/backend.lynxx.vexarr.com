@@ -32,9 +32,10 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
-use crate::config::{KeyxSettings, LicenseSettings};
-use crate::integrations::keyx::{KeyxClient, KeyxConfig, KeyxError};
+use crate::config::LicenseSettings;
+use crate::integrations::abstraction::{LicenseVerifier, VerifierError};
 use crate::quota::PlanTier;
+use std::sync::Arc;
 
 const OFFLINE_GRACE_DAYS: i64 = 7;
 /// How often the running gateway re-verifies the licence against keyx.
@@ -107,22 +108,22 @@ struct CacheEntry {
 impl License {
     /// Load and verify the licence.
     ///
-    /// * `[keyx]` fully configured + `[license].payload` + `signature`
-    ///   set → verify the signed bundle against keyx.
-    /// * `[keyx]` unconfigured → return a permissive default. Used
-    ///   for self-host / dev / internal-only deployments.
-    /// * `[keyx]` configured but bundle missing → `Missing` error.
+    /// * `verifier = Some(…)` + `[license].payload` + `signature` set →
+    ///   verify the signed bundle against the supplied backend.
+    /// * `verifier = None` → return a permissive default. Used for
+    ///   self-host / dev / internal-only deployments.
+    /// * `verifier = Some(…)` but bundle missing → `Missing` error.
     pub async fn load(
         license_cfg: &LicenseSettings,
-        keyx_cfg: &KeyxSettings,
+        verifier: Option<&dyn LicenseVerifier>,
     ) -> Result<Self, LicenseError> {
-        if !keyx_cfg.is_configured() {
+        let Some(verifier) = verifier else {
             return Ok(Self::unverified_default());
-        }
+        };
         if license_cfg.payload.trim().is_empty() || license_cfg.signature.trim().is_empty() {
             return Err(LicenseError::Missing);
         }
-        Self::load_via_keyx(license_cfg, keyx_cfg).await
+        Self::load_via_verifier(license_cfg, verifier).await
     }
 
     /// Permissive default for unlicensed deployments. Enterprise tier,
@@ -140,9 +141,9 @@ impl License {
         }
     }
 
-    async fn load_via_keyx(
+    async fn load_via_verifier(
         license_cfg: &LicenseSettings,
-        keyx_cfg: &KeyxSettings,
+        verifier: &dyn LicenseVerifier,
     ) -> Result<Self, LicenseError> {
         use base64::engine::general_purpose::STANDARD as B64;
         use base64::Engine;
@@ -153,27 +154,26 @@ impl License {
         let parsed: VerifyResponse = serde_json::from_slice(&payload)
             .map_err(|e| LicenseError::Malformed(format!("license payload JSON: {e}")))?;
         let signature = license_cfg.signature.trim().to_string();
-
-        let client = build_keyx_client(keyx_cfg)?;
         let cache_id = signature.as_str();
 
-        match client.verify_license(&payload, &signature).await {
+        match verifier.verify_license(&payload, &signature).await {
             Ok(true) => {
                 let lic = License::from_verify_response(&parsed, false);
                 let _ = write_cache(cache_id, &parsed);
                 Ok(lic)
             }
             Ok(false) => Err(LicenseError::Rejected(
-                "keyx rejected the licence signature (revoked or tampered)".into(),
+                "verifier rejected the licence signature (revoked or tampered)".into(),
             )),
-            Err(KeyxError::Transport(e)) | Err(KeyxError::Http { body: e, .. }) => {
+            Err(VerifierError::Transport(e)) | Err(VerifierError::Http { body: e, .. }) => {
                 match read_cache(cache_id)? {
                     Some(entry) => License::from_cache_entry(entry),
                     None => Err(LicenseError::Offline(e)),
                 }
             }
-            Err(KeyxError::Malformed(e)) => Err(LicenseError::Malformed(e)),
-            Err(KeyxError::NotConfigured) => Err(LicenseError::Missing),
+            Err(VerifierError::Malformed(e)) => Err(LicenseError::Malformed(e)),
+            Err(VerifierError::Rejected(e)) => Err(LicenseError::Rejected(e)),
+            Err(VerifierError::NotConfigured) => Err(LicenseError::Missing),
         }
     }
 
@@ -231,17 +231,17 @@ pub struct LicenseState {
 }
 
 struct LicenseStateInner {
-    /// `Some` for keyx-backed states; `None` for the unlicensed
-    /// default (no re-verifier, kill-switch never flips).
-    keyx_refresh: Option<KeyxRefresh>,
+    /// `Some` when a verifier-backed re-verifier is running; `None`
+    /// for the unlicensed default (no re-verifier, no kill-switch).
+    refresh: Option<VerifierRefresh>,
     active: std::sync::atomic::AtomicBool,
     tier: std::sync::RwLock<PlanTier>,
     node_counts: std::sync::RwLock<(u32, Option<u32>)>,
 }
 
 #[derive(Clone)]
-struct KeyxRefresh {
-    client: KeyxClient,
+struct VerifierRefresh {
+    verifier: Arc<dyn LicenseVerifier>,
     payload: Vec<u8>,
     signature: String,
 }
@@ -251,7 +251,7 @@ impl LicenseState {
     pub fn unverified(tier: PlanTier) -> Self {
         Self {
             inner: std::sync::Arc::new(LicenseStateInner {
-                keyx_refresh: None,
+                refresh: None,
                 active: std::sync::atomic::AtomicBool::new(true),
                 tier: std::sync::RwLock::new(tier),
                 node_counts: std::sync::RwLock::new((0, None)),
@@ -259,22 +259,21 @@ impl LicenseState {
         }
     }
 
-    /// Build a keyx-backed state. The background refresher re-checks
-    /// the signed `(payload, signature)` bundle against keyx on the
-    /// `REVERIFY_INTERVAL_SECS` schedule.
-    pub fn new_keyx(
-        keyx_cfg: &KeyxSettings,
+    /// Build a verifier-backed state. The background refresher
+    /// re-checks the signed `(payload, signature)` bundle against the
+    /// verifier on the `REVERIFY_INTERVAL_SECS` schedule.
+    pub fn new_verified(
+        verifier: Arc<dyn LicenseVerifier>,
         payload: Vec<u8>,
         signature: String,
         tier: PlanTier,
         active_nodes: u32,
         max_nodes: Option<u32>,
-    ) -> Result<Self, LicenseError> {
-        let client = build_keyx_client(keyx_cfg)?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             inner: std::sync::Arc::new(LicenseStateInner {
-                keyx_refresh: Some(KeyxRefresh {
-                    client,
+                refresh: Some(VerifierRefresh {
+                    verifier,
                     payload,
                     signature,
                 }),
@@ -282,20 +281,21 @@ impl LicenseState {
                 tier: std::sync::RwLock::new(tier),
                 node_counts: std::sync::RwLock::new((active_nodes, max_nodes)),
             }),
-        })
+        }
     }
 
     /// Cheap check used in the proxy hot path. `false` only after the
-    /// re-verifier sees a `valid: false` from keyx.
+    /// re-verifier sees a `valid: false` from the backend.
     pub fn is_active(&self) -> bool {
         self.inner.active.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// `"keyx"` when keyx-backed; `"unverified"` for the default. Surfaced
-    /// on `/status` so operators can see what mode a node booted into.
+    /// `"verified"` when a verifier-backed state is running;
+    /// `"unverified"` for the no-licence default. Surfaced on `/status`
+    /// so operators can see what mode a node booted into.
     pub fn mode(&self) -> &'static str {
-        if self.inner.keyx_refresh.is_some() {
-            "keyx"
+        if self.inner.refresh.is_some() {
+            "verified"
         } else {
             "unverified"
         }
@@ -327,9 +327,9 @@ impl LicenseState {
 /// Spawn the background re-verifier. No-op for unlicensed states.
 pub fn spawn_license_refresher(
     state: LicenseState,
-    _quota: Option<std::sync::Arc<crate::quota::QuotaTracker>>,
+    _quota: Option<Arc<crate::quota::QuotaTracker>>,
 ) {
-    let Some(keyx) = state.inner.keyx_refresh.clone() else {
+    let Some(refresh) = state.inner.refresh.clone() else {
         return;
     };
     tokio::spawn(async move {
@@ -337,30 +337,20 @@ pub fn spawn_license_refresher(
         interval.tick().await;
         loop {
             interval.tick().await;
-            match keyx
-                .client
-                .verify_license(&keyx.payload, &keyx.signature)
+            match refresh
+                .verifier
+                .verify_license(&refresh.payload, &refresh.signature)
                 .await
             {
-                Ok(true) => tracing::debug!("keyx licence re-verify ok"),
-                Ok(false) => {
-                    state.flip_inactive("keyx says licence is no longer valid (revoked)")
-                }
+                Ok(true) => tracing::debug!("licence re-verify ok"),
+                Ok(false) => state
+                    .flip_inactive("verifier says licence is no longer valid (revoked)"),
                 Err(e) => {
-                    tracing::warn!(error = %e, "keyx re-verify failed; keeping current state")
+                    tracing::warn!(error = %e, "licence re-verify failed; keeping current state")
                 }
             }
         }
     });
-}
-
-fn build_keyx_client(keyx_cfg: &KeyxSettings) -> Result<KeyxClient, LicenseError> {
-    let cfg = KeyxConfig {
-        base_url: keyx_cfg.base_url.clone(),
-        service_token: keyx_cfg.service_token.clone(),
-        license_urn: keyx_cfg.license_urn.clone(),
-    };
-    KeyxClient::new(cfg).map_err(|e| LicenseError::Rejected(format!("keyx client: {e}")))
 }
 
 /// Deterministic node identifier — used by the admin status endpoint
@@ -474,24 +464,33 @@ mod tests {
     }
 
     #[test]
-    fn license_state_keyx_constructor_reports_keyx_mode() {
-        let cfg = crate::config::KeyxSettings {
-            base_url: "http://x".into(),
-            service_token: "t".into(),
-            license_urn: "00000000-0000-0000-0000-000000000001".into(),
-            ..Default::default()
-        };
-        let s = LicenseState::new_keyx(&cfg, vec![1, 2], "sig".into(), PlanTier::Pro, 0, None)
-            .unwrap();
-        assert_eq!(s.mode(), "keyx");
+    fn license_state_verified_constructor_reports_verified_mode() {
+        use async_trait::async_trait;
+        use crate::integrations::{LicenseVerifier, VerifierError};
+
+        struct AlwaysOk;
+        #[async_trait]
+        impl LicenseVerifier for AlwaysOk {
+            async fn verify_license(&self, _: &[u8], _: &str) -> Result<bool, VerifierError> {
+                Ok(true)
+            }
+        }
+
+        let v: Arc<dyn LicenseVerifier> = Arc::new(AlwaysOk);
+        let s = LicenseState::new_verified(v, vec![1, 2], "sig".into(), PlanTier::Pro, 0, None);
+        assert_eq!(s.mode(), "verified");
     }
 }
 
-/// Integration tests for the keyx code path through `License::load`.
+/// Integration tests for the verifier code path through `License::load`.
+/// Exercises the keyx client as a concrete [`LicenseVerifier`] impl —
+/// the licence layer itself only knows about the trait.
 #[cfg(test)]
 mod keyx_load_tests {
     use super::*;
-    use crate::config::{KeyxSettings, LicenseSettings};
+    use crate::config::LicenseSettings;
+    use crate::integrations::keyx::{KeyxClient, KeyxConfig};
+    use crate::integrations::LicenseVerifier;
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine;
     use std::sync::Mutex;
@@ -515,13 +514,14 @@ mod keyx_load_tests {
         B64.encode(serde_json::to_vec(&json).unwrap())
     }
 
-    fn keyx_cfg(uri: String) -> KeyxSettings {
-        KeyxSettings {
+    fn keyx_verifier(uri: String) -> Arc<dyn LicenseVerifier> {
+        let c = KeyxClient::new(KeyxConfig {
             base_url: uri,
             service_token: "svc".into(),
             license_urn: URN.into(),
-            ..Default::default()
-        }
+        })
+        .unwrap();
+        Arc::new(c)
     }
 
     fn lic_cfg(payload: String, signature: String) -> LicenseSettings {
@@ -574,9 +574,10 @@ mod keyx_load_tests {
             .mount(&server)
             .await;
 
+        let v = keyx_verifier(server.uri());
         let lic = License::load(
             &lic_cfg(sample_payload_b64(), "sig".into()),
-            &keyx_cfg(server.uri()),
+            Some(v.as_ref()),
         )
         .await
         .unwrap();
@@ -598,9 +599,10 @@ mod keyx_load_tests {
             )
             .mount(&server)
             .await;
+        let v = keyx_verifier(server.uri());
         let err = License::load(
             &lic_cfg(sample_payload_b64(), "tampered".into()),
-            &keyx_cfg(server.uri()),
+            Some(v.as_ref()),
         )
         .await
         .unwrap_err();
@@ -615,9 +617,10 @@ mod keyx_load_tests {
             .respond_with(ResponseTemplate::new(503).set_body_string("down"))
             .mount(&server)
             .await;
+        let v = keyx_verifier(server.uri());
         let err = License::load(
             &lic_cfg(sample_payload_b64(), "sig-fresh".into()),
-            &keyx_cfg(server.uri()),
+            Some(v.as_ref()),
         )
         .await
         .unwrap_err();
@@ -638,24 +641,24 @@ mod keyx_load_tests {
             .await;
 
         let cfg_l = lic_cfg(sample_payload_b64(), "sig-warm".into());
-        let cfg_k = keyx_cfg(server.uri());
+        let v = keyx_verifier(server.uri());
 
-        let _seed = License::load(&cfg_l, &cfg_k).await.unwrap();
+        let _seed = License::load(&cfg_l, Some(v.as_ref())).await.unwrap();
         drop(ok_mock);
 
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(503).set_body_string("down"))
             .mount(&server)
             .await;
-        let lic = License::load(&cfg_l, &cfg_k).await.unwrap();
+        let lic = License::load(&cfg_l, Some(v.as_ref())).await.unwrap();
         assert!(lic.from_cache);
         assert_eq!(lic.customer_id, "cus_abc");
     }
 
     #[tokio::test]
-    async fn unconfigured_keyx_returns_unverified_default() {
+    async fn no_verifier_returns_unverified_default() {
         let _e = isolated_env();
-        let lic = License::load(&LicenseSettings::default(), &KeyxSettings::default())
+        let lic = License::load(&LicenseSettings::default(), None)
             .await
             .unwrap();
         assert_eq!(lic.customer_id, "unverified");
@@ -663,10 +666,11 @@ mod keyx_load_tests {
     }
 
     #[tokio::test]
-    async fn configured_keyx_without_bundle_errors_missing() {
+    async fn verifier_without_bundle_errors_missing() {
         let _e = isolated_env();
         let server = MockServer::start().await;
-        let err = License::load(&LicenseSettings::default(), &keyx_cfg(server.uri()))
+        let v = keyx_verifier(server.uri());
+        let err = License::load(&LicenseSettings::default(), Some(v.as_ref()))
             .await
             .unwrap_err();
         assert!(matches!(err, LicenseError::Missing));

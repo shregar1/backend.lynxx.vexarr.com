@@ -28,6 +28,10 @@
 //! { "status": "SUCCESS", "data": { "valid": true }, ... }
 //! ```
 
+use crate::integrations::abstraction::{
+    AdminPrincipal, HmacVerifier, LicenseVerifier, TokenValidator, VerifierError,
+};
+use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde::Deserialize;
@@ -273,6 +277,66 @@ pub struct KeyxPrincipal {
     pub environment: String,
     #[serde(default)]
     pub scopes: Vec<String>,
+}
+
+// ─── Trait implementations ──────────────────────────────────────────────
+//
+// Lynxx domain code consumes the traits from `integrations::abstraction`
+// — never a concrete `KeyxClient`. These thin impls bridge the inherent
+// methods above to the abstract interface, translating `KeyxError` into
+// the backend-agnostic `VerifierError`.
+
+impl From<KeyxError> for VerifierError {
+    fn from(e: KeyxError) -> Self {
+        match e {
+            KeyxError::NotConfigured => VerifierError::NotConfigured,
+            KeyxError::Transport(s) => VerifierError::Transport(s),
+            KeyxError::Http { status, body } => VerifierError::Http { status, body },
+            KeyxError::Malformed(s) => VerifierError::Malformed(s),
+        }
+    }
+}
+
+#[async_trait]
+impl LicenseVerifier for KeyxClient {
+    async fn verify_license(
+        &self,
+        payload: &[u8],
+        signature: &str,
+    ) -> Result<bool, VerifierError> {
+        KeyxClient::verify_license(self, payload, signature)
+            .await
+            .map_err(Into::into)
+    }
+}
+
+#[async_trait]
+impl TokenValidator for KeyxClient {
+    async fn validate(&self, token: &str) -> Result<AdminPrincipal, VerifierError> {
+        let p = KeyxClient::validate_token(self, token)
+            .await
+            .map_err(VerifierError::from)?;
+        Ok(AdminPrincipal {
+            tenant_id: p.tenant_id,
+            key_urn: p.api_key_urn,
+            role: p.role,
+            scopes: p.scopes,
+        })
+    }
+}
+
+#[async_trait]
+impl HmacVerifier for KeyxClient {
+    async fn verify_hmac(
+        &self,
+        key_urn: &str,
+        payload: &[u8],
+        signature_hex: &str,
+    ) -> Result<bool, VerifierError> {
+        KeyxClient::verify_hmac(self, key_urn, payload, signature_hex)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 #[cfg(test)]

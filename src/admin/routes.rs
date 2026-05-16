@@ -72,16 +72,17 @@ pub struct AdminState {
     pub license_state: Option<crate::license::LicenseState>,
     pub deploy_registry: Option<crate::admin::deploy::DeployRegistry>,
     pub status_cache: StatusCache,
-    /// Optional keyx client. When `Some`, the admin-auth middleware
-    /// falls through to keyx `/v1/keys/validate` after the local
-    /// `admin_tokens` table lookup misses, so operators can present
-    /// keyx-issued tokens on the lynxx admin API. `None` keeps the
-    /// legacy local-only flow unchanged.
-    pub keyx_client: Option<std::sync::Arc<crate::integrations::keyx::KeyxClient>>,
-    /// Short-TTL cache for keyx-validated admin tokens. `None` when
-    /// `KEYX_ADMIN_CACHE_TTL_SECS = 0` (every admin call hits keyx);
-    /// `Some` otherwise. Cap on revocation staleness is the TTL.
-    pub keyx_token_cache: Option<std::sync::Arc<crate::auth::middleware::KeyxAuthCache>>,
+    /// Optional token-validator backend (typically a keyx client,
+    /// behind the [`crate::integrations::TokenValidator`] trait so
+    /// the admin layer doesn't know the concrete impl). When `Some`,
+    /// the admin-auth middleware falls through to this validator
+    /// after the local `admin_tokens` table lookup misses. `None`
+    /// keeps the local-only flow.
+    pub token_validator: Option<std::sync::Arc<dyn crate::integrations::TokenValidator>>,
+    /// Short-TTL cache for verifier-validated admin tokens. `None`
+    /// when caching is disabled (TTL = 0); `Some` otherwise. Cap on
+    /// revocation staleness equals the TTL.
+    pub token_cache: Option<std::sync::Arc<crate::auth::middleware::AdminAuthCache>>,
 }
 
 /// Convenience: extract the optional actor from request extensions.

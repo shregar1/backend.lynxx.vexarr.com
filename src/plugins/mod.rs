@@ -115,14 +115,16 @@ const CORE_PLUGINS: &[&str] = &[
 ];
 
 /// Shared services that the plugin factory can hand to individual
-/// plugins at construction time. Currently carries the optional keyx
-/// client; future shared deps (cluster bus, metrics handle, …) belong
-/// here too rather than as additional factory parameters.
+/// plugins at construction time. Currently carries an optional
+/// [`crate::integrations::HmacVerifier`] (used by `hmac-auth` to route
+/// signature verification through an external backend like keyx).
+/// Future shared deps (cluster bus, metrics handle, …) belong here
+/// too rather than as additional factory parameters.
 ///
 /// Plugins that don't need anything from the context just ignore it.
 #[derive(Clone, Default)]
 pub struct PluginContext {
-    pub keyx: Option<Arc<crate::integrations::keyx::KeyxClient>>,
+    pub hmac_verifier: Option<Arc<dyn crate::integrations::HmacVerifier>>,
 }
 
 pub struct PluginExecutor {

@@ -10,6 +10,7 @@
 
 use crate::admin::routes::AdminState;
 use crate::auth::{hash_token, AdminToken, Role};
+use crate::integrations::{AdminPrincipal, TokenValidator};
 use axum::extract::State;
 use axum::http::{header, Request, StatusCode};
 use axum::middleware::Next;
@@ -22,17 +23,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-/// In-memory cache for keyx-validated admin tokens. Optional — when
-/// the cache is `None` (TTL = 0 in config) every admin request hits
-/// keyx. When present, a successful keyx validate populates an entry
-/// keyed by the SHA-256 hash of the raw token (raw tokens are never
-/// stored in memory); subsequent requests reuse it until `ttl`
-/// elapses.
+/// In-memory cache for verifier-validated admin tokens. Optional —
+/// when the cache is `None` (TTL = 0 in config) every admin request
+/// hits the verifier. When present, a successful validate populates
+/// an entry keyed by the SHA-256 hash of the raw token (raw tokens
+/// are never stored in memory); subsequent requests reuse it until
+/// `ttl` elapses.
 ///
 /// The TTL is also the upper bound on revocation staleness. Without
-/// keyx real-time revocation events, a revoked token keeps working
-/// until the entry expires.
-pub struct KeyxAuthCache {
+/// real-time revocation events from the backend, a revoked token
+/// keeps working until the entry expires.
+pub struct AdminAuthCache {
     entries: DashMap<String, CachedEntry>,
     ttl: Duration,
 }
@@ -42,7 +43,7 @@ struct CachedEntry {
     expires_at: Instant,
 }
 
-impl KeyxAuthCache {
+impl AdminAuthCache {
     pub fn new(ttl: Duration) -> Self {
         Self {
             entries: DashMap::new(),
@@ -223,18 +224,18 @@ async fn resolve_actor(
     let token = match token {
         Some(t) => t,
         None => {
-            // Local miss → cache → keyx.
-            if let Some(cache) = state.keyx_token_cache.as_ref() {
+            // Local miss → cache → verifier.
+            if let Some(cache) = state.token_cache.as_ref() {
                 if let Some(cached) = cache.get(&hash) {
                     if !cached.is_expired(Utc::now()) {
                         return Ok(Some(cached));
                     }
                 }
             }
-            if let Some(client) = state.keyx_client.as_ref() {
-                let resolved = resolve_via_keyx(client.as_ref(), raw).await?;
+            if let Some(validator) = state.token_validator.as_ref() {
+                let resolved = resolve_via_validator(validator.as_ref(), raw).await?;
                 if let Some(tok) = resolved.as_ref() {
-                    if let Some(cache) = state.keyx_token_cache.as_ref() {
+                    if let Some(cache) = state.token_cache.as_ref() {
                         cache.insert(hash.clone(), tok.clone());
                     }
                 }
@@ -249,49 +250,51 @@ async fn resolve_actor(
     Ok(Some(token))
 }
 
-/// Synthesise an `AdminToken` from a keyx `/v1/keys/validate` response.
+/// Synthesise an `AdminToken` from a backend-validated principal.
 /// Used as the fallback path inside [`resolve_actor`] when the local
 /// `admin_tokens` table doesn't know the bearer the caller presented.
-async fn resolve_via_keyx(
-    client: &crate::integrations::keyx::KeyxClient,
+async fn resolve_via_validator(
+    validator: &dyn TokenValidator,
     raw: &str,
 ) -> Result<Option<AdminToken>, Response> {
-    match client.validate_token(raw).await {
-        Ok(principal) => match map_keyx_role(&principal.role) {
-            Some(role) => Ok(Some(AdminToken {
-                id: principal.api_key_urn,
-                // First 8 hex chars are enough for log correlation; the
-                // full URN goes to the audit log on a separate path.
-                name: format!(
-                    "keyx:{}:{}",
-                    principal.role,
-                    &principal.api_key_urn.to_string()[..8]
-                ),
-                role,
-                created_at: Utc::now(),
-                expires_at: None,
-                last_used_at: None,
-                scopes: principal.scopes,
-            })),
-            None => {
-                tracing::info!(
-                    role = %principal.role,
-                    key_urn = %principal.api_key_urn,
-                    "keyx role not permitted on lynxx admin surface"
-                );
-                Err(unauthorized("token role not permitted on lynxx admin"))
-            }
-        },
+    match validator.validate(raw).await {
+        Ok(principal) => admin_token_from_principal(principal),
         Err(e) => {
-            tracing::debug!(error = %e, "keyx validate_token failed");
+            tracing::debug!(error = %e, "validator failed");
             Err(unauthorized("invalid token"))
         }
     }
 }
 
-/// Map a keyx role string onto a lynxx [`Role`]. Conservative: anything
-/// we don't recognise denies access rather than silently widening.
-fn map_keyx_role(role: &str) -> Option<Role> {
+fn admin_token_from_principal(p: AdminPrincipal) -> Result<Option<AdminToken>, Response> {
+    match map_principal_role(&p.role) {
+        Some(role) => Ok(Some(AdminToken {
+            id: p.key_urn,
+            // First 8 hex chars are enough for log correlation; the
+            // full URN goes to the audit log on a separate path.
+            name: format!("verifier:{}:{}", p.role, &p.key_urn.to_string()[..8]),
+            role,
+            created_at: Utc::now(),
+            expires_at: None,
+            last_used_at: None,
+            scopes: p.scopes,
+        })),
+        None => {
+            tracing::info!(
+                role = %p.role,
+                key_urn = %p.key_urn,
+                "principal role not permitted on lynxx admin surface"
+            );
+            Err(unauthorized("token role not permitted on lynxx admin"))
+        }
+    }
+}
+
+/// Map a backend role string onto a lynxx [`Role`]. Conservative:
+/// anything we don't recognise denies access rather than silently
+/// widening. Vocabulary mirrors keyx's role enum but isn't tied to it
+/// — any backend that uses these strings is supported.
+fn map_principal_role(role: &str) -> Option<Role> {
     match role.to_ascii_lowercase().as_str() {
         "admin" | "owner" => Some(Role::Admin),
         "service" => Some(Role::Operator),
@@ -429,14 +432,14 @@ mod tests {
 
     #[test]
     fn role_mapping_is_conservative() {
-        assert_eq!(map_keyx_role("admin"), Some(Role::Admin));
-        assert_eq!(map_keyx_role("OWNER"), Some(Role::Admin));
-        assert_eq!(map_keyx_role("service"), Some(Role::Operator));
-        assert_eq!(map_keyx_role("pat"), Some(Role::Viewer));
-        assert_eq!(map_keyx_role("viewer"), Some(Role::Viewer));
-        assert_eq!(map_keyx_role("publishable"), None);
-        assert_eq!(map_keyx_role("restricted"), None);
-        assert_eq!(map_keyx_role(""), None);
+        assert_eq!(map_principal_role("admin"), Some(Role::Admin));
+        assert_eq!(map_principal_role("OWNER"), Some(Role::Admin));
+        assert_eq!(map_principal_role("service"), Some(Role::Operator));
+        assert_eq!(map_principal_role("pat"), Some(Role::Viewer));
+        assert_eq!(map_principal_role("viewer"), Some(Role::Viewer));
+        assert_eq!(map_principal_role("publishable"), None);
+        assert_eq!(map_principal_role("restricted"), None);
+        assert_eq!(map_principal_role(""), None);
     }
 
     #[tokio::test]
@@ -448,10 +451,10 @@ mod tests {
             .mount(&server)
             .await;
         let client = keyx_client(server.uri());
-        let out = resolve_via_keyx(&client, "ak_live_xxx").await.unwrap();
+        let out = resolve_via_validator(&client, "ak_live_xxx").await.unwrap();
         let tok = out.unwrap();
         assert_eq!(tok.role, Role::Admin);
-        assert!(tok.name.starts_with("keyx:admin:"));
+        assert!(tok.name.starts_with("verifier:admin:"));
     }
 
     #[tokio::test]
@@ -464,7 +467,7 @@ mod tests {
             .mount(&server)
             .await;
         let client = keyx_client(server.uri());
-        let resp = resolve_via_keyx(&client, "ak_live_xxx").await.unwrap_err();
+        let resp = resolve_via_validator(&client, "ak_live_xxx").await.unwrap_err();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -476,7 +479,7 @@ mod tests {
             .mount(&server)
             .await;
         let client = keyx_client(server.uri());
-        let resp = resolve_via_keyx(&client, "bad").await.unwrap_err();
+        let resp = resolve_via_validator(&client, "bad").await.unwrap_err();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -494,14 +497,14 @@ mod tests {
 
     #[tokio::test]
     async fn cache_miss_returns_none() {
-        let cache = KeyxAuthCache::new(Duration::from_secs(60));
+        let cache = AdminAuthCache::new(Duration::from_secs(60));
         assert!(cache.get("nope").is_none());
         assert_eq!(cache.len(), 0);
     }
 
     #[tokio::test]
     async fn cache_hit_within_ttl_returns_token() {
-        let cache = KeyxAuthCache::new(Duration::from_secs(60));
+        let cache = AdminAuthCache::new(Duration::from_secs(60));
         cache.insert("h".into(), admin_token_stub(Role::Admin));
         let got = cache.get("h").unwrap();
         assert_eq!(got.role, Role::Admin);
@@ -510,7 +513,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_get_after_ttl_elapses_returns_none() {
-        let cache = KeyxAuthCache::new(Duration::from_millis(20));
+        let cache = AdminAuthCache::new(Duration::from_millis(20));
         cache.insert("h".into(), admin_token_stub(Role::Operator));
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(cache.get("h").is_none());
@@ -518,7 +521,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_overwrite_replaces_entry() {
-        let cache = KeyxAuthCache::new(Duration::from_secs(60));
+        let cache = AdminAuthCache::new(Duration::from_secs(60));
         cache.insert("h".into(), admin_token_stub(Role::Viewer));
         cache.insert("h".into(), admin_token_stub(Role::Admin));
         assert_eq!(cache.get("h").unwrap().role, Role::Admin);

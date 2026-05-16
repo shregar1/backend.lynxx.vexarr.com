@@ -261,7 +261,45 @@ async fn async_main() -> anyhow::Result<()> {
     // work. Calls the licence server; on success the result is cached
     // locally so later restarts work offline for up to 7 days. The
     // server-reported tier overrides config.gateway.plan_tier.
-    let license = match crate::license::License::load(&config.license, &config.keyx).await {
+    // Build the shared keyx client first (if configured) so the same
+    // Arc powers licence verification, admin-auth fallback, plugin
+    // HMAC verification, and any other consumer that wants it. The
+    // domain code holds trait objects (`Arc<dyn …Verifier>`) — only
+    // `main.rs` names `KeyxClient` directly.
+    let shared_keyx_client: Option<Arc<crate::integrations::keyx::KeyxClient>> =
+        if config.keyx.is_configured() {
+            let cfg = crate::integrations::keyx::KeyxConfig {
+                base_url: config.keyx.base_url.clone(),
+                service_token: config.keyx.service_token.clone(),
+                license_urn: config.keyx.license_urn.clone(),
+            };
+            crate::integrations::keyx::KeyxClient::new(cfg).ok().map(Arc::new)
+        } else {
+            None
+        };
+
+    let license_verifier: Option<Arc<dyn crate::integrations::LicenseVerifier>> =
+        shared_keyx_client.as_ref().map(|c| {
+            let v: Arc<dyn crate::integrations::LicenseVerifier> = c.clone();
+            v
+        });
+    let token_validator: Option<Arc<dyn crate::integrations::TokenValidator>> =
+        shared_keyx_client.as_ref().map(|c| {
+            let v: Arc<dyn crate::integrations::TokenValidator> = c.clone();
+            v
+        });
+    let hmac_verifier: Option<Arc<dyn crate::integrations::HmacVerifier>> =
+        shared_keyx_client.as_ref().map(|c| {
+            let v: Arc<dyn crate::integrations::HmacVerifier> = c.clone();
+            v
+        });
+
+    let license = match crate::license::License::load(
+        &config.license,
+        license_verifier.as_deref(),
+    )
+    .await
+    {
         Ok(lic) => {
             tracing::info!(
                 customer_id = %lic.customer_id,
@@ -316,24 +354,8 @@ async fn async_main() -> anyhow::Result<()> {
         "loaded persisted state"
     );
 
-    // Build a single keyx client up-front when [keyx] is configured —
-    // shared by the plugin executor (so plugins like hmac-auth can route
-    // verification through keyx) AND the admin-auth middleware (Phase 2).
-    // Cheap: just a reqwest::Client wrapper. License::load constructs its
-    // own internally on a narrower scope; that one is short-lived.
-    let shared_keyx_client = if config.keyx.is_configured() {
-        let cfg = crate::integrations::keyx::KeyxConfig {
-            base_url: config.keyx.base_url.clone(),
-            service_token: config.keyx.service_token.clone(),
-            license_urn: config.keyx.license_urn.clone(),
-        };
-        crate::integrations::keyx::KeyxClient::new(cfg).ok().map(Arc::new)
-    } else {
-        None
-    };
-
     let plugin_ctx = crate::plugins::PluginContext {
-        keyx: shared_keyx_client.clone(),
+        hmac_verifier: hmac_verifier.clone(),
     };
     let plugin_exec = Arc::new(PluginExecutor::new_with_context(license.tier, plugin_ctx));
     plugin_exec.rebuild(&repo).await?;
@@ -441,15 +463,18 @@ async fn async_main() -> anyhow::Result<()> {
             .decode(config.license.payload.trim())
             .map_err(|e| anyhow::anyhow!("license.payload is not valid base64: {e}"))?;
         let signature = config.license.signature.trim().to_string();
-        tracing::info!("licence re-verifier in keyx mode");
-        crate::license::LicenseState::new_keyx(
-            &config.keyx,
+        tracing::info!("licence re-verifier in verified mode");
+        let verifier = license_verifier
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("licence verifier required but absent"))?;
+        crate::license::LicenseState::new_verified(
+            verifier,
             payload,
             signature,
             plan_tier,
             license.active_nodes,
             license.max_nodes,
-        )?
+        )
     } else {
         tracing::info!("licence: unverified mode (no [keyx] config)");
         crate::license::LicenseState::unverified(plan_tier)
@@ -727,16 +752,17 @@ async fn async_main() -> anyhow::Result<()> {
         5_000,
     );
 
-    // Same client the plugin executor already holds — shared so a single
-    // configured keyx instance powers licence verification, admin-auth
-    // fallback, and any plugin (hmac-auth) that opts in.
-    let admin_keyx_client = shared_keyx_client.clone();
+    // Token validator handed to the admin-auth middleware. Same
+    // underlying client the plugin executor and licence refresher use
+    // — exposed here as `Arc<dyn TokenValidator>` so the admin layer
+    // doesn't know what's behind it.
+    let admin_token_validator = token_validator.clone();
 
-    // Optional cache for keyx-validated admin tokens. `0` = no cache,
-    // every admin call hits keyx (instant revocation). `> 0` caps
-    // revocation staleness at the TTL and absorbs polling bursts.
-    let admin_keyx_cache = if config.keyx.admin_cache_ttl_secs > 0 {
-        Some(Arc::new(crate::auth::middleware::KeyxAuthCache::new(
+    // Optional cache for verifier-validated admin tokens. `0` = no
+    // cache, every admin call hits the verifier (instant revocation).
+    // `> 0` caps revocation staleness at the TTL and absorbs bursts.
+    let admin_token_cache = if config.keyx.admin_cache_ttl_secs > 0 {
+        Some(Arc::new(crate::auth::middleware::AdminAuthCache::new(
             std::time::Duration::from_secs(config.keyx.admin_cache_ttl_secs),
         )))
     } else {
@@ -765,8 +791,8 @@ async fn async_main() -> anyhow::Result<()> {
         config.clone(),
         deploy_registry,
         status_cache,
-        admin_keyx_client,
-        admin_keyx_cache,
+        admin_token_validator,
+        admin_token_cache,
     );
 
     let bind_addr = config.gateway.bind_address.clone();

@@ -257,4 +257,4 @@ Two ways to wire the keyx client behind that URN:
 permissive default (Enterprise tier, no quotas, no kill-switch) and
 the gateway runs without contacting any licence service. This is the
 right mode for self-hosted / internal-only / dev deployments. The
-admin `/status` endpoint reports `"licence_mode": "unverified"`.
+admin `/status` endpoint reports `"licence_mode": "verified" | "unverified"`.

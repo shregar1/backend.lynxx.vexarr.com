@@ -1,6 +1,6 @@
 use crate::db::Repository;
 use crate::error::{GatewayError, PluginError};
-use crate::integrations::keyx::{KeyxClient, KeyxConfig};
+use crate::integrations::HmacVerifier;
 use crate::plugins::{BoxBody, Plugin, PluginContext};
 use async_trait::async_trait;
 use axum::http::header::HeaderValue;
@@ -23,26 +23,22 @@ type HmacSha256 = Hmac<Sha256>;
 /// Two verification backends:
 ///   * **local** (default) — the consumer's `api_key` field doubles as
 ///     the HMAC secret (same convention as basic-auth / key-auth);
-///     verified in-process. A real deployment should add a separate
-///     `hmac_secret` column.
-///   * **keyx** — when `keyx_urn` is set in plugin config, the
-///     canonicalised payload + provided signature are POSTed to keyx
-///     `/v1/keys/{urn}/verify-hmac`. Secret lives in keyx; lynxx
-///     never sees it. Two ways to wire the client:
-///       1. `PluginContext.keyx` (preferred — shared across plugins)
-///       2. Self-contained `keyx_base_url` + `keyx_service_token` in
-///          plugin config (fallback for cases where a per-plugin
-///          credential is needed)
+///     verified in-process.
+///   * **remote** — when `keyx_urn` is set in plugin config AND
+///     `PluginContext.hmac_verifier` is wired in, the canonicalised
+///     payload + provided signature are forwarded to the verifier
+///     (keyx today; any [`HmacVerifier`] tomorrow). Secret lives in
+///     the backend; lynxx never sees it.
 pub struct HmacAuthPlugin {
     repo: Option<Arc<dyn Repository>>,
     algorithms: Vec<String>,
     clock_skew: i64,
     validate_body: bool,
-    keyx: Option<KeyxBackend>,
+    remote: Option<RemoteBackend>,
 }
 
-struct KeyxBackend {
-    client: Arc<KeyxClient>,
+struct RemoteBackend {
+    verifier: Arc<dyn HmacVerifier>,
     urn: String,
 }
 
@@ -74,67 +70,39 @@ impl HmacAuthPlugin {
             .get("validate_request_body")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let keyx = build_keyx_backend(cfg, ctx)?;
+        let remote = build_remote_backend(cfg, ctx)?;
 
         Ok(Self {
             repo,
             algorithms,
             clock_skew,
             validate_body,
-            keyx,
+            remote,
         })
     }
 }
 
-/// Construct the keyx backend if and only if the plugin config opts in
-/// via `keyx_urn`. When opted in, prefer the shared
-/// `PluginContext.keyx` over a self-contained config.
-fn build_keyx_backend(
+/// Build the remote backend if and only if the plugin config opts in
+/// via `keyx_urn` AND the shared `PluginContext.hmac_verifier` is
+/// configured. (The legacy self-contained per-plugin config has been
+/// dropped — wire a verifier into the executor instead.)
+fn build_remote_backend(
     cfg: &serde_json::Value,
     ctx: &PluginContext,
-) -> Result<Option<KeyxBackend>, GatewayError> {
+) -> Result<Option<RemoteBackend>, GatewayError> {
     let urn = match cfg.get("keyx_urn").and_then(|v| v.as_str()) {
         Some(u) if !u.trim().is_empty() => u.trim().to_string(),
         _ => return Ok(None),
     };
-
-    if let Some(client) = ctx.keyx.as_ref() {
-        return Ok(Some(KeyxBackend {
-            client: client.clone(),
-            urn,
-        }));
-    }
-
-    let base = cfg
-        .get("keyx_base_url")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.trim().is_empty());
-    let token = cfg
-        .get("keyx_service_token")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.trim().is_empty());
-    let (base, token) = match (base, token) {
-        (Some(b), Some(t)) => (b.trim().to_string(), t.trim().to_string()),
-        _ => {
-            return Err(GatewayError::BadRequest(
-                "hmac-auth: keyx_urn set but no keyx client available — \
-                 wire PluginContext.keyx OR supply keyx_base_url + \
-                 keyx_service_token in plugin config".into(),
-            ));
-        }
+    let Some(verifier) = ctx.hmac_verifier.as_ref() else {
+        return Err(GatewayError::BadRequest(
+            "hmac-auth: keyx_urn set but no HmacVerifier in PluginContext — \
+             configure `[keyx]` at gateway level so the executor can build one"
+                .into(),
+        ));
     };
-
-    // The keyx URN field on the client is unused on the verify-hmac path
-    // (each call passes its URN), but KeyxClient::new still requires it
-    // to be non-empty. Reuse the plugin's urn for sensibility.
-    let client = KeyxClient::new(KeyxConfig {
-        base_url: base,
-        service_token: token,
-        license_urn: urn.clone(),
-    })
-    .map_err(|e| GatewayError::BadRequest(format!("hmac-auth: keyx client: {e}")))?;
-    Ok(Some(KeyxBackend {
-        client: Arc::new(client),
+    Ok(Some(RemoteBackend {
+        verifier: verifier.clone(),
         urn,
     }))
 }
@@ -269,18 +237,18 @@ impl Plugin for HmacAuthPlugin {
             None
         };
 
-        match &self.keyx {
+        match &self.remote {
             Some(backend) => {
                 let sig_hex = hex_encode(&provided_sig);
                 match backend
-                    .client
+                    .verifier
                     .verify_hmac(&backend.urn, canon.as_bytes(), &sig_hex)
                     .await
                 {
                     Ok(true) => {}
                     Ok(false) => return Err(unauthorized("signature mismatch")),
                     Err(e) => {
-                        tracing::debug!(error = %e, "keyx verify_hmac failed");
+                        tracing::debug!(error = %e, "remote verify_hmac failed");
                         return Err(unauthorized("hmac verify backend error"));
                     }
                 }
@@ -378,15 +346,19 @@ mod tests {
         })
     }
 
-    fn keyx_client_arc(uri: String) -> Arc<KeyxClient> {
-        Arc::new(
-            KeyxClient::new(KeyxConfig {
-                base_url: uri,
-                service_token: "svc".into(),
-                license_urn: "00000000-0000-0000-0000-0000000000aa".into(),
-            })
-            .unwrap(),
-        )
+    /// Construct a keyx-backed `Arc<dyn HmacVerifier>` for use in
+    /// `PluginContext.hmac_verifier`. Tests don't otherwise know it's
+    /// keyx behind the trait object — production main.rs is the same
+    /// shape.
+    fn hmac_verifier_arc(uri: String) -> Arc<dyn HmacVerifier> {
+        use crate::integrations::keyx::{KeyxClient, KeyxConfig};
+        let c = KeyxClient::new(KeyxConfig {
+            base_url: uri,
+            service_token: "svc".into(),
+            license_urn: "00000000-0000-0000-0000-0000000000aa".into(),
+        })
+        .unwrap();
+        Arc::new(c)
     }
 
     fn req_with_hmac_header(b64_sig: &str) -> Request<Body> {
@@ -424,7 +396,7 @@ mod tests {
             .await;
 
         let ctx = PluginContext {
-            keyx: Some(keyx_client_arc(server.uri())),
+            hmac_verifier: Some(hmac_verifier_arc(server.uri())),
         };
         let plugin = HmacAuthPlugin::from_config(&cfg_keyx_urn_only(), None, &ctx).unwrap();
         let sig_b64 = B64.encode(b"any-binary-sig");
@@ -441,7 +413,7 @@ mod tests {
             .await;
 
         let ctx = PluginContext {
-            keyx: Some(keyx_client_arc(server.uri())),
+            hmac_verifier: Some(hmac_verifier_arc(server.uri())),
         };
         let plugin = HmacAuthPlugin::from_config(&cfg_keyx_urn_only(), None, &ctx).unwrap();
         let mut req = req_with_hmac_header(&B64.encode(b"tampered"));
@@ -453,7 +425,7 @@ mod tests {
     async fn keyx_mode_falls_back_to_unauthorized_on_transport_failure() {
         // Server doesn't exist on this port — transport-level fail.
         let ctx = PluginContext {
-            keyx: Some(keyx_client_arc("http://127.0.0.1:1".into())),
+            hmac_verifier: Some(hmac_verifier_arc("http://127.0.0.1:1".into())),
         };
         let plugin = HmacAuthPlugin::from_config(&cfg_keyx_urn_only(), None, &ctx).unwrap();
         let mut req = req_with_hmac_header(&B64.encode(b"x"));
@@ -462,38 +434,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn self_contained_keyx_config_works_without_context_client() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(envelope(true)))
-            .mount(&server)
-            .await;
-        let cfg = serde_json::json!({
-            "validate_request_body": false,
-            "keyx_urn": "00000000-0000-0000-0000-0000000000bb",
-            "keyx_base_url": server.uri(),
-            "keyx_service_token": "svc",
-        });
-        // No keyx in context — plugin should construct its own client.
-        let plugin = HmacAuthPlugin::from_config(&cfg, None, &PluginContext::default()).unwrap();
-        let mut req = req_with_hmac_header(&B64.encode(b"x"));
-        plugin.on_request(&mut req).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn keyx_urn_with_no_client_or_self_contained_config_errors() {
+    async fn keyx_urn_without_context_verifier_errors() {
         let res = HmacAuthPlugin::from_config(
             &cfg_keyx_urn_only(),
             None,
             &PluginContext::default(),
         );
         match res {
-            Ok(_) => panic!("expected an error when keyx_urn is set without a client"),
+            Ok(_) => panic!("expected error when keyx_urn is set without a context verifier"),
             Err(e) => {
                 let msg = format!("{e}");
                 assert!(
-                    msg.contains("keyx"),
-                    "expected error to mention keyx, got: {msg}"
+                    msg.contains("HmacVerifier"),
+                    "expected error to mention HmacVerifier, got: {msg}"
                 );
             }
         }
@@ -509,12 +462,12 @@ mod tests {
             &PluginContext::default(),
         )
         .unwrap();
-        assert!(plugin.keyx.is_none());
+        assert!(plugin.remote.is_none());
         let mut req = req_with_hmac_header(&B64.encode(b"x"));
         let err = plugin.on_request(&mut req).await.unwrap_err();
         // Local mode without repo = "no repository" internal error path,
         // not a signature failure — that's fine, we're just asserting
-        // the keyx branch wasn't taken.
+        // the remote branch wasn't taken.
         assert!(matches!(err, PluginError::Internal(_) | PluginError::Unauthorized(_)));
     }
 
