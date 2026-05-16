@@ -156,6 +156,7 @@ impl License {
     }
 
     async fn load_via_legacy(license_cfg: &LicenseSettings) -> Result<Self, LicenseError> {
+        legacy_mode_deprecation_warn_once();
         let api_key = match env::var("LYNXX_API_KEY").ok() {
             Some(k) if !k.trim().is_empty() => k,
             _ => {
@@ -498,6 +499,23 @@ fn spawn_keyx_refresher(state: LicenseState) {
                 }
             }
         }
+    });
+}
+
+/// One-shot warning fired the first time legacy licence mode is
+/// entered in this process. Lets operators see in their logs that
+/// they're on a path slated for removal without spamming every
+/// re-verify cycle. Removal happens in a future major; the timeline
+/// is "once all known customers have cut over to keyx".
+fn legacy_mode_deprecation_warn_once() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            "DEPRECATED: legacy licence mode active (LYNXX_API_KEY / \
+             LYNXX_LICENSE_VERIFY_URL / LYNXX_BASE_URL). This path will \
+             be removed in a future major version. Migrate to keyx — see \
+             docs/keyx-licence-setup.md."
+        );
     });
 }
 

@@ -263,6 +263,21 @@ Two ways to wire the keyx client behind that URN:
 - Without `keyx_urn`, the plugin behaves exactly as before (local
   consumer secret, computed in-process)
 
+## Heads-up: legacy mode is deprecated
+
+The first time a gateway boots in legacy mode (LYNXX_API_KEY against
+the billing server) it logs:
+
+```
+WARN  DEPRECATED: legacy licence mode active … will be removed in a
+      future major version. Migrate to keyx — see
+      docs/keyx-licence-setup.md.
+```
+
+The path still works exactly as before; the warning fires once per
+process so it doesn't spam every re-verify cycle. Plan to cut over
+before the next major release.
+
 ## Reverting to legacy mode
 
 Remove all four of these from your config / env:
