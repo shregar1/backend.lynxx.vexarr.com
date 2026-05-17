@@ -199,19 +199,30 @@ pub async fn proxy_handler(
     mut req: Request<Body>,
 ) -> Result<Response<Body>, GatewayError> {
     let start = Instant::now();
-    let path = req.uri().path().to_string();
-    let method = req.method().as_str().to_string();
+    // Clone the `Uri` once at the top so `path` / `query_string` can be
+    // borrowed `&str` for the rest of the function without holding an
+    // immutable borrow on `req` (which is mutated downstream). Internally
+    // `Uri` wraps refcounted `Bytes`, so this is two atomic increments
+    // (~10ns) and avoids the heap allocation that
+    // `req.uri().path().to_string()` would do per request.
+    let uri = req.uri().clone();
+    let path: &str = uri.path();
+    let query_string: Option<&str> = uri.query();
+    // `Method` is a small enum — clone is cheap for the standard verbs
+    // (no allocation) and we need it owned so `method.as_str()` borrows
+    // from a local rather than from `req`.
+    let method_obj = req.method().clone();
+    let method: &str = method_obj.as_str();
     // HTTP/1.1 sends the hostname in the `Host` header; HTTP/2 uses the
-    // `:authority` pseudo-header which hyper maps into `req.uri().host()`.
+    // `:authority` pseudo-header which hyper maps into `uri.host()`.
     // Check both so route matching works regardless of protocol version.
     let host = req
         .headers()
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(|h| h.split(':').next().unwrap_or(h).to_string())
-        .or_else(|| req.uri().host().map(|h| h.to_string()));
+        .or_else(|| uri.host().map(|h| h.to_string()));
 
-    let query_string = req.uri().query().map(|q| q.to_string());
     let peer_ip_early = req
         .extensions()
         .get::<std::net::SocketAddr>()
@@ -223,18 +234,18 @@ pub async fn proxy_handler(
         let svc = state.route_table.match_by_host(h)?;
         let route = state
             .route_table
-            .match_route_for_service(&svc.id, &path, &method)
+            .match_route_for_service(&svc.id, path, method)
             .unwrap_or_else(|| crate::models::Route::passthrough(svc.id));
         Some((route, svc))
     });
 
     let (route, service) = match host_match.or_else(|| {
         state.route_table.match_route_full(
-            &path,
-            &method,
+            path,
+            method,
             host.as_deref(),
             Some(req.headers()),
-            query_string.as_deref(),
+            query_string,
         )
     }) {
         Some(pair) => pair,
@@ -243,26 +254,28 @@ pub async fn proxy_handler(
                 "lynxx_requests_total",
                 "service" => "-",
                 "route" => "-",
-                "method" => method.clone(),
+                "method" => method.to_string(),
                 "status" => "no_route",
                 "target" => "-",
             )
             .increment(1);
-            state.log_writer.log(&method, &path, &peer_ip_early, None, None, None, None, start.elapsed().as_millis() as i64, "error", "no matching route");
+            state.log_writer.log(method, path, &peer_ip_early, None, None, None, None, start.elapsed().as_millis() as i64, "error", "no matching route");
             // Browsers (Accept: text/html) get a branded page with instructions
             // for registering the missing route. API/SDK callers fall through
             // to the existing JSON error body so machine parsers don't break.
             if crate::proxy::error_pages::wants_html(req.headers()) {
-                return Ok(crate::proxy::error_pages::render_route_not_found(&path));
+                return Ok(crate::proxy::error_pages::render_route_not_found(path));
             }
-            return Err(GatewayError::RouteNotFound(path));
+            return Err(GatewayError::RouteNotFound(path.to_string()));
         }
     };
 
     let svc_name = service.name.clone();
     let route_id = route.id.to_string();
-    let log_method = method.clone();
-    let log_path = path.clone();
+    // `method` and `path` are &str borrowed from owned locals (method_obj /
+    // uri) at the top of this function, so they remain valid through every
+    // downstream call. No need to allocate `log_method` / `log_path`
+    // copies — pass `method` / `path` directly to `log_writer.log()`.
     let log_svc_id = Some(service.id);
     let log_route_id = Some(route.id);
     let log_project_id = service.project_id;
@@ -272,12 +285,12 @@ pub async fn proxy_handler(
             "lynxx_requests_total",
             "service" => svc_name.clone(),
             "route" => route_id.clone(),
-            "method" => method.clone(),
+            "method" => method.to_string(),
             "status" => "health_gated",
             "target" => "-",
         )
         .increment(1);
-        state.log_writer.log(&method, &path, &peer_ip_early, log_svc_id, log_route_id, log_project_id, Some(503), start.elapsed().as_millis() as i64, "error", "health gated — no healthy targets");
+        state.log_writer.log(method, path, &peer_ip_early, log_svc_id, log_route_id, log_project_id, Some(503), start.elapsed().as_millis() as i64, "error", "health gated — no healthy targets");
         return Err(GatewayError::ServiceUnavailable(format!(
             "service {} has no healthy targets",
             service.name
@@ -293,12 +306,12 @@ pub async fn proxy_handler(
             "lynxx_requests_total",
             "service" => svc_name.clone(),
             "route" => route_id.clone(),
-            "method" => method.clone(),
+            "method" => method.to_string(),
             "status" => "circuit_open",
             "target" => "-",
         )
         .increment(1);
-        state.log_writer.log(&method, &path, &peer_ip_early, log_svc_id, log_route_id, log_project_id, Some(503), start.elapsed().as_millis() as i64, "error", "circuit breaker open");
+        state.log_writer.log(method, path, &peer_ip_early, log_svc_id, log_route_id, log_project_id, Some(503), start.elapsed().as_millis() as i64, "error", "circuit breaker open");
         return Err(GatewayError::CircuitOpen(format!(
             "service {} circuit breaker open",
             service.name
@@ -314,12 +327,12 @@ pub async fn proxy_handler(
             "lynxx_requests_total",
             "service" => svc_name.clone(),
             "route" => route_id.clone(),
-            "method" => method.clone(),
+            "method" => method.to_string(),
             "status" => "license_revoked",
             "target" => "-",
         )
         .increment(1);
-        state.log_writer.log(&method, &path, &peer_ip_early, log_svc_id, log_route_id, log_project_id, Some(402), start.elapsed().as_millis() as i64, "error", "license revoked");
+        state.log_writer.log(method, path, &peer_ip_early, log_svc_id, log_route_id, log_project_id, Some(402), start.elapsed().as_millis() as i64, "error", "license revoked");
         return Err(GatewayError::LicenseRevoked);
     }
 
@@ -329,12 +342,12 @@ pub async fn proxy_handler(
             "lynxx_requests_total",
             "service" => svc_name.clone(),
             "route" => route_id.clone(),
-            "method" => method.clone(),
+            "method" => method.to_string(),
             "status" => "quota_exceeded",
             "target" => "-",
         )
         .increment(1);
-        state.log_writer.log(&method, &path, &peer_ip_early, log_svc_id, log_route_id, log_project_id, Some(429), start.elapsed().as_millis() as i64, "error", "quota exceeded");
+        state.log_writer.log(method, path, &peer_ip_early, log_svc_id, log_route_id, log_project_id, Some(429), start.elapsed().as_millis() as i64, "error", "quota exceeded");
         return Err(GatewayError::QuotaExceeded);
     }
     let is_overage = quota_result == crate::quota::QuotaResult::Overage;
@@ -380,7 +393,7 @@ pub async fn proxy_handler(
     });
     let lb_ctx = RequestContext {
         client_ip: Some(client_ip_owned.as_str()),
-        uri_path: Some(path.as_str()),
+        uri_path: Some(path),
         sticky_cookie: sticky_cookie_owned.as_deref(),
         header_hash_value: header_hash_owned.as_deref(),
         query_hash_value: query_hash_owned.as_deref(),
@@ -400,15 +413,17 @@ pub async fn proxy_handler(
 
     // Compute upstream_url up-front so we can attach it to the MatchContext
     // before plugins run; the recorder needs it to populate `Recording.upstream_url`.
-    let upstream_path = state.route_table.resolve_upstream_path(&route, &path);
-    let query = req.uri().query().map(|q| q.to_string());
+    let upstream_path = state.route_table.resolve_upstream_path(&route, path);
+    // Reuse the `query_string: Option<&str>` borrowed from the owned `uri`
+    // at the top of the function — saves the redundant `to_string()` that
+    // the original code did here just to satisfy the downstream &str use.
     let trimmed_base = upstream_base.trim_end_matches('/');
     let mut upstream_url = String::with_capacity(
-        trimmed_base.len() + upstream_path.len() + query.as_ref().map(|q| q.len() + 1).unwrap_or(0),
+        trimmed_base.len() + upstream_path.len() + query_string.map(|q| q.len() + 1).unwrap_or(0),
     );
     upstream_url.push_str(trimmed_base);
     upstream_url.push_str(&upstream_path);
-    if let Some(q) = &query {
+    if let Some(q) = query_string {
         upstream_url.push('?');
         upstream_url.push_str(q);
     }
@@ -483,7 +498,7 @@ pub async fn proxy_handler(
                 root,
                 &service.index_file,
                 service.spa_fallback,
-                &path,
+                path,
                 accept_enc,
                 &serve_opts,
             )
@@ -506,7 +521,7 @@ pub async fn proxy_handler(
                 "lynxx_requests_total",
                 "service" => svc_name.clone(),
                 "route" => route_id.clone(),
-                "method" => method.clone(),
+                "method" => method.to_string(),
                 "status" => bucket,
                 "target" => "static",
             )
@@ -515,12 +530,12 @@ pub async fn proxy_handler(
                 "lynxx_request_duration_seconds",
                 "service" => svc_name,
                 "route" => route_id,
-                "method" => method,
+                "method" => method.to_string(),
                 "target" => "static",
             )
             .record(start.elapsed().as_secs_f64());
 
-            state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, Some(file_resp.status().as_u16()), start.elapsed().as_millis() as i64, "info", "");
+            state.log_writer.log(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, Some(file_resp.status().as_u16()), start.elapsed().as_millis() as i64, "info", "");
             return Ok(file_resp);
         }
     }
@@ -538,7 +553,7 @@ pub async fn proxy_handler(
                 "lynxx_requests_total",
                 "service" => svc_name.clone(),
                 "route" => route_id.clone(),
-                "method" => method.clone(),
+                "method" => method.to_string(),
                 "status" => status_label,
                 "target" => target_label.clone(),
             )
@@ -547,13 +562,13 @@ pub async fn proxy_handler(
                 "lynxx_request_duration_seconds",
                 "service" => svc_name,
                 "route" => route_id,
-                "method" => method,
+                "method" => method.to_string(),
                 "target" => target_label,
             )
             .record(start.elapsed().as_secs_f64());
             let ws_status = result.as_ref().ok().map(|r| r.status().as_u16());
             let ws_level = if result.is_err() { "error" } else { "info" };
-            state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, ws_status, start.elapsed().as_millis() as i64, ws_level, "");
+            state.log_writer.log(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, ws_status, start.elapsed().as_millis() as i64, ws_level, "");
             return result;
         }
         ProtocolKind::GrpcWeb => {
@@ -575,7 +590,7 @@ pub async fn proxy_handler(
                 "lynxx_requests_total",
                 "service" => svc_name.clone(),
                 "route" => route_id.clone(),
-                "method" => method.clone(),
+                "method" => method.to_string(),
                 "status" => status_label,
                 "target" => target_label.clone(),
             )
@@ -584,13 +599,13 @@ pub async fn proxy_handler(
                 "lynxx_request_duration_seconds",
                 "service" => svc_name,
                 "route" => route_id,
-                "method" => method,
+                "method" => method.to_string(),
                 "target" => target_label,
             )
             .record(start.elapsed().as_secs_f64());
             let gw_status = result.as_ref().ok().map(|r| r.status().as_u16());
             let gw_level = if result.is_err() { "error" } else { "info" };
-            state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, gw_status, start.elapsed().as_millis() as i64, gw_level, "");
+            state.log_writer.log(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, gw_status, start.elapsed().as_millis() as i64, gw_level, "");
             return result;
         }
         ProtocolKind::Grpc => {
@@ -611,7 +626,7 @@ pub async fn proxy_handler(
                 "lynxx_requests_total",
                 "service" => svc_name.clone(),
                 "route" => route_id.clone(),
-                "method" => method.clone(),
+                "method" => method.to_string(),
                 "status" => status_label,
                 "target" => target_label.clone(),
             )
@@ -620,13 +635,13 @@ pub async fn proxy_handler(
                 "lynxx_request_duration_seconds",
                 "service" => svc_name,
                 "route" => route_id,
-                "method" => method,
+                "method" => method.to_string(),
                 "target" => target_label,
             )
             .record(start.elapsed().as_secs_f64());
             let grpc_status = result.as_ref().ok().map(|r| r.status().as_u16());
             let grpc_level = if result.is_err() { "error" } else { "info" };
-            state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, grpc_status, start.elapsed().as_millis() as i64, grpc_level, "");
+            state.log_writer.log(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, grpc_status, start.elapsed().as_millis() as i64, grpc_level, "");
             return result;
         }
         ProtocolKind::Http => {}
@@ -687,12 +702,12 @@ pub async fn proxy_handler(
                         "lynxx_requests_total",
                         "service" => svc_name.clone(),
                         "route" => route_id.clone(),
-                        "method" => method.clone(),
+                        "method" => method.to_string(),
                         "status" => "5xx",
                         "target" => target_label.clone(),
                     )
                     .increment(1);
-                    state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, None, start.elapsed().as_millis() as i64, "error", &format!("unix socket: {e}"));
+                    state.log_writer.log(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, None, start.elapsed().as_millis() as i64, "error", &format!("unix socket: {e}"));
                     return Err(e);
                 }
             };
@@ -702,7 +717,7 @@ pub async fn proxy_handler(
             let resp_body = match axum::body::to_bytes(Body::new(incoming), usize::MAX).await {
                 Ok(b) => b,
                 Err(e) => {
-                    state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, None, start.elapsed().as_millis() as i64, "error", &format!("unix body read: {e}"));
+                    state.log_writer.log(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, None, start.elapsed().as_millis() as i64, "error", &format!("unix body read: {e}"));
                     return Err(GatewayError::UpstreamError(format!(
                         "unix body read: {e}"
                     )));
@@ -753,7 +768,7 @@ pub async fn proxy_handler(
                 "lynxx_requests_total",
                 "service" => svc_name.clone(),
                 "route" => route_id.clone(),
-                "method" => method.clone(),
+                "method" => method.to_string(),
                 "status" => bucket,
                 "target" => target_label.clone(),
             )
@@ -762,13 +777,13 @@ pub async fn proxy_handler(
                 "lynxx_request_duration_seconds",
                 "service" => svc_name,
                 "route" => route_id,
-                "method" => method,
+                "method" => method.to_string(),
                 "target" => target_label,
             )
             .record(start.elapsed().as_secs_f64());
 
             let unix_level = if status.is_server_error() { "error" } else { "info" };
-            state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, Some(status.as_u16()), start.elapsed().as_millis() as i64, unix_level, "");
+            state.log_writer.log(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, Some(status.as_u16()), start.elapsed().as_millis() as i64, unix_level, "");
             return Ok(final_resp);
         }
     }
@@ -975,11 +990,11 @@ pub async fn proxy_handler(
                     let mut retry_url = String::with_capacity(
                         retry_base.len()
                             + upstream_path.len()
-                            + query.as_ref().map(|q| q.len() + 1).unwrap_or(0),
+                            + query_string.map(|q| q.len() + 1).unwrap_or(0),
                     );
                     retry_url.push_str(retry_base);
                     retry_url.push_str(&upstream_path);
-                    if let Some(q) = &query {
+                    if let Some(q) = query_string {
                         retry_url.push('?');
                         retry_url.push_str(q);
                     }
@@ -1036,7 +1051,7 @@ pub async fn proxy_handler(
                 "lynxx_requests_total",
                 "service" => svc_name.clone(),
                 "route" => route_id.clone(),
-                "method" => method.clone(),
+                "method" => method.to_string(),
                 "status" => "5xx",
                 "target" => target_label.clone(),
             )
@@ -1045,7 +1060,7 @@ pub async fn proxy_handler(
                 "lynxx_request_duration_seconds",
                 "service" => svc_name.clone(),
                 "route" => route_id.clone(),
-                "method" => method.clone(),
+                "method" => method.to_string(),
                 "target" => target_label.clone(),
             )
             .record(start.elapsed().as_secs_f64());
@@ -1054,7 +1069,7 @@ pub async fn proxy_handler(
                 &svc_name,
                 format!("upstream send error: {last_err}"),
             );
-            state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, None, start.elapsed().as_millis() as i64, "error", &last_err);
+            state.log_writer.log(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, None, start.elapsed().as_millis() as i64, "error", &last_err);
             return Err(GatewayError::UpstreamError(last_err));
         }
     };
@@ -1077,7 +1092,7 @@ pub async fn proxy_handler(
                 "lynxx_requests_total",
                 "service" => svc_name.clone(),
                 "route" => route_id.clone(),
-                "method" => method.clone(),
+                "method" => method.to_string(),
                 "status" => "5xx",
                 "target" => target_label.clone(),
             )
@@ -1086,7 +1101,7 @@ pub async fn proxy_handler(
                 "lynxx_request_duration_seconds",
                 "service" => svc_name.clone(),
                 "route" => route_id.clone(),
-                "method" => method.clone(),
+                "method" => method.to_string(),
                 "target" => target_label.clone(),
             )
             .record(start.elapsed().as_secs_f64());
@@ -1095,7 +1110,7 @@ pub async fn proxy_handler(
                 &svc_name,
                 format!("upstream body error: {e}"),
             );
-            state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, None, start.elapsed().as_millis() as i64, "error", &format!("upstream body error: {e}"));
+            state.log_writer.log(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, None, start.elapsed().as_millis() as i64, "error", &format!("upstream body error: {e}"));
             return Err(GatewayError::UpstreamError(e.to_string()));
         }
     };
@@ -1205,7 +1220,7 @@ pub async fn proxy_handler(
             "lynxx_requests_total",
             "service" => svc_name.clone(),
             "route" => route_id.clone(),
-            "method" => method.clone(),
+            "method" => method.to_string(),
             "status" => bucket,
             "target" => target_label.clone(),
         )
@@ -1214,13 +1229,13 @@ pub async fn proxy_handler(
             "lynxx_request_duration_seconds",
             "service" => svc_name,
             "route" => route_id,
-            "method" => method,
+            "method" => method.to_string(),
             "target" => target_label,
         )
         .record(start.elapsed().as_secs_f64());
 
         let http_level = if status.is_server_error() { "error" } else { "info" };
-        state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, Some(status.as_u16()), start.elapsed().as_millis() as i64, http_level, "");
+        state.log_writer.log(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, Some(status.as_u16()), start.elapsed().as_millis() as i64, http_level, "");
     }
 
     Ok(final_resp)
