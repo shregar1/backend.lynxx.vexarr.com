@@ -270,7 +270,7 @@ async fn reconcile(discovered: &[DiscoveredService], repo: &Arc<dyn Repository>)
 
         let service = Service {
             id: service_id,
-            name: d.name.clone(),
+            name: d.name.clone().into(),
             url: d.url.clone(),
             retries: d.retries,
             connect_timeout_ms: d.connect_timeout_ms,

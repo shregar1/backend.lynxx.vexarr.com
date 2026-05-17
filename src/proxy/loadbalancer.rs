@@ -677,7 +677,7 @@ mod tests {
             .map(|i| Target {
                 id: Uuid::new_v4(),
                 service_id: Uuid::nil(),
-                url: format!("http://host-{i}:8080"),
+                url: format!("http://host-{i}:8080").into(),
                 weight: 1,
                 enabled: true,
                 zone: None,
@@ -695,7 +695,7 @@ mod tests {
             .map(|(i, &w)| Target {
                 id: Uuid::new_v4(),
                 service_id: Uuid::nil(),
-                url: format!("http://host-{i}:8080"),
+                url: format!("http://host-{i}:8080").into(),
                 weight: w,
                 enabled: true,
                 zone: None,
@@ -749,7 +749,7 @@ mod tests {
         let ctx = default_ctx();
         for _ in 0..10 {
             let t = lb.pick(None, &ctx).unwrap();
-            assert_ne!(t.target.url, "http://host-0:8080");
+            assert_ne!(&*t.target.url, "http://host-0:8080");
         }
     }
 
@@ -775,7 +775,7 @@ mod tests {
         lb.targets[2].in_flight.store(0, Ordering::Relaxed);
         let ctx = default_ctx();
         let picked = lb.pick(None, &ctx).unwrap();
-        assert_eq!(picked.target.url, "http://host-2:8080");
+        assert_eq!(&*picked.target.url, "http://host-2:8080");
     }
 
     // ── RandomChoose (P2C) ──
@@ -793,7 +793,7 @@ mod tests {
         let mut picked_2 = 0;
         for _ in 0..100 {
             let t = lb.pick(None, &ctx).unwrap();
-            if t.target.url == "http://host-2:8080" {
+            if &*t.target.url == "http://host-2:8080" {
                 picked_2 += 1;
             }
         }
@@ -806,7 +806,7 @@ mod tests {
         let targets = make_targets(1);
         let lb = ServiceLoadBalancer::new(LbStrategy::RandomChoose, targets);
         let t = lb.pick(None, &default_ctx()).unwrap();
-        assert_eq!(t.target.url, "http://host-0:8080");
+        assert_eq!(&*t.target.url, "http://host-0:8080");
     }
 
     #[test]
@@ -824,7 +824,7 @@ mod tests {
         let ctx = default_ctx();
         for _ in 0..10 {
             let t = lb.pick(None, &ctx).unwrap();
-            assert_eq!(t.target.url, "http://host-0:8080");
+            assert_eq!(&*t.target.url, "http://host-0:8080");
         }
     }
 
@@ -835,7 +835,7 @@ mod tests {
         lb.targets[0].healthy.store(false, Ordering::Relaxed);
         let ctx = default_ctx();
         let t = lb.pick(None, &ctx).unwrap();
-        assert_eq!(t.target.url, "http://host-1:8080");
+        assert_eq!(&*t.target.url, "http://host-1:8080");
     }
 
     #[test]
@@ -845,7 +845,7 @@ mod tests {
         lb.targets[0].healthy.store(false, Ordering::Relaxed);
         lb.targets[1].healthy.store(false, Ordering::Relaxed);
         let t = lb.pick(None, &default_ctx()).unwrap();
-        assert_eq!(t.target.url, "http://host-2:8080");
+        assert_eq!(&*t.target.url, "http://host-2:8080");
     }
 
     #[test]
@@ -925,7 +925,7 @@ mod tests {
         for _ in 0..20 {
             let t = lb.pick(Some("us-east-1a"), &ctx).unwrap();
             assert!(
-                t.target.url == "http://host-0:8080" || t.target.url == "http://host-1:8080",
+                &*t.target.url == "http://host-0:8080" || &*t.target.url == "http://host-1:8080",
                 "expected zone-a target, got {}",
                 t.target.url
             );
@@ -940,7 +940,7 @@ mod tests {
         targets[2].zone = Some("zone-a".to_string());
         let lb = ServiceLoadBalancer::new(LbStrategy::First, targets);
         let t = lb.pick(Some("zone-a"), &default_ctx()).unwrap();
-        assert_eq!(t.target.url, "http://host-1:8080");
+        assert_eq!(&*t.target.url, "http://host-1:8080");
     }
 
     // ── LbStrategy::from_str ──
@@ -1078,7 +1078,7 @@ mod tests {
         let ctx = default_ctx();
         let picked = lb.pick(None, &ctx).unwrap();
         assert_eq!(
-            picked.target.url, "http://host-1:8080",
+            &*picked.target.url, "http://host-1:8080",
             "should pick the target with the lowest response time"
         );
     }
@@ -1097,7 +1097,7 @@ mod tests {
         let ctx = default_ctx();
         let picked = lb.pick(None, &ctx).unwrap();
         assert_eq!(
-            picked.target.url, "http://host-1:8080",
+            &*picked.target.url, "http://host-1:8080",
             "with equal times, should pick the target with fewest in-flight"
         );
     }
@@ -1150,7 +1150,7 @@ mod tests {
         // Zone-aware should restrict to zone-a.
         let picked = lb.pick(Some("us-east-1a"), &ctx).unwrap();
         assert_eq!(
-            picked.target.url, "http://host-1:8080",
+            &*picked.target.url, "http://host-1:8080",
             "zone-aware least-time should pick fastest in zone"
         );
     }
@@ -1174,7 +1174,7 @@ mod tests {
         let ctx = default_ctx();
         for _ in 0..10 {
             let t = lb.pick(None, &ctx).unwrap();
-            assert_eq!(t.target.url, "http://host-1:8080");
+            assert_eq!(&*t.target.url, "http://host-1:8080");
         }
     }
 
@@ -1186,7 +1186,7 @@ mod tests {
         let ctx = default_ctx();
         for _ in 0..10 {
             let t = lb.pick(None, &ctx).unwrap();
-            assert_eq!(t.target.url, "http://host-0:8080");
+            assert_eq!(&*t.target.url, "http://host-0:8080");
         }
     }
 

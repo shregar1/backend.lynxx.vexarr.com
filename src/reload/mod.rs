@@ -174,7 +174,10 @@ async fn diff_services(
     result: &mut ReloadResult,
 ) -> Result<(), GatewayError> {
     let existing = repo.list_services().await?;
-    let by_name: HashMap<String, Service> = existing
+    // Index existing services by name. Use `Arc<str>` as the key (matching
+    // the model field type) so the lookup is a pointer-key hash rather than
+    // re-allocating a `String` per row.
+    let by_name: HashMap<Arc<str>, Service> = existing
         .iter()
         .map(|s| (s.name.clone(), s.clone()))
         .collect();
@@ -182,7 +185,10 @@ async fn diff_services(
         cfg.services.iter().map(|s| s.name.as_str()).collect();
 
     for svc_cfg in &cfg.services {
-        match by_name.get(&svc_cfg.name) {
+        // `by_name` is keyed by `Arc<str>`; `svc_cfg.name` is a `String` from
+        // the config. Look up via &str (Arc<str>: Borrow<str>) to avoid an
+        // alloc and the missing Borrow<String> impl.
+        match by_name.get(svc_cfg.name.as_str()) {
             Some(cur) => {
                 if cur.url != svc_cfg.url
                     || cur.retries != svc_cfg.retries
@@ -258,7 +264,7 @@ async fn diff_services(
     }
 
     for cur in &existing {
-        if cfg_names.contains(cur.name.as_str()) {
+        if cfg_names.contains(&*cur.name) {
             continue;
         }
         match repo.delete_service(&cur.id).await {
@@ -294,9 +300,9 @@ async fn diff_routes(
 ) -> Result<(), GatewayError> {
     // service name -> id, refreshed post-service-diff.
     let services = repo.list_services().await?;
-    let svc_id_by_name: HashMap<String, Uuid> =
+    let svc_id_by_name: HashMap<Arc<str>, Uuid> =
         services.iter().map(|s| (s.name.clone(), s.id)).collect();
-    let svc_name_by_id: HashMap<Uuid, String> =
+    let svc_name_by_id: HashMap<Uuid, Arc<str>> =
         services.iter().map(|s| (s.id, s.name.clone())).collect();
 
     let existing = repo.list_routes().await?;
@@ -310,7 +316,7 @@ async fn diff_routes(
     let mut wanted_keys = std::collections::HashSet::new();
 
     for rt_cfg in &cfg.routes {
-        let Some(service_id) = svc_id_by_name.get(&rt_cfg.service).copied() else {
+        let Some(service_id) = svc_id_by_name.get(rt_cfg.service.as_str()).copied() else {
             result
                 .errors
                 .push(format!("route refs unknown service {}", rt_cfg.service));
@@ -469,7 +475,7 @@ async fn diff_plugins(
     }
 
     for cur in &existing {
-        if cfg_names.contains(cur.name.as_str()) {
+        if cfg_names.contains(&*cur.name) {
             continue;
         }
         match repo.delete_plugin(&cur.id).await {

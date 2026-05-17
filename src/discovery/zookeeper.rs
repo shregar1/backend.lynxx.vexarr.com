@@ -269,7 +269,7 @@ impl ZooKeeperProvider {
             let target = Target {
                 id: target_id,
                 service_id,
-                url: entry.data.url.clone(),
+                url: entry.data.url.clone().into(),
                 weight: entry.data.weight,
                 enabled: true,
                 zone: entry.data.zone.clone(),

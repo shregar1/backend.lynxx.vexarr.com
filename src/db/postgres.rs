@@ -190,7 +190,7 @@ impl Repository for PostgresRepository {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, TRUE, $18, $19)",
         )
         .bind(svc.id)
-        .bind(&svc.name)
+        .bind(&*svc.name)
         .bind(&svc.url)
         .bind(svc.retries as i64)
         .bind(svc.connect_timeout_ms as i64)
@@ -222,7 +222,7 @@ impl Repository for PostgresRepository {
                                  updated_at = $17 \
              WHERE id = $18 AND is_deleted = FALSE",
         )
-        .bind(&svc.name)
+        .bind(&*svc.name)
         .bind(&svc.url)
         .bind(svc.retries as i64)
         .bind(svc.connect_timeout_ms as i64)
@@ -299,7 +299,7 @@ impl Repository for PostgresRepository {
         )
         .bind(target.id)
         .bind(target.service_id)
-        .bind(&target.url)
+        .bind(&*target.url)
         .bind(target.weight as i64)
         .bind(target.enabled)
         .bind(&target.zone)
@@ -315,7 +315,7 @@ impl Repository for PostgresRepository {
         sqlx::query(
             "UPDATE targets SET url = $1, weight = $2, enabled = $3, zone = $4, state = $5, updated_at = $6 WHERE id = $7 AND is_deleted = FALSE",
         )
-        .bind(&target.url)
+        .bind(&*target.url)
         .bind(target.weight as i64)
         .bind(target.enabled)
         .bind(&target.zone)
@@ -2641,7 +2641,10 @@ fn row_to_service(row: sqlx::postgres::PgRow) -> Result<Service, GatewayError> {
 
     Ok(Service {
         id,
-        name: row.try_get("name")?,
+        // sqlx doesn't impl Decode for Arc<str>; decode as String then
+        // convert via the std `impl From<String> for Arc<str>` (one alloc
+        // here on read; per-request clones afterwards are pointer bumps).
+        name: row.try_get::<String, _>("name")?.into(),
         url: row.try_get("url")?,
         retries: retries as u32,
         connect_timeout_ms: connect_timeout_ms as u64,
@@ -2695,7 +2698,8 @@ fn row_to_target(row: sqlx::postgres::PgRow) -> Result<Target, GatewayError> {
     Ok(Target {
         id,
         service_id,
-        url: row.try_get("url")?,
+        // Same Arc<str> decode pattern as Service.name above.
+        url: row.try_get::<String, _>("url")?.into(),
         weight: weight as u32,
         enabled,
         zone,

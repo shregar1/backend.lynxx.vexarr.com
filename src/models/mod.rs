@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::abstractions::IModel;
@@ -62,7 +63,10 @@ impl Project {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Service {
     pub id: Uuid,
-    pub name: String,
+    /// Service name. Stored as `Arc<str>` so per-request clones (every
+    /// proxy hot path emits this as a metric label and tracing field)
+    /// are atomic refcount bumps instead of heap allocations.
+    pub name: Arc<str>,
     pub url: String,
     pub retries: u32,
     pub connect_timeout_ms: u64,
@@ -343,7 +347,11 @@ pub struct Consumer {
 pub struct Target {
     pub id: Uuid,
     pub service_id: Uuid,
-    pub url: String,
+    /// Target URL. Stored as `Arc<str>` because the proxy hot path clones
+    /// this on every request (used as a target_label metric tag, and the
+    /// load balancer's pick result carries it back to the caller). The
+    /// Arc bump is ~5ns vs the ~50ns heap alloc of `String::clone()`.
+    pub url: Arc<str>,
     pub weight: u32,
     pub enabled: bool,
     #[serde(default)]
@@ -387,12 +395,12 @@ pub struct ApiKeyRow {
 }
 
 impl Target {
-    pub fn new(service_id: Uuid, url: String, weight: u32) -> Self {
+    pub fn new(service_id: Uuid, url: impl Into<Arc<str>>, weight: u32) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
             service_id,
-            url,
+            url: url.into(),
             weight: weight.max(1),
             enabled: true,
             zone: None,
@@ -404,11 +412,16 @@ impl Target {
 }
 
 impl Service {
-    pub fn new(name: String, url: String, retries: u32, connect_timeout_ms: u64) -> Self {
+    pub fn new(
+        name: impl Into<Arc<str>>,
+        url: String,
+        retries: u32,
+        connect_timeout_ms: u64,
+    ) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
-            name,
+            name: name.into(),
             url,
             retries,
             connect_timeout_ms,

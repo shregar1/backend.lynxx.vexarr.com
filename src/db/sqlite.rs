@@ -196,7 +196,7 @@ impl Repository for SqliteRepository {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
         )
         .bind(svc.id.to_string())
-        .bind(&svc.name)
+        .bind(&*svc.name)
         .bind(&svc.url)
         .bind(svc.retries as i64)
         .bind(svc.connect_timeout_ms as i64)
@@ -228,7 +228,7 @@ impl Repository for SqliteRepository {
                                  updated_at = ? \
              WHERE id = ? AND is_deleted = 0",
         )
-        .bind(&svc.name)
+        .bind(&*svc.name)
         .bind(&svc.url)
         .bind(svc.retries as i64)
         .bind(svc.connect_timeout_ms as i64)
@@ -305,7 +305,7 @@ impl Repository for SqliteRepository {
         )
         .bind(target.id.to_string())
         .bind(target.service_id.to_string())
-        .bind(&target.url)
+        .bind(&*target.url)
         .bind(target.weight as i64)
         .bind(target.enabled as i64)
         .bind(target.zone.as_deref())
@@ -321,7 +321,7 @@ impl Repository for SqliteRepository {
         sqlx::query(
             "UPDATE targets SET url = ?, weight = ?, enabled = ?, zone = ?, state = ?, updated_at = ? WHERE id = ? AND is_deleted = 0",
         )
-        .bind(&target.url)
+        .bind(&*target.url)
         .bind(target.weight as i64)
         .bind(target.enabled as i64)
         .bind(target.zone.as_deref())
@@ -2758,7 +2758,7 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
             // Service exists — update in place, preserving UUID.
             let updated = Service {
                 id: existing.id,
-                name: svc_cfg.name.clone(),
+                name: svc_cfg.name.clone().into(),
                 url: svc_cfg.url.clone(),
                 retries: svc_cfg.retries,
                 connect_timeout_ms: svc_cfg.connect_timeout_ms,
@@ -2810,7 +2810,7 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
             }
             repo.create_service(&service).await?;
             service_ids.push(service.id);
-            services_by_name.insert(service.name.clone(), service.id);
+            services_by_name.insert(service.name.to_string(), service.id);
             tracing::debug!(name = %svc_cfg.name, id = %service.id, "config seed: created new service");
         }
     }
@@ -2990,7 +2990,10 @@ fn row_to_service(row: sqlx::sqlite::SqliteRow) -> Result<Service, GatewayError>
 
     Ok(Service {
         id: parse_uuid(&id)?,
-        name: row.try_get("name")?,
+        // sqlx doesn't impl Decode for Arc<str>; decode as String then
+        // convert via std `impl From<String> for Arc<str>` (one alloc here
+        // on read; per-request clones afterwards are pointer bumps).
+        name: row.try_get::<String, _>("name")?.into(),
         url: row.try_get("url")?,
         retries: retries as u32,
         connect_timeout_ms: connect_timeout_ms as u64,
@@ -3048,7 +3051,8 @@ fn row_to_target(row: sqlx::sqlite::SqliteRow) -> Result<Target, GatewayError> {
     Ok(Target {
         id: parse_uuid(&id)?,
         service_id: parse_uuid(&service_id)?,
-        url: row.try_get("url")?,
+        // Same Arc<str> decode pattern as Service.name above.
+        url: row.try_get::<String, _>("url")?.into(),
         weight: weight as u32,
         enabled: enabled != 0,
         zone,

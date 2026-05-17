@@ -484,7 +484,7 @@ impl DockerSwarmProvider {
 
         let service = Service {
             id: service_id,
-            name: format!("swarm:{}", parsed.service_name),
+            name: format!("swarm:{}", parsed.service_name).into(),
             url: upstream,
             retries: parsed.retries,
             connect_timeout_ms: parsed.connect_timeout_ms,

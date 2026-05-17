@@ -277,7 +277,7 @@ impl EcsProvider {
         let mut existing_urls: HashMap<String, Uuid> = HashMap::new();
         for t in &existing_targets {
             if existing_ids.contains(&t.id) {
-                existing_urls.insert(t.url.clone(), t.id);
+                existing_urls.insert(t.url.to_string(), t.id);
             }
         }
 
@@ -287,7 +287,7 @@ impl EcsProvider {
                 let target = Target {
                     id: *target_id,
                     service_id: mapping.service_id,
-                    url: url.clone(),
+                    url: url.clone().into(),
                     weight: mapping.weight,
                     enabled: true,
                     zone: None,

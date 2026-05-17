@@ -437,7 +437,7 @@ pub async fn update_service(
 
     let updated = Service {
         id,
-        name: input.name,
+        name: input.name.into(),
         url: input.url,
         retries: input.retries,
         connect_timeout_ms: input.connect_timeout_ms,
@@ -604,8 +604,8 @@ pub async fn list_upstreams(State(state): State<AdminState>) -> Json<UpstreamSta
             targets.push(UpstreamTargetStatus {
                 target_id: ts.target.id,
                 service_id: svc.id,
-                service_name: svc.name.clone(),
-                url: ts.target.url.clone(),
+                service_name: svc.name.to_string(),
+                url: ts.target.url.to_string(),
                 weight: ts.target.weight,
                 enabled: ts.target.enabled,
                 healthy: ts.healthy.load(std::sync::atomic::Ordering::Relaxed),
@@ -851,7 +851,7 @@ pub async fn patch_service(
 
     let updated = Service {
         id,
-        name: input.name.unwrap_or_else(|| existing.name.clone()),
+        name: input.name.unwrap_or_else(|| existing.name.to_string()).into(),
         url: input.url.unwrap_or_else(|| existing.url.clone()),
         retries: input.retries.unwrap_or(existing.retries),
         connect_timeout_ms: input.connect_timeout_ms.unwrap_or(existing.connect_timeout_ms),
@@ -1375,7 +1375,7 @@ pub async fn update_target_handler(
     let updated = Target {
         id: existing.id,
         service_id: existing.service_id,
-        url: input.url.clone().unwrap_or_else(|| existing.url.clone()),
+        url: input.url.clone().unwrap_or_else(|| existing.url.to_string()).into(),
         weight: input.weight.unwrap_or(existing.weight).max(1),
         enabled: input.enabled.unwrap_or(existing.enabled),
         zone: input.zone.or(existing.zone.clone()),

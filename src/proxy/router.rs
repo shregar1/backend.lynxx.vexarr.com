@@ -160,7 +160,7 @@ impl RouteTable {
     pub fn get_service_by_name(&self, name: &str) -> Option<Service> {
         self.services
             .iter()
-            .find(|s| s.name == name)
+            .find(|s| s.name == name.into())
             .map(|s| s.clone())
     }
 

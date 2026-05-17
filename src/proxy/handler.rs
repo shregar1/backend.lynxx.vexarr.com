@@ -437,13 +437,22 @@ pub async fn proxy_handler(
     // Falls back to `service.url` if no targets exist.
     let picked = state.lb.pick(&service.id, state.local_zone.as_deref(), &lb_ctx);
     let mut picked_target_id = picked.as_ref().map(|ts| ts.target.id);
-    let (upstream_base, mut target_label, _in_flight) = match &picked {
-        Some(ts) => {
-            let guard = InFlightGuard::new(ts.clone());
-            (ts.target.url.clone(), ts.target.url.clone(), Some(guard))
-        }
-        None => (service.url.clone(), "-".to_string(), None),
-    };
+    let (upstream_base, mut target_label, _in_flight): (Arc<str>, Arc<str>, _) =
+        match &picked {
+            Some(ts) => {
+                let guard = InFlightGuard::new(ts.clone());
+                (ts.target.url.clone(), ts.target.url.clone(), Some(guard))
+            }
+            // Fallback: no LB targets — use the service's default URL. The
+            // `Arc::from(&str)` allocates once here (cold path; only hit when
+            // a service has no `targets` rows) so downstream consumers can
+            // treat `upstream_base` uniformly as `Arc<str>`.
+            None => (
+                Arc::from(service.url.as_str()),
+                Arc::from("-"),
+                None,
+            ),
+        };
 
     // Compute upstream_url up-front so we can attach it to the MatchContext
     // before plugins run; the recorder needs it to populate `Recording.upstream_url`.

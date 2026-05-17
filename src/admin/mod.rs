@@ -50,7 +50,6 @@ use http_body_util::BodyExt;
 use metrics_exporter_prometheus::PrometheusHandle;
 use routes::AdminState;
 use rust_embed::RustEmbed;
-use serde_json::json;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
@@ -448,7 +447,7 @@ async fn index_handler() -> impl IntoResponse {
 }
 
 async fn api_envelope(req: Request, next: Next) -> Response {
-    use crate::dtos::envelope::{ApiEnvelope, ApiErrorDetail};
+    use crate::dtos::envelope::ApiEnvelope;
 
     let txn_urn = Uuid::new_v4().to_string();
     let timestamp = Utc::now().to_rfc3339();
