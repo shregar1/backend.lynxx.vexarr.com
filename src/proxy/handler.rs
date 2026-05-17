@@ -18,27 +18,7 @@ use axum::extract::State;
 use axum::http::{HeaderName, Request, Response, Uri};
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::time::Instant;
-
-/// When `LYNXX_BENCH_MODE=1` is set in the environment at startup, the
-/// success-path telemetry (per-request prometheus counter + histogram +
-/// access-log write) is skipped. This is intentionally invisible at
-/// runtime — the variable is read exactly once into a `OnceLock` so the
-/// hot-path check is a single atomic load + bool dereference.
-///
-/// Use ONLY for benchmarking against bare-bones gateways like HAProxy
-/// where you want to measure raw proxy throughput without telemetry
-/// overhead. Production deployments should leave this unset.
-#[inline]
-fn bench_mode() -> bool {
-    static B: OnceLock<bool> = OnceLock::new();
-    *B.get_or_init(|| {
-        std::env::var("LYNXX_BENCH_MODE")
-            .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false)
-    })
-}
 
 /// Context attached to the request after the proxy matches a service+route
 /// but before the plugin chain runs. Plugins (notably `request-recorder`)
@@ -82,6 +62,12 @@ pub struct ProxyState {
     pub license: crate::license::LicenseState,
     pub deploy_registry: Option<DeployRegistry>,
     pub local_zone: Option<String>,
+    /// When true, the success-path telemetry block (prometheus counter +
+    /// histogram + access-log write) is skipped. Initialised from
+    /// `config.gateway.minimal_telemetry` at startup — the env-var override
+    /// happens in `config::apply_env_overrides` so this struct only sees
+    /// the resolved value. Per-request cost when false is one bool load.
+    pub minimal_telemetry: bool,
 }
 
 /// Hop-by-hop headers that must not be forwarded to the upstream. RFC 7230 §6.1.
@@ -1206,7 +1192,7 @@ pub async fn proxy_handler(
         }
     }
 
-    if !bench_mode() {
+    if !state.minimal_telemetry {
         let bucket = gw_metrics::status_bucket(status.as_u16());
         metrics::counter!(
             "lynxx_requests_total",

@@ -193,6 +193,21 @@ pub struct GatewaySettings {
     #[serde(default)]
     pub auth_required: bool,
 
+    /// When true, the proxy's per-request telemetry (prometheus counter +
+    /// histogram emission and the access-log write) is skipped on the
+    /// success path. Off by default.
+    ///
+    /// Useful for raw-throughput benchmarks against bare-bones gateways
+    /// (HAProxy, NGINX) where the comparison would otherwise be unfair —
+    /// those gateways emit zero telemetry per request by default. The
+    /// observed delta is ~13% RPS on a 4-core box; not recommended for
+    /// production unless you've replaced the dropped signals with a
+    /// sampling collector at a higher level.
+    ///
+    /// Env override: `LYNXX_MINIMAL_TELEMETRY=1` (or legacy `LYNXX_BENCH_MODE=1`).
+    #[serde(default)]
+    pub minimal_telemetry: bool,
+
     /// Filesystem root for the request-recorder content-addressed store
     /// and the place the admin recording API loads recordings from. When
     /// `None`, the runtime resolves to `~/.lynxx/recordings` (or
@@ -1112,6 +1127,7 @@ fn default_gateway() -> GatewaySettings {
         prewarm_interval_secs: default_prewarm_interval(),
         prewarm_concurrency: default_prewarm_concurrency(),
         auth_required: false,
+        minimal_telemetry: false,
         recordings_directory: None,
         plan_tier: default_plan_tier(),
         local_zone: None,
@@ -1643,6 +1659,8 @@ pub fn spawn_config_watcher<F>(
 ///   * `LYNXX_TELEMETRY_API_KEY` overrides `telemetry.api_key`
 ///   * `OTEL_SERVICE_NAME`       overrides `telemetry.service_name`
 ///   * `FLUXX_OTEL_ENDPOINT`     overrides `telemetry.fluxx_endpoint`
+///   * `LYNXX_MINIMAL_TELEMETRY` overrides `gateway.minimal_telemetry`
+///     (legacy alias: `LYNXX_BENCH_MODE`)
 pub fn apply_env_overrides(config: &mut GatewayConfig) {
     if let Ok(url) = std::env::var("DATABASE_URL") {
         if !url.is_empty() {
@@ -1681,6 +1699,29 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
         if !url.is_empty() {
             config.telemetry.fluxx_endpoint = url;
         }
+    }
+    // Telemetry-skip flag. Reads the new name first; falls back to the
+    // legacy `LYNXX_BENCH_MODE` so existing bench scripts keep working.
+    // Parse "1" / "true" / "yes" as on; everything else (incl. empty) as off.
+    let parse_truthy = |v: &str| {
+        let v = v.to_lowercase();
+        !v.is_empty() && v != "0" && v != "false" && v != "no"
+    };
+    if let Ok(v) = std::env::var("LYNXX_MINIMAL_TELEMETRY") {
+        let on = parse_truthy(&v);
+        if on {
+            tracing::info!("LYNXX_MINIMAL_TELEMETRY env override applied");
+        }
+        config.gateway.minimal_telemetry = on;
+    } else if let Ok(v) = std::env::var("LYNXX_BENCH_MODE") {
+        let on = parse_truthy(&v);
+        if on {
+            tracing::warn!(
+                "LYNXX_BENCH_MODE (legacy) env override applied; prefer LYNXX_MINIMAL_TELEMETRY \
+                 or [gateway].minimal_telemetry in config.toml"
+            );
+        }
+        config.gateway.minimal_telemetry = on;
     }
     if let Ok(url) = std::env::var("KEYX_BASE_URL") {
         if !url.is_empty() {

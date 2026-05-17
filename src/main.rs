@@ -510,6 +510,7 @@ async fn async_main() -> anyhow::Result<()> {
         license: license_state.clone(),
         deploy_registry: Some(deploy_registry.clone()),
         local_zone: None,
+        minimal_telemetry: config.gateway.minimal_telemetry,
     };
 
     // Background connection pre-warmer. Keeps the upstream pool hot so
