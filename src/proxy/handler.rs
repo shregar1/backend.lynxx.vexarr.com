@@ -18,7 +18,27 @@ use axum::extract::State;
 use axum::http::{HeaderName, Request, Response, Uri};
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Instant;
+
+/// When `LYNXX_BENCH_MODE=1` is set in the environment at startup, the
+/// success-path telemetry (per-request prometheus counter + histogram +
+/// access-log write) is skipped. This is intentionally invisible at
+/// runtime — the variable is read exactly once into a `OnceLock` so the
+/// hot-path check is a single atomic load + bool dereference.
+///
+/// Use ONLY for benchmarking against bare-bones gateways like HAProxy
+/// where you want to measure raw proxy throughput without telemetry
+/// overhead. Production deployments should leave this unset.
+#[inline]
+fn bench_mode() -> bool {
+    static B: OnceLock<bool> = OnceLock::new();
+    *B.get_or_init(|| {
+        std::env::var("LYNXX_BENCH_MODE")
+            .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(false)
+    })
+}
 
 /// Context attached to the request after the proxy matches a service+route
 /// but before the plugin chain runs. Plugins (notably `request-recorder`)
@@ -1186,27 +1206,29 @@ pub async fn proxy_handler(
         }
     }
 
-    let bucket = gw_metrics::status_bucket(status.as_u16());
-    metrics::counter!(
-        "lynxx_requests_total",
-        "service" => svc_name.clone(),
-        "route" => route_id.clone(),
-        "method" => method.clone(),
-        "status" => bucket,
-        "target" => target_label.clone(),
-    )
-    .increment(1);
-    metrics::histogram!(
-        "lynxx_request_duration_seconds",
-        "service" => svc_name,
-        "route" => route_id,
-        "method" => method,
-        "target" => target_label,
-    )
-    .record(start.elapsed().as_secs_f64());
+    if !bench_mode() {
+        let bucket = gw_metrics::status_bucket(status.as_u16());
+        metrics::counter!(
+            "lynxx_requests_total",
+            "service" => svc_name.clone(),
+            "route" => route_id.clone(),
+            "method" => method.clone(),
+            "status" => bucket,
+            "target" => target_label.clone(),
+        )
+        .increment(1);
+        metrics::histogram!(
+            "lynxx_request_duration_seconds",
+            "service" => svc_name,
+            "route" => route_id,
+            "method" => method,
+            "target" => target_label,
+        )
+        .record(start.elapsed().as_secs_f64());
 
-    let http_level = if status.is_server_error() { "error" } else { "info" };
-    state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, Some(status.as_u16()), start.elapsed().as_millis() as i64, http_level, "");
+        let http_level = if status.is_server_error() { "error" } else { "info" };
+        state.log_writer.log(&log_method, &log_path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, Some(status.as_u16()), start.elapsed().as_millis() as i64, http_level, "");
+    }
 
     Ok(final_resp)
 }
