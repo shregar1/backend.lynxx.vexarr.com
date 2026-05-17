@@ -1,6 +1,8 @@
 # Head-to-head proxy benchmark — 2026-05-17 (Tier 1 release)
 
 > **Lynxx tested fully loaded** — feature-rich production build with the full plugin runtime (rate-limit, circuit-breaker, JWT, mTLS, HMAC, ACME, audit, OTel, WS/gRPC, deploy-aware retries, plugin chain executor) all compiled in and runtime-available, configured with `[gateway].minimal_telemetry = true` (no per-request prometheus emission or access-log write — same trade-off all reference proxies make by default).
+>
+> **Note**: this report fixes `-c 512` for all gateways. That's *past peak* for every gateway tested. For lynxx's actual peak capacity (≈ 33,600 RPS at -c 128, p99 9.8 ms — within 8% of haproxy's p99 at the same concurrency), see the companion [RESULTS-2026-05-17-peak-sweep.md](./RESULTS-2026-05-17-peak-sweep.md). The 28,761 RPS below is the honest *sustained-under-overload* number, not lynxx's ceiling.
 
 ## Result
 
