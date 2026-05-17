@@ -414,24 +414,31 @@ pub async fn proxy_handler(
     }
 
     // Stash routing context on the request so plugins (e.g. request-recorder)
-    // can read service_id / route_id / upstream_url without re-matching.
-    let consumer_username = req
-        .headers()
-        .get("x-consumer-username")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    req.extensions_mut().insert(MatchContext {
-        service_id: service.id,
-        route_id: route.id,
-        upstream_url: upstream_url.clone(),
-        consumer_username,
-    });
+    // can read service_id / route_id / upstream_url without re-matching. The
+    // only reader is `src/plugins/request_recorder/mod.rs`; if the plugin
+    // executor is empty, no plugin will ever observe this — saves a header
+    // lookup, a `String` alloc, a `String::clone`, and a `Box` allocation on
+    // the no-plugin hot path. `PluginExecutor::is_empty()` is a single
+    // atomic load so the gate is essentially free.
+    if !state.plugins.is_empty() {
+        let consumer_username = req
+            .headers()
+            .get("x-consumer-username")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        req.extensions_mut().insert(MatchContext {
+            service_id: service.id,
+            route_id: route.id,
+            upstream_url: upstream_url.clone(),
+            consumer_username,
+        });
 
-    state
-        .plugins
-        .run_request(&mut req, Some(service.id), Some(route.id))
-        .await
-        .map_err(GatewayError::PluginError)?;
+        state
+            .plugins
+            .run_request(&mut req, Some(service.id), Some(route.id))
+            .await
+            .map_err(GatewayError::PluginError)?;
+    }
 
     // ── Static file serving: short-circuit the proxy path ──
     if service.service_type == "static" {
