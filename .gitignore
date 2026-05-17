@@ -24,3 +24,13 @@ infra/terraform/tfplan
 # Lynxx licence cache (local offline-grace cache, never commit)
 .lynxx/license.cache.json
 dashboard-dist/
+
+# Claude Code per-session scratch worktrees (never commit)
+.claude/worktrees/
+
+# Built dashboard assets (these come from the dashboard repo's build output;
+# tracked there, not here)
+node.dashboard.lynxx.dev/dist/
+
+# Editor / tool backups
+*.bak
